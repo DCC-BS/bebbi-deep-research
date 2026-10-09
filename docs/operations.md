@@ -37,6 +37,20 @@ The embed role needs `/v1/embeddings` on the same endpoint.
 | `RA_FIRECRAWL_URL`, `RA_FIRECRAWL_KEY` **S** | required / empty | Firecrawl v2 `/v2/scrape` |
 | MCP servers | in `presets.yaml` | URL per server, `enabled: false` keeps one configured but unused (statistik is off) |
 
+### Own sources (uploaded files, knowledge bases)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RA_OWN_MAX_FILES` | `10` | uploaded files used per research; more are dropped with a remark in the chat |
+| `RA_OWN_MAX_FILE_CHARS` | `2000000` | extracted text per file; longer texts are cut (remark in the chat) |
+| `RA_OWN_MAX_COLLECTIONS` | `5` | knowledge bases per research |
+
+File texts are stored with the job (`jobs.own_sources`; drafts keep a 1,500-character preview) and stay there with the finished job like the
+report; plan a retention job if documents must not stay in the database. Knowledge bases are read at run time through
+`OWUI_URL`/`OWUI_API_KEY` (`POST /api/v1/retrieval/query/collection`, one stored id at a time, logged as `knowledge query`); without both
+variables a knowledge base cannot be used (the tool reports "not reachable" to the model and the report says so under open points).
+Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4).
+
 ### Queue and window
 
 | Variable | Default | Meaning |
@@ -108,11 +122,11 @@ Bearer token on all except probes. Compatible with the pipe and usable from n8n.
 | `GET /readyz` | readiness: 200 if the database answers and the configuration is complete, else 503 with `problems` |
 | `GET /metrics` | Prometheus text: `research_jobs{status}`, `research_in_night_window` (unauthenticated, no content) |
 | `GET /presets` | preset names, descriptions, engine |
-| `POST /clarify` `{task}` | clarifying questions and assumptions |
-| `POST /plans` `{task, preset, depth}` | plan draft: `{draft_id, plan}` |
-| `POST /plans/{draft}/edit` `{instruction}` | edited plan |
-| `POST /jobs` `{draft_id, user_id, chat_id?, message_id?, when}` | submit: `{job_id, when, ahead, window}` |
-| `GET /jobs/{id}` | status, last 10 events, report, stats (token usage), delivery state, `sources` (number, title, url, stand, fetched, kind, excerpt), `ui_report`, `owui_events`, `docx` |
+| `POST /clarify` `{task, preset?, own_sources?}` | clarifying questions and assumptions (knows the attached sources) |
+| `POST /plans` `{task, preset, depth, own_sources?}` | plan draft: `{draft_id, plan, own_sources}` (HTTP 422 with a user message if the preset is `own_sources: only` and nothing readable is attached) |
+| `POST /plans/{draft}/edit` `{instruction}` | edited plan (`own_sources` info of the draft) |
+| `POST /jobs` `{draft_id, user_id, chat_id?, message_id?, when, own_sources?}` | submit: `{job_id, when, ahead, window, own_sources}`; `own_sources` = `{files: [{id, name, text, chars?, date?, url?}], collections: [{id, name}], base_url, notes}`, sent by the pipe after it checked what the user may read. Send it with the job again: the job takes only what this request carries |
+| `GET /jobs/{id}` | status, last 10 events, report, stats (token usage), delivery state, `sources` (number, title, url, stand, fetched, kind, excerpt), `own_sources` (names and sizes, no texts), `ui_report`, `owui_events`, `docx` |
 | `GET /jobs/{id}/report.docx` | the report as Word file (409 while the job runs) |
 | `GET /jobs/lookup?chat_id&message_id&user_id` | job that delivers into a chat message (used by the download action) |
 | `GET /jobs/{id}/evidence` | evidence trail: sources, queries, pages, quotes |
@@ -137,4 +151,8 @@ One JSON object per line on stdout: `ts`, `level`, `logger`, `msg` plus fields. 
 | Reports without MCP sources | the MCP host is unreachable from the pod (proxy / NO_PROXY, NetworkPolicy), or `enabled: false` |
 | Empty answers / "length" finishes from the LLM | thinking tokens count against `max_tokens`; the engine retries once with double the budget. Check `RA_LLM_EXTRA_BODY_*` switches thinking off for the fast role |
 | Timeouts | LLM client timeout is 1800 s with 3 retries; Firecrawl read timeout 150 s |
-| Database | tables `drafts` and `jobs` are created on start; no migration tool yet (schema changes need a manual `alter table`) |
+| Own sources: plan says "nicht lesbar" for a file or knowledge base the user can read in Open WebUI | the pipe checks with the chat user's rights inside Open WebUI; check the share settings of the knowledge base (read grant for the user or group) or whether the file belongs to the user or to a knowledge base they can read |
+| Own sources: "wird noch verarbeitet" / "keinen lesbaren Text" | Open WebUI has not finished extracting the file, or it is a scan without a text layer (enable OCR/content extraction in Open WebUI's document settings) |
+| Own sources: no upload button, or Open WebUI rewrites the question | the model entries need `capabilities.file_upload: true` and `file_context: false` (`deploy/openwebui/models.json`, re-import after upgrading the repo) |
+| Own sources: knowledge base "not reachable" in the report | `OWUI_URL` / `OWUI_API_KEY` of the service, `POST /api/v1/retrieval/query/collection` needs an admin key; log lines `knowledge query` show the ids queried |
+| Database | tables `drafts` and `jobs` are created on start; the column `own_sources` of both is added automatically to older databases; other schema changes still need a manual `alter table` |

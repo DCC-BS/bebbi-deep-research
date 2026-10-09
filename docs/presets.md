@@ -32,6 +32,12 @@ focus engine), `focus_words` (typical report length). A preset may override sing
 | `query_rules` | text added to query generation and to the focus engine's instructions |
 | `report` | `parts_hint`, `words_per_part`, `analysis_part`, `closing_part`, `writer_rules`, `length_rule`, `format_rule` |
 | `verify_entailment` | check that cited quotes support the sentence |
+| `own_sources` | what happens with files uploaded in the chat and knowledge bases (own sources, [integration.md](integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4)): `prefer` (default) the model uses them first and web search and data tools for the rest; `only` removes web search, page fetch and all MCP tools (and the planner's web discovery), the report rests on the user's documents alone and the service refuses a question without any readable own source; `off` ignores attachments and says so in the plan |
+
+Own sources work in both engines. Focus engine: tools `read_upload` and `knowledge_search`, small uploads are read directly. Pipeline
+engine: in every sub-question the best matching uploads and the knowledge hits are extracted into evidence cards before the web and MCP routes
+(in `only` mode instead of them). Source kinds in the ledger: `upload`, `knowledge:<knowledge base>`; labels "Hochgeladene Datei" and
+"Wissensbasis <Name>". The shipped preset `dokumente` ("Deep Research · Eigene Dokumente") is the `only` example.
 
 ## Add a preset
 

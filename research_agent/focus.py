@@ -11,6 +11,7 @@ import json
 import re
 import time
 
+from . import own as O
 from . import prompts as P
 from .config import Budget, Preset
 from .sources import Registry, Source, mcp_to_sources, search_to_sources
@@ -43,8 +44,13 @@ class FocusEngine:
 
     # ---------------------------------------------------------------- tools
     async def _tool_specs(self, preset: Preset) -> tuple[list[dict], dict, list[str]]:
-        specs, routes, hints = list(WEB_TOOLS), {}, []
+        own = self.agent.own
+        specs, routes, hints = ([] if own and own.mode == "only" else list(WEB_TOOLS)), {}, []
+        if own:
+            specs += O.tool_specs(own)
         for server, allow in preset.mcp.items():
+            if own and own.mode == "only":
+                break                             # only the user's own sources: no data tool either
             if server not in self.cfg.mcp_servers:
                 continue                          # disabled or unknown server: the preset does without it
             client = await asyncio.to_thread(self.agent._mcp_client, server, preset)
@@ -90,6 +96,9 @@ class FocusEngine:
                 src = reg.add(url, title, "web", text, date)
                 added = [src]
                 out = f"[{src.id}] {src.title}{' (' + src.date + ')' if src.date else ''}\n{text}"
+            elif name in O.OWN_TOOLS and self.agent.own:
+                await self.agent._emit("status", "Lese eigene Quellen" if name == "read_upload" else "Durchsuche Wissensbasis")
+                out, added = await O.call(name, args, self.agent.own, reg, self.llm, question)
             elif name in routes:
                 server, client, tool = routes[name]
                 if tool in LIST_LIMITS and "limit" not in args:   # long candidate lists: the model sees ~30
@@ -112,11 +121,12 @@ class FocusEngine:
         started = time.time()
         if plan is None and preset.plan_first:
             await self.agent._emit("status", "Erstelle Rechercheplan")
-            plan = await self.agent.plan(task, preset, budget)
+            plan = await self.agent.plan(task, preset, budget, own=self.agent.own)
         lang = (plan or {}).get("language") or (preset.language if preset.language != "auto" else "de")
         de = lang == "de"
         specs, routes, hints = await self._tool_specs(preset)
         reg, ctx, trail = Registry(), {}, []
+        own_system, own_first = O.prompt_block(self.agent.own, reg, de) if self.agent.own else ("", "")
         system = P.FOCUS_SYSTEM.format(
             today=_today(), language_name="German" if de else "English",
             spelling="Use Swiss Standard German spelling: never write ß, always ss." if de else "",
@@ -124,7 +134,7 @@ class FocusEngine:
             query_rules=preset.query_rules.strip(), words=budget.focus_words,
             summary="Zusammenfassung" if de else "Summary",
             open_points="Offene Punkte und Grenzen der Recherche" if de else "Open questions and limitations",
-            writer_rules=preset.report.get("writer_rules", ""))
+            writer_rules=preset.report.get("writer_rules", "")) + own_system
         plan_text = ""
         if plan:
             lines = ["", "RESEARCH PLAN (approved; use it as the checklist and the report structure):"]
@@ -139,7 +149,7 @@ class FocusEngine:
             req = ("\nREPORT REQUIREMENTS:\n" + requirements.strip()
                    + "\n(The URLs of the sources are added automatically from your source IDs.)\n")
         messages = [{"role": "system", "content": system},
-                    {"role": "user", "content": P.FOCUS_USER.format(task=task, plan=plan_text, requirements=req)}]
+                    {"role": "user", "content": P.FOCUS_USER.format(task=task, plan=plan_text, requirements=req) + own_first}]
         calls, final = 0, ""
         for _turn in range(budget.focus_calls + 4):
             out_of_budget = calls >= budget.focus_calls or self.llm.usage.total > budget.max_tokens * 0.8

@@ -16,7 +16,8 @@
       "description": "Broad research across the web (international topics, markets, technology, science).",
       "capabilities": {
         "vision": false,
-        "file_upload": false,
+        "file_upload": true,
+        "file_context": false,
         "citations": true
       },
       "suggestion_prompts": [
@@ -43,7 +44,8 @@
       "description": "Recherche zu Verwaltung, Strategien und Webangeboten von Bund, Kantonen und Städten.",
       "capabilities": {
         "vision": false,
-        "file_upload": false,
+        "file_upload": true,
+        "file_context": false,
         "citations": true
       },
       "suggestion_prompts": [
@@ -70,7 +72,8 @@
       "description": "Rechtsrecherche Bund und Kanton Basel-Stadt (Erlasse, Rechtsprechung, Materialien).",
       "capabilities": {
         "vision": false,
-        "file_upload": false,
+        "file_upload": true,
+        "file_context": false,
         "citations": true
       },
       "suggestion_prompts": [
@@ -97,7 +100,8 @@
       "description": "Recherche in Geschäften, Vorstössen und Beschlüssen des Grossen Rates Basel-Stadt.",
       "capabilities": {
         "vision": false,
-        "file_upload": false,
+        "file_upload": true,
+        "file_context": false,
         "citations": true
       },
       "suggestion_prompts": [
@@ -124,12 +128,41 @@
       "description": "Zahlen und Zeitreihen aus der amtlichen Statistik (Basel-Stadt, Bund).",
       "capabilities": {
         "vision": false,
-        "file_upload": false,
+        "file_upload": true,
+        "file_context": false,
         "citations": true
       },
       "suggestion_prompts": [
         {
           "content": "Wie hat sich die Leerwohnungsziffer in Basel-Stadt seit 2015 entwickelt?"
+        }
+      ]
+    }
+  },
+  {
+    "id": "bebbi_deep_research.dokumente",
+    "base_model_id": null,
+    "name": "Deep Research · Eigene Dokumente",
+    "params": {},
+    "access_grants": [
+      {
+        "principal_type": "user",
+        "principal_id": "*",
+        "permission": "read"
+      }
+    ],
+    "is_active": true,
+    "meta": {
+      "description": "Recherche ausschliesslich in eigenen Dokumenten (im Chat hochgeladene Dateien, Wissensbasen).",
+      "capabilities": {
+        "vision": false,
+        "file_upload": true,
+        "file_context": false,
+        "citations": true
+      },
+      "suggestion_prompts": [
+        {
+          "content": "Fasse die wichtigsten Aussagen der angehängten Dokumente zusammen und nenne offene Fragen."
         }
       ]
     }

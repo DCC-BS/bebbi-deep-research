@@ -41,6 +41,18 @@ tuning history) lives in the evaluation repository, see [docs/evaluation.md](doc
   for administrative presets, pipeline engine (plan, research rounds, section-wise writing) for broad web surveys.
 * **config** (`config/presets.yaml`): presets, MCP servers, budgets. Mounted as ConfigMap in Kubernetes.
 
+## Own sources (files and knowledge bases)
+
+Files uploaded in the chat and knowledge bases attached to the chat or to the model are research sources next to the web (requirement A4).
+The pipe checks inside Open WebUI, as the chat user, what the user may read (Open WebUI's own access functions) and sends the extracted file
+texts and the knowledge base ids with the plan and the job; the service stores them with the job (night runs do not need the user's session),
+the engine reads uploads with `read_upload` (small ones directly) and searches the knowledge bases with `knowledge_search` through Open WebUI's
+retrieval endpoint, one approved id at a time. Citations show the file name ("Hochgeladene Datei") or document and knowledge base
+("Wissensbasis ..."), with a link the user can open when Open WebUI allows it. Preset field `own_sources: prefer | only | off`; the model
+"Deep Research · Eigene Dokumente" works on the user's documents alone. Limits: 10 files, 2,000,000 characters per file, 5 knowledge bases per
+research (`RA_OWN_MAX_*`); text only (no OCR unless Open WebUI does it). Details, access rules and what was verified:
+[docs/integration.md](docs/integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4) and section 7 there.
+
 ## Quickstart (local)
 
 ```bash
@@ -64,7 +76,7 @@ scripts/smoke_local.sh                   # starts the service on SQLite against 
 
 | Path | Content |
 |---|---|
-| `research_agent/` | engine (copied unchanged from the evaluation, v5; only `llm.py` got the per-role extra body) |
+| `research_agent/` | engine (copied from the evaluation, v5; `llm.py` got the per-role extra body, `own.py` and small hooks in `agent.py`/`focus.py` add the user's own sources) |
 | `service/` | job service: settings, DB layer, job runner, FastAPI app, JSON logging |
 | `pipe/` | Open WebUI functions: pipe and Word download action |
 | `config/presets.yaml` | presets, MCP servers, budgets |
@@ -76,7 +88,7 @@ scripts/smoke_local.sh                   # starts the service on SQLite against 
 
 ## Documentation
 
-* [docs/integration.md](docs/integration.md): installing the pipe, valves, admin service account, seeder, fallback, native citations and Word download (section 5a)
+* [docs/integration.md](docs/integration.md): installing the pipe, valves, admin service account, seeder, fallback, native citations and Word download (section 5a), own sources (5b), upgrade checklist (9)
 * [docs/operations.md](docs/operations.md): all environment variables, night window, scaling, logs, troubleshooting
 * [docs/presets.md](docs/presets.md): presets, engines, budgets, adding presets and MCP servers
 * [docs/evaluation.md](docs/evaluation.md): results and decisions of the evaluation

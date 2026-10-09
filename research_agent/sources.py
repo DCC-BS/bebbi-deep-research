@@ -32,7 +32,7 @@ class Source:
     url: str
     title: str
     date: str = ""               # publication date or Stand from the source, empty if unknown
-    kind: str = "web"            # web | mcp:<server>
+    kind: str = "web"            # web | mcp:<server> | upload | knowledge:<knowledge base>
     fetched_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%d"))
     text: str = ""               # what the model saw from this source (for the number check)
     evidence: Evidence | None = field(default=None, repr=False)
@@ -49,9 +49,10 @@ class Registry:
         self._by_url: dict[str, str] = {}
         self.cantonal_numbers: dict[str, str] = {}      # "153.260" -> "SG" (from law sources)
 
-    def add(self, url: str, title: str, kind: str, text: str = "", date: str = "") -> Source:
+    def add(self, url: str, title: str, kind: str, text: str = "", date: str = "", key: str = "") -> Source:
+        """`key` identifies a source that has no (unique) URL, e.g. an uploaded file; the URL is the key otherwise."""
         url = (url or "").strip()
-        key = url.split("#")[0] if url else ""
+        key = key or (url.split("#")[0] if url else "")
         if key and key in self._by_url:
             s = self.sources[self._by_url[key]]
             if text and text not in s.text:

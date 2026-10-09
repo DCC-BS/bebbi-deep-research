@@ -43,23 +43,27 @@ LEDGER = {"cards": [
 class FakeAgent:
     """Stands in for ResearchAgent: no LLM, no search. `block` makes run() wait until cancelled."""
     runs: list = []
+    own_seen: list = []         # (call, OwnSources or None) of clarify / plan / run
     block = False
     fail = False
 
     def __init__(self, job_id, on_event=None):
         self.job_id, self.on_event = job_id, on_event
 
-    async def clarify(self, task):
+    async def clarify(self, task, own=None):
+        FakeAgent.own_seen.append(("clarify", own))
         return {"questions": ["Welcher Zeitraum?"], "assumptions": ["letzte 5 Jahre"]}
 
-    async def plan(self, task, preset, budget):
+    async def plan(self, task, preset, budget, own=None):
+        FakeAgent.own_seen.append(("plan", own))
         return PLAN
 
     async def edit_plan(self, plan, instruction, task, preset, budget):
         return {**plan, "title": "Edited: " + instruction}
 
-    async def run(self, task, preset, depth, plan=None, requirements=""):
+    async def run(self, task, preset, depth, plan=None, requirements="", own=None):
         FakeAgent.runs.append((self.job_id, preset, depth))
+        FakeAgent.own_seen.append(("run", own))
         if self.on_event:
             await self.on_event("status", "Recherchiere")
         if FakeAgent.block:
@@ -90,7 +94,7 @@ def utc_window(inside: bool) -> str:
 
 @pytest.fixture(autouse=True)
 def reset_fake():
-    FakeAgent.runs, FakeAgent.block, FakeAgent.fail = [], False, False
+    FakeAgent.runs, FakeAgent.block, FakeAgent.fail, FakeAgent.own_seen = [], False, False, []
 
 
 @asynccontextmanager

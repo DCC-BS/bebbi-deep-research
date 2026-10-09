@@ -27,7 +27,7 @@ def test_presets_load_and_statistik_mcp_stays_off():
     cfg = load_config(ROOT / "config/presets.yaml")
     assert "statistik" not in cfg.mcp_servers and "statistik" in cfg.mcp_disabled
     assert {"quick", "standard", "deep"} <= set(cfg.budgets)
-    pipe_default = "rechtsrecherche grossrat statistik verwaltung_web web_survey".split()
+    pipe_default = "rechtsrecherche grossrat statistik verwaltung_web web_survey dokumente".split()
     assert set(pipe_default) == set(cfg.presets)
 
 

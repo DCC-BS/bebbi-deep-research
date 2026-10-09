@@ -23,6 +23,7 @@ from .db import DB
 from .docx_export import MIME, docx_filename, render_docx
 from .jobs import JobRunner, describe_error, in_window, make_agent_factory, new_id, runs_by_day
 from .logging_config import log, setup_logging
+from .own import OwnIn, describe, prepare, to_engine
 from .report import build_sources, owui_source_events, ui_markdown
 from .settings import Settings
 
@@ -33,6 +34,7 @@ class TaskIn(BaseModel):
     task: str
     preset: str = "verwaltung_web"
     depth: str = "standard"
+    own_sources: OwnIn | None = None      # the user's files and knowledge bases (plan step: previews are enough)
 
 
 class EditIn(BaseModel):
@@ -45,6 +47,7 @@ class JobIn(BaseModel):
     chat_id: str | None = None
     message_id: str | None = None
     when: str = "night"           # now | night
+    own_sources: OwnIn | None = None      # full texts and knowledge base ids; checked by the pipe against the user's rights
 
 
 def _title(report: str) -> str:
@@ -90,6 +93,20 @@ def create_app(settings: Settings | None = None, agent_factory=None, db: DB | No
 
     app.state.settings, app.state.db, app.state.runner, app.state.cfg = settings, db, runner, cfg
 
+    def own_for(preset: str, own: OwnIn | None, preview: bool):
+        """(stored, info) of the user's own sources under the rules of the preset (own_sources: prefer | only | off)."""
+        mode = cfg.presets[preset].own_sources
+        stored, info = prepare(own, settings, preview=preview)
+        if mode == "off":
+            return None, ({"files": [], "collections": [], "mode": mode, "notes": [
+                "Dieses Modell verwendet keine eigenen Quellen; die angehängten Dateien und Wissensbasen werden ignoriert."]}
+                          if own and (own.files or own.collections) else info)
+        if mode == "only" and not stored:
+            why = " ".join((info or {}).get("notes", []))
+            raise HTTPException(422, "Dieses Modell arbeitet nur mit eigenen Quellen. Bitte laden Sie eine Datei hoch "
+                                     "oder hängen Sie eine Wissensbasis an und stellen Sie die Frage erneut." + (" " + why if why else ""))
+        return stored, ({**info, "mode": mode} if info else None)
+
     def auth(request: Request) -> None:
         if not settings.token or not hmac.compare_digest(request.headers.get("authorization", ""), f"Bearer {settings.token}"):
             raise HTTPException(401, "invalid token")
@@ -131,18 +148,23 @@ def create_app(settings: Settings | None = None, agent_factory=None, db: DB | No
 
     @app.post("/clarify", dependencies=[Depends(auth)])
     async def clarify(body: TaskIn):
-        return await agent("clarify-" + uuid.uuid4().hex[:8]).clarify(body.task)
+        a = agent("clarify-" + uuid.uuid4().hex[:8])
+        stored, info = own_for(body.preset, body.own_sources, preview=True) if body.preset in cfg.presets else (None, None)
+        return await a.clarify(body.task, **({"own": to_engine(stored, settings)} if stored else {}))
 
     @app.post("/plans", dependencies=[Depends(auth)])
     async def create_plan(body: TaskIn):
         a = agent("plan-" + uuid.uuid4().hex[:8])
         if body.preset not in cfg.presets or body.depth not in cfg.budgets:
             raise HTTPException(400, "unknown preset or depth")
+        stored, info = own_for(body.preset, body.own_sources, preview=True)
         draft = new_id()
-        plan = await a.plan(body.task, cfg.presets[body.preset], cfg.budgets[body.depth])
-        await db.execute("insert into drafts (id, task, preset, depth, plan, created) values (:i,:t,:p,:d,:pl,:c)", i=draft,
-                         t=body.task, p=body.preset, d=body.depth, pl=json.dumps(plan, ensure_ascii=False), c=time.time())
-        return {"draft_id": draft, "plan": plan}
+        plan = await a.plan(body.task, cfg.presets[body.preset], cfg.budgets[body.depth],
+                            **({"own": to_engine(stored, settings)} if stored else {}))
+        await db.execute("insert into drafts (id, task, preset, depth, plan, created, own_sources) values (:i,:t,:p,:d,:pl,:c,:o)",
+                         i=draft, t=body.task, p=body.preset, d=body.depth, pl=json.dumps(plan, ensure_ascii=False),
+                         c=time.time(), o=json.dumps(stored, ensure_ascii=False) if stored else None)
+        return {"draft_id": draft, "plan": plan, "own_sources": info}
 
     @app.post("/plans/{draft_id}/edit", dependencies=[Depends(auth)])
     async def edit_plan(draft_id: str, body: EditIn):
@@ -153,7 +175,8 @@ def create_app(settings: Settings | None = None, agent_factory=None, db: DB | No
         plan = await agent("plan-" + draft_id).edit_plan(json.loads(d["plan"]), body.instruction, d["task"],
                                                          cfg.presets[d["preset"]], cfg.budgets[d["depth"]])
         await db.execute("update drafts set plan=:p where id=:i", p=json.dumps(plan, ensure_ascii=False), i=draft_id)
-        return {"draft_id": draft_id, "plan": plan}
+        info = describe(json.loads(d.get("own_sources") or "null"))
+        return {"draft_id": draft_id, "plan": plan, "own_sources": {**info, "mode": cfg.presets[d["preset"]].own_sources} if info else None}
 
     @app.post("/jobs", dependencies=[Depends(auth)])
     async def submit(body: JobIn):
@@ -167,17 +190,20 @@ def create_app(settings: Settings | None = None, agent_factory=None, db: DB | No
             if used >= quota:
                 raise HTTPException(429, f"quota of {quota} research jobs per day reached")
         d, job_id = rows[0], new_id()
+        stored, info = own_for(d["preset"], body.own_sources, preview=False)
         when = body.when if body.when in ("now", "night") else "night"
         if when == "now" and not in_window(settings) and not runs_by_day(cfg, d["preset"], d["depth"]):
             when = "night"
         now = time.time()
         await db.execute("insert into jobs (id, draft, task, preset, depth, plan, user_id, chat_id, message_id, run_when, status,"
-                         " created, events) values (:id,:dr,:t,:p,:d,:pl,:u,:c,:m,:w,'queued',:cr,'[]')", id=job_id, dr=d["id"],
-                         t=d["task"], p=d["preset"], d=d["depth"], pl=d["plan"], u=body.user_id, c=body.chat_id,
-                         m=body.message_id, w=when, cr=now)
+                         " created, events, own_sources) values (:id,:dr,:t,:p,:d,:pl,:u,:c,:m,:w,'queued',:cr,'[]',:o)", id=job_id,
+                         dr=d["id"], t=d["task"], p=d["preset"], d=d["depth"], pl=d["plan"], u=body.user_id, c=body.chat_id,
+                         m=body.message_id, w=when, cr=now, o=json.dumps(stored, ensure_ascii=False) if stored else None)
         ahead = (await db.run("select count(*) n from jobs where status in ('queued','starting','running') and created<:t", t=now))[0]["n"]
-        log(logger, "job queued", job=job_id, preset=d["preset"], depth=d["depth"], when=when, user=body.user_id)
-        return {"job_id": job_id, "status": "queued", "when": when, "ahead": ahead, "window": settings.night_window}
+        log(logger, "job queued", job=job_id, preset=d["preset"], depth=d["depth"], when=when, user=body.user_id,
+            own_files=len((stored or {}).get("files", [])), own_collections=len((stored or {}).get("collections", [])))
+        return {"job_id": job_id, "status": "queued", "when": when, "ahead": ahead, "window": settings.night_window,
+                "own_sources": info}
 
     @app.get("/jobs/lookup", dependencies=[Depends(auth)])
     async def job_lookup(chat_id: str, message_id: str, user_id: str | None = None):
@@ -191,14 +217,15 @@ def create_app(settings: Settings | None = None, agent_factory=None, db: DB | No
     @app.get("/jobs/{job_id}", dependencies=[Depends(auth)])
     async def job_status(job_id: str):
         rows = await db.run("select id, status, run_when, created, started, finished, events, report, stats, error, delivery,"
-                            " evidence from jobs where id=:i", i=job_id)
+                            " evidence, own_sources from jobs where id=:i", i=job_id)
         if not rows:
             raise HTTPException(404, "unknown job")
         j = rows[0]
+        own = describe(json.loads(j.pop("own_sources") or "null"))
         evidence = json.loads(j.pop("evidence") or "null")
         sources = build_sources(j["report"], evidence) if j["report"] and j["status"] == "done" else []
         return {**j, "events": json.loads(j["events"] or "[]")[-10:], "stats": json.loads(j["stats"] or "null"),
-                "sources": sources, "ui_report": ui_markdown(j["report"], sources) if sources else j["report"],
+                "own_sources": own, "sources": sources, "ui_report": ui_markdown(j["report"], sources) if sources else j["report"],
                 "owui_events": owui_source_events(sources), "docx": f"/jobs/{job_id}/report.docx" if j["status"] == "done" else None,
                 "docx_name": docx_filename(_title(j["report"]), j["finished"], settings.timezone) if j["status"] == "done" else None}
 

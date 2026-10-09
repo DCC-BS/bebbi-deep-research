@@ -16,13 +16,18 @@ SOURCE_LABELS = {
     "mcp:opencaselaw": ("Rechtsdatenbank (Erlasse und Entscheide, opencaselaw.ch)", "Legal database (laws and decisions, opencaselaw.ch)"),
     "mcp:data-bs": ("Open-Data-Portal Basel-Stadt (data.bs.ch)", "Open data portal Basel-Stadt (data.bs.ch)"),
     "mcp:statistik": ("Statistisches Amt Basel-Stadt (statistik.bs.ch)", "Statistical Office Basel-Stadt (statistik.bs.ch)"),
+    "upload": ("Hochgeladene Datei", "Uploaded file"),
+    "knowledge": ("Wissensbasis", "Knowledge base"),
 }
 
 
 def source_label(kind: str, de: bool = True) -> str:
-    """'mcp:grossrat' -> 'Grosser Rat Basel-Stadt (Geschäfte und Dokumente)'; unknown servers -> 'Fachdatenbank'."""
+    """'mcp:grossrat' -> 'Grosser Rat Basel-Stadt (Geschäfte und Dokumente)'; unknown servers -> 'Fachdatenbank';
+    'upload' -> 'Hochgeladene Datei'; 'knowledge:Name' -> 'Wissensbasis Name'."""
     if kind in SOURCE_LABELS:
         return SOURCE_LABELS[kind][0 if de else 1]
+    if kind.startswith("knowledge:"):              # knowledge:<name of the knowledge base>
+        return f"{SOURCE_LABELS['knowledge'][0 if de else 1]} {kind.split(':', 1)[1]}"
     return ("Fachdatenbank" if de else "specialist database") if kind.startswith("mcp:") else "Web"
 
 SOURCES_HEADING = re.compile(r"^## (Quellen|Sources)[ \t]*$", re.M)

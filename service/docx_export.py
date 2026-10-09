@@ -23,7 +23,7 @@ MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 BLUE = RGBColor(0x1F, 0x4E, 0x9C)
 GREY = RGBColor(0x59, 0x59, 0x59)
 PRESET_LABELS = {"rechtsrecherche": "Recht", "grossrat": "Grosser Rat", "statistik": "Statistik",
-                 "verwaltung_web": "Verwaltung", "web_survey": "Web"}
+                 "verwaltung_web": "Verwaltung", "web_survey": "Web", "dokumente": "Eigene Dokumente"}
 LABELS = {
     "de": {"question": "Frage", "date": "Datum", "preset": "Recherchetyp", "depth": "Tiefe", "sources": "Quellen",
            "stand": "Stand", "fetched": "abgerufen am", "no_url": "keine öffentliche URL", "kind": "Art der Quelle",

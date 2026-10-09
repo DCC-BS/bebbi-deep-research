@@ -30,6 +30,9 @@ env:
   RA_WORKERS: "1"          # concurrent jobs inside the night window
   RA_DAY_WORKERS: "1"      # concurrent jobs outside it (only quick runs of focus presets start by day)
   RA_QUOTA_PER_DAY: "0"    # 0 = no quota
+  RA_OWN_MAX_FILES: "10"             # own sources: uploaded files per research
+  RA_OWN_MAX_FILE_CHARS: "2000000"   # ... extracted characters per file (longer is cut)
+  RA_OWN_MAX_COLLECTIONS: "5"        # ... knowledge bases per research
   RA_LOG_LEVEL: INFO
 
 # Secrets are read from an existing Secret (SealedSecret / External Secrets / Vault). Keys default to the variable name.

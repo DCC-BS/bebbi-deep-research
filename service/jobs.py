@@ -15,6 +15,7 @@ from research_agent import LLM, ResearchAgent, Tools
 
 from .db import DB
 from .logging_config import log
+from .own import to_engine
 from .report import build_sources, owui_source_events, ui_markdown
 from .settings import Settings
 
@@ -153,7 +154,9 @@ class JobRunner:
         agent = None
         try:
             agent = self.make_agent(job_id, on_event)
-            res = await agent.run(job["task"], job["preset"], job["depth"], plan=json.loads(job["plan"]))
+            own = to_engine(json.loads(job.get("own_sources") or "null"), self.settings, self.http_factory)
+            res = await agent.run(job["task"], job["preset"], job["depth"], plan=json.loads(job["plan"]),
+                                  **({"own": own} if own else {}))
             stats = {**res.stats, "usage": res.usage}
             await self.db.execute("update jobs set status='done', finished=:t, report=:r, stats=:s, evidence=:e where id=:i",
                                   t=time.time(), r=res.report, s=json.dumps(stats, ensure_ascii=False),

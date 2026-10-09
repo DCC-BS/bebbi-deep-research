@@ -19,13 +19,14 @@ OUT = ROOT / "deploy" / "openwebui"
 FUNCTION_ID = "bebbi_deep_research"
 ACTION_ID = "bebbi_deep_research_download"
 LABELS = {"rechtsrecherche": "Recht", "grossrat": "Grosser Rat", "statistik": "Statistik",
-          "verwaltung_web": "Verwaltung", "web_survey": "Web"}      # same as the PRESETS valve default of the pipe
+          "verwaltung_web": "Verwaltung", "web_survey": "Web", "dokumente": "Eigene Dokumente"}      # same as the PRESETS valve default of the pipe
 SUGGESTIONS = {
     "rechtsrecherche": ["Welche Rechtsgrundlagen regeln Videoüberwachung durch Kantonsbehörden in Basel-Stadt?"],
     "grossrat": ["Welche Vorstösse zum Stadtklima hat der Grosse Rat in den letzten Jahren behandelt?"],
     "statistik": ["Wie hat sich die Leerwohnungsziffer in Basel-Stadt seit 2015 entwickelt?"],
     "verwaltung_web": ["Wie organisieren andere Kantone die Open-Data-Strategie?"],
     "web_survey": ["Which approaches exist for citizen participation platforms in European cities?"],
+    "dokumente": ["Fasse die wichtigsten Aussagen der angehängten Dokumente zusammen und nenne offene Fragen."],
 }
 
 
@@ -46,7 +47,10 @@ def build() -> dict[str, str]:
         models.append({
             "id": f"{FUNCTION_ID}.{name}", "base_model_id": None, "name": f"Deep Research · {LABELS.get(name, name)}",
             "params": {}, "access_grants": [{"principal_type": "user", "principal_id": "*", "permission": "read"}], "is_active": True,
-            "meta": {"description": p["description"], "capabilities": {"vision": False, "file_upload": False, "citations": True},
+            "meta": {"description": p["description"],
+                     # file_upload: the chat offers file upload and knowledge bases (own sources, docs/integration.md);
+                     # file_context false: Open WebUI must not run its own retrieval and rewrite the user's message for the pipe
+                     "capabilities": {"vision": False, "file_upload": True, "file_context": False, "citations": True},
                      "suggestion_prompts": [{"content": s} for s in SUGGESTIONS.get(name, [])]},
         })
     return {"function.json": json.dumps(function, indent=2, ensure_ascii=False) + "\n",

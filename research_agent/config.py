@@ -35,6 +35,7 @@ class Preset:
     verify_entailment: bool = True
     engine: str = "pipeline"                        # pipeline (plan, rounds, section-wise writing) | focus (tool loop)
     plan_first: bool = True                         # focus engine: plan before the loop (the plan is the checklist)
+    own_sources: str = "prefer"                     # the user's files / knowledge bases: prefer (own first, web for the rest) | only | off
 
 
 @dataclass

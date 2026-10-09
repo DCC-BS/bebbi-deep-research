@@ -2,18 +2,22 @@
 
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 SCHEMA = [
     """create table if not exists drafts (id text primary key, task text, preset text, depth text, plan text,
-       created double precision)""",
+       created double precision, own_sources text)""",
     """create table if not exists jobs (id text primary key, draft text, task text, preset text, depth text, plan text,
        user_id text, chat_id text, message_id text, run_when text, status text, created double precision,
        started double precision, finished double precision, events text, report text, stats text, evidence text,
-       error text, heartbeat double precision, delivery text)""",
+       error text, heartbeat double precision, delivery text, own_sources text)""",
     "create index if not exists jobs_status_idx on jobs (status, created)",
 ]
+
+
+# columns added after the first release: `create table if not exists` does not touch existing tables
+MIGRATIONS = [("drafts", "own_sources", "text"), ("jobs", "own_sources", "text")]
 
 
 class DB:
@@ -30,6 +34,10 @@ class DB:
         async with self.engine.begin() as con:
             for stmt in SCHEMA:
                 await con.execute(text(stmt))
+            for table, column, kind in MIGRATIONS:
+                have = await con.run_sync(lambda c, t=table: {col["name"] for col in inspect(c).get_columns(t)})
+                if column not in have:
+                    await con.execute(text(f"alter table {table} add column {column} {kind}"))
 
     async def run(self, sql: str, **params) -> list[dict]:
         """Run one statement in its own transaction; returns rows as dicts (empty for writes)."""

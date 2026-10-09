@@ -3,6 +3,10 @@
 #
 # engine: focus    = bounded tool-calling loop with code-resolved citations (administrative presets)
 #         pipeline = plan, research rounds, section-wise writing (broad web surveys)
+# own_sources: what happens with files uploaded in the chat and knowledge bases attached to the chat or the model
+#         prefer = use them first, web and data tools for the rest (default)
+#         only   = answer only from them; no web, no MCP tools (the model refuses without any attached)
+#         off    = ignore them
 
 # MCP servers. `hint` is shown to the focus engine next to the tools; `enabled: false` keeps a server
 # configured but unused (presets that list it simply do without it).
@@ -69,6 +73,7 @@ defaults: &defaults
   avoid_domains: [facebook.com, instagram.com, tiktok.com, x.com, twitter.com, pinterest.com, linkedin.com,
                   apps.apple.com, play.google.com, quora.com, reddit.com, medium.com, scribd.com, coursehero.com]
   verify_entailment: true
+  own_sources: prefer
 
 presets:
   web_survey:
@@ -189,3 +194,20 @@ presets:
       analysis_part: null
       closing_part: "Methodische Hinweise, offene Punkte und Grenzen"
       writer_rules: "Zahlen nur mit Datensatz bzw. Tabelle, Stichtag und Einheit."
+
+  dokumente:
+    <<: *defaults
+    engine: focus
+    description: Recherche ausschliesslich in eigenen Dokumenten (im Chat hochgeladene Dateien, Wissensbasen).
+    language: de
+    own_sources: only
+    routes: {primary: [web], data: [web], secondary: [web]}      # unused: no web and no MCP tool exists in this preset
+    query_rules: |
+      Antworte nur mit dem, was die Dokumente des Benutzers belegen. Was die Dokumente nicht beantworten, steht unter
+      den offenen Punkten; nichts aus allgemeinem Wissen ergänzen.
+    report:
+      parts_hint: []
+      words_per_part: 350
+      analysis_part: null
+      closing_part: "Offene Punkte und Grenzen der Recherche"
+      writer_rules: "Nenne bei jeder Aussage das Dokument (Dateiname) und, wo vorhanden, Abschnitt oder Seite."

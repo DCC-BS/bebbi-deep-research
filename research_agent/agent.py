@@ -14,6 +14,7 @@ from . import prompts as P
 from .config import Budget, Config, Preset
 from .ledger import Card, Ledger, SubQ, quote_in_page
 from .llm import LLM
+from . import own as O
 from .sources import Registry, mcp_to_sources
 from .text import Evidence, checked_numbers, fix_sr_labels, split_units, unsupported
 from .tools import MCPClient, Tools, domain, domain_match, focus
@@ -48,6 +49,7 @@ class ResearchAgent:
         self._evs: dict[str, Evidence] = {}      # card id -> number forms (verify)
         self._task_ev = Evidence()               # numbers of the task itself need no evidence
         self._mcp_ctx: dict = {}                 # per-run MCP lookups (dataset titles)
+        self.own: O.OwnSources | None = None     # the user's files / knowledge bases of the current run (research_agent/own.py)
 
     async def _emit(self, kind: str, text: str) -> None:
         if self.on_event:
@@ -56,10 +58,15 @@ class ResearchAgent:
                 await r
 
     # ------------------------------------------------------- chat turns
-    async def clarify(self, task: str) -> dict:
+    async def clarify(self, task: str, own: "O.OwnSources | None" = None) -> dict:
         """At most 2 clarifying questions; none for detailed tasks (they already state their scope)."""
         if len(task) > 600:
             return {"questions": [], "assumptions": []}
+        if own and (own.files or own.collections):
+            task += ("\n\n(The user has ALREADY ATTACHED these own sources: "
+                     + "; ".join([f'file "{f.name}"' for f in own.files] + [f'knowledge base "{c.name}"' for c in own.collections])
+                     + ". Phrases like 'my document' or 'the attached file' mean them. Never ask the user to upload or "
+                       "provide them again.)")
         data = await self.llm.json("fast", "You decide whether a research task needs clarification. Output JSON only.",
                                    P.CLARIFY.format(task=task), step="clarify", default={}) or {}
         return {"questions": [str(q) for q in data.get("questions") or []][:2],
@@ -72,11 +79,27 @@ class ResearchAgent:
         return self._validate_plan(raw, task, preset, budget) if isinstance(raw, dict) else plan
 
     # ------------------------------------------------------------------ plan
-    async def plan(self, task: str, preset: Preset, budget: Budget) -> dict:
+    @staticmethod
+    def _own_for(own: "O.OwnSources | None", preset: Preset) -> "O.OwnSources | None":
+        """The user's own sources as the preset wants them: ignored for own_sources: off, web-less for `only`."""
+        if own is None or preset.own_sources == "off" or not (own.files or own.collections):
+            return None
+        own.mode = "only" if preset.own_sources == "only" else "prefer"
+        return own
+
+    async def plan(self, task: str, preset: Preset, budget: Budget, own: "O.OwnSources | None" = None) -> dict:
         hint = ""
         if preset.report.get("parts_hint"):
             hint = f"Typical parts for this kind of research: {', '.join(preset.report['parts_hint'])} (adapt to the task)."
-        hits = await self.tools.search(task[:200], "de" if preset.language == "de" else "en", num=8)
+        own = self._own_for(own, preset)
+        if own:
+            hint += (" The user supplied own sources: " + "; ".join(
+                [f'file "{f.name}"' + (f" (begins: {f.text[:300]!r})" if f.text else "") for f in own.files]
+                + [f'knowledge base "{c.name}"' for c in own.collections])
+                + (". Answer ONLY from these; plan sub-questions the documents can answer." if own.mode == "only"
+                   else ". Plan sub-questions so that these sources are used wherever they are relevant."))
+        hits = [] if own and own.mode == "only" else \
+            await self.tools.search(task[:200], "de" if preset.language == "de" else "en", num=8)
         discovery = "\n".join(f"- {h['title']} ({domain(h['url'])}): {h['snippet'][:180]}" for h in hits) or "-"
         raw = await self.llm.json("think", "You are a careful research planner. Output JSON only.",
                                   P.PLAN.format(today=_today(), task=task, discovery=discovery, parts_hint=hint, max_subq=budget.max_subq,
@@ -284,11 +307,26 @@ class ResearchAgent:
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": "skipped: tool budget used up"})
         return added
 
+    async def _own(self, sq: SubQ, plan: dict, led: Ledger) -> int:
+        """Evidence cards from the user's uploads and knowledge bases (pipeline engine)."""
+        items = await O.evidence_items(self.own, self.llm, [sq.text, plan["task_core"]])
+        led.log("own_sources", subq=sq.id, items=[i["title"] for i in items])
+        counts = await asyncio.gather(*(self._extract(sq, i["url"], i["title"], i["text"], plan, led, i["kind"])
+                                        for i in items))
+        return sum(counts)
+
     async def _research_subq(self, sq: SubQ, plan: dict, preset: Preset, budget: Budget, led: Ledger) -> int:
         async with self.sem:
             await self._emit("status", f"Recherche: {sq.text[:90]}")
             routes = preset.routes.get(sq.intent) or ["web"]
             added = 0
+            if self.own:
+                try:
+                    added += await self._own(sq, plan, led)
+                except Exception as e:
+                    led.log("error", subq=sq.id, route="own", error=str(e)[:300])
+                if self.own.mode == "only":
+                    return added
             for route in routes:
                 try:
                     if route.startswith("mcp:"):
@@ -469,10 +507,11 @@ class ResearchAgent:
 
     # ------------------------------------------------------------------ run
     async def run(self, task: str, preset_name: str, depth: str = "standard", plan: dict | None = None,
-                  requirements: str = "") -> Result:
+                  requirements: str = "", own: "O.OwnSources | None" = None) -> Result:
         """task = the research question (used for planning and research); requirements = report-format
-        requirements (structure, citation style) that only the writer sees."""
+        requirements (structure, citation style) that only the writer sees; own = the user's files and knowledge bases."""
         preset, budget = self.cfg.presets[preset_name], self.cfg.budgets[depth]
+        self.own = self._own_for(own, preset)
         if preset.budget:                        # per-preset budget overrides (e.g. more pages for surveys)
             budget = dataclasses.replace(budget, **preset.budget)
         if preset.engine == "focus":
@@ -481,7 +520,7 @@ class ResearchAgent:
         started = time.time()
         if plan is None:
             await self._emit("status", "Erstelle Rechercheplan")
-            plan = await self.plan(task, preset, budget)
+            plan = await self.plan(task, preset, budget, own=self.own)
         led = Ledger()
         self._task_ev = Evidence(task + " " + requirements)
         for q in plan["sub_questions"]:

@@ -57,7 +57,10 @@ Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py` (and `p
 | `NIGHT_FOR_DEPTH` | `deep` | depths that always go to the night window |
 | `POLL_SECONDS` | `10` | polling interval while a "jetzt" job is streamed |
 | `MAX_WAIT_MINUTES` | `25` | how long the pipe streams a running job before handing over to the delivery |
-| `PRESETS` | `rechtsrecherche:Recht,grossrat:Grosser Rat,statistik:Statistik,verwaltung_web:Verwaltung,web_survey:Web` | `preset:label` pairs, one model per entry; preset names must exist in `presets.yaml` |
+| `PRESETS` | `rechtsrecherche:Recht,grossrat:Grosser Rat,statistik:Statistik,verwaltung_web:Verwaltung,web_survey:Web,dokumente:Eigene Dokumente` | `preset:label` pairs, one model per entry; preset names must exist in `presets.yaml` |
+| `OWN_SOURCES` | `true` | use the chat's uploaded files and knowledge bases as sources (section 5b); `false` ignores them |
+| `PUBLIC_URL` | empty | public base URL of Open WebUI for the links to uploaded files; empty = Open WebUI's `WEBUI_URL` setting, else the request URL. Set `WEBUI_URL` in production |
+| `OWN_MAX_FILES`, `OWN_MAX_FILE_CHARS` | `10`, `2000000` | files per research and extracted characters per file the pipe sends (the service applies its own limits too, [operations.md](operations.md)) |
 
 ## 3. Admin service account for report delivery
 
@@ -78,7 +81,8 @@ in `GET /jobs/{id}`: `ok`, `skipped` when the job has no chat, or `failed: ...`)
 
 The manifold creates the models automatically. `deploy/openwebui/models.json` adds names, descriptions and
 suggestion prompts per preset ("Deep Research · Recht", ...) in the format of `POST /api/v1/models/import`; set
-`access_grants` there. In v0.11.4 a model without grants is visible to admins only (the old `access_control: null` no longer means public); the file grants read to everyone (`principal_type: user, principal_id: "*"`). Replace it with `principal_type: group` entries for Entra groups (G1 is optional).
+`access_grants` there. The entries set `capabilities.file_upload: true` (the chat offers file upload and knowledge bases, section 5b) and
+`file_context: false` (Open WebUI must not run its own retrieval on the message that the pipe interprets). In v0.11.4 a model without grants is visible to admins only (the old `access_control: null` no longer means public); the file grants read to everyone (`principal_type: user, principal_id: "*"`). Replace it with `principal_type: group` entries for Entra groups (G1 is optional).
 
 ## 5. Chat flow and the fallback
 
@@ -165,6 +169,80 @@ returns itself (`jetzt` run that finishes while streaming): it carries no marker
   Rendering is on demand from the stored report; old jobs work too.
 
 
+## 5b. Own sources: uploaded files and knowledge bases (requirement A4)
+
+The user can attach files in the chat (paperclip) and knowledge bases (`#` or the attach menu) to a Deep Research model, or the
+admin attaches a knowledge base to the model itself (Workspace, Models, Knowledge). The report then cites them like any other source.
+Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
+
+**What Open WebUI v0.11.4 provides** (read in the image, `/app/backend/open_webui`):
+
+* The browser sends the attachments as `files` of the completion request: `{"type": "file", "id", "name", "file": {record}, ...}`
+  for an upload, `{"type": "collection", "id" (= knowledge id), "name"}` for a knowledge base (other types: `url`, `note`, `chat`,
+  `folder`, `image`). `utils/middleware.py` pops `files` from the body, so **a pipe does not find them in `body["files"]`**: they are in
+  `metadata["files"]`, which functions receive as `__files__` (`functions.py`, `extra_params`) and inside `__metadata__`.
+* The files of the chat accumulate: the browser sends the same items with every later turn.
+* An upload is processed in the background (`POST /api/v1/files/?process=true`, `data.status` `pending` then `completed`; the browser
+  polls `/files/{id}/process/status`). The extracted text is `file.data["content"]` in the file record (`models/files.py`).
+* Model-attached knowledge is `model.meta.knowledge` (`Models.get_model_by_id`). Open WebUI adds it to `files` only for
+  `function_calling: legacy`; in the default native mode a pipe has to read it itself.
+* **Message rewriting**: unless the model sets `capabilities.file_context: false`, `chat_completion_files_handler` runs its own retrieval
+  (it even asks the task model for search queries) and wraps the user's message in the RAG template; native mode additionally prepends an
+  `<attached_files>` block. Both would change what the pipe takes for the user's words ("ok" becomes a template). `models.json` therefore sets
+  `file_context: false` and `file_upload: true` (it was `false`, which hid the upload button); the pipe in addition reads the original text
+  from `__metadata__["user_message"]` and strips an `<attached_files>` block.
+* Access rules (what Open WebUI applies itself): a file is readable for its owner, admins, and users who reach it through a knowledge base
+  grant, a channel, a shared chat or a shared model (`utils/access_control/files.py: has_access_to_file`). A knowledge base is readable for
+  its owner, admins and holders of a read grant (`retrieval/utils.py: filter_accessible_collections`, the rule behind
+  `/api/v1/retrieval/query/collection` too).
+* `POST /api/v1/retrieval/query/collection` `{collection_names, query, k}` answers `{documents: [[...]], metadatas: [[{file_id, name, source,
+  ...}]], distances: [[...]]}` (distances are similarities, higher is better). With an admin key it can read any collection.
+* `GET /api/v1/files/{id}/content` serves a file to anyone who may read it (cookie or token); `GET /api/v1/files/{id}` returns the record
+  (`created_at`). Users need the permission `workspace.knowledge` to create knowledge bases (default: off).
+
+**What we do**
+
+1. **Pipe, as the chat user, inside Open WebUI** (`collect_own_sources` in `pipe/deep_research.py`). At every turn that creates a plan or a
+   job (clarify, plan, approval; the approval collects again, so the latest attachments count) it gathers the file items and collection items
+   of `__files__` plus the model's knowledge, and checks each id with Open WebUI's own functions in-process: files with `Files.get_file_by_id`
+   + `has_access_to_file`, knowledge bases with `filter_accessible_collections` (plus: the knowledge base must exist). What is not readable is
+   dropped and named in a remark ("Wissensbasis ... ist für Sie nicht lesbar"), never with content. If the check itself fails, nothing is used
+   (fail closed). The extracted text always comes from the file record, never from the browser's payload. The plan step sends only the first
+   1,500 characters of each file; the approval sends the whole text (cut at 2,000,000 characters). Links: `<public base>/api/v1/files/<id>/content`,
+   public base = valve `PUBLIC_URL`, else the `webui.url` setting (`WEBUI_URL`), else the request URL.
+2. **Service** (`service/own.py`). Applies the limits (`RA_OWN_MAX_FILES` 10, `RA_OWN_MAX_FILE_CHARS` 2,000,000, `RA_OWN_MAX_COLLECTIONS` 5) and
+   reports what it cut, in German, back to the pipe (shown in the plan and in the "queued" message). The plan step stores previews with the
+   draft; the job stores the full texts and the knowledge base ids (`jobs.own_sources`), so a night run does not depend on the user's session.
+   Old databases get the column added on start. `GET /jobs/{id}` returns names and sizes (`own_sources`), never texts.
+3. **Knowledge bases at run time**: the engine tool `knowledge_search(query)` asks `OwuiRetriever`, which POSTs to
+   `/api/v1/retrieval/query/collection` with the service's admin key for **one stored id at a time**. The tool has no collection argument, the
+   retriever refuses ids that were not stored with the job, and every query is logged (`knowledge query`, collection id). The file date (Stand)
+   comes from `GET /api/v1/files/{file_id}` (`created_at`).
+4. **Engine** (`research_agent/own.py`, additive). Source kinds `upload` (title = file name, Stand = upload date) and `knowledge:<name of the
+   knowledge base>` (title = document name). Focus engine: uploads up to 6,000 characters (18,000 together) are put into the first message with
+   their source IDs (no tool call); larger ones are read with `read_upload(file, query)` (the passages most similar to the query, embeddings,
+   computed once per file and run); knowledge bases with `knowledge_search`. Pipeline engine (web_survey): in every sub-question the best three
+   uploads (by best passage) and the knowledge hits go through the normal extraction into evidence cards (kind `upload` / `knowledge:...`),
+   before the web and MCP routes; the quote check applies as for web pages. Citation checking (`verify`) is untouched and applies to the
+   texts of own sources like to any other source.
+5. **Presets**: `own_sources: prefer | only | off` (default `prefer`: own documents first, web and data tools for the rest). `only` removes the
+   web and MCP tools and the web discovery of the planner (preset `dokumente`, "Deep Research · Eigene Dokumente"); without any readable
+   own source the service answers HTTP 422 with a message for the user. `off` ignores attachments (and says so in the plan).
+6. **Labels and links**: the source list says "Hochgeladene Datei" or "Wissensbasis <name>" (previews, Word file); never "MCP". The link is the
+   file route above (the user can open it exactly when Open WebUI lets them read the file); without a base URL the source is listed with
+   "keine öffentliche URL".
+
+**Limits and behaviour to know**
+
+* Text only: what Open WebUI extracts (PDF text layer, Office, text; no OCR unless Open WebUI is configured for it). A scan without text is
+  reported ("enthält keinen lesbaren Text") and not used. A file still being processed is reported as such.
+* Attachments of the type `url`, `note`, `chat`, `folder` are reported and not used. Images are ignored.
+* A knowledge base is approved when the plan is approved. If the user loses access before a night run starts, the run still reads it with
+  the service key (the content was approved by the system at approval time). Delete or re-share in Open WebUI and cancel the job if that matters.
+* The service trusts the pipe (shared bearer token). Anyone who can call the service with that token can name any knowledge base id; keep
+  the NetworkPolicy and the token as described in section 3.
+* Retrieval quality for knowledge bases is Open WebUI's (its embedding model, hybrid search and `k` settings, here `k` = 6 chunks per query).
+
 ## 6. Network
 
 * Pipe to service: cluster-internal HTTP (valve `SERVICE_URL`).
@@ -199,6 +277,17 @@ Citations and Word download (verified 2026-10-09 against the same stack, API lev
 | 7 | Night run, delivery by admin key (chat `ed9fc2f9…`, job `c9cb672c08ce`, rechtsrecherche, 101 s) | passed. Queued with "heute Nacht", window opened by restart, `delivery ok`. Re-read through the chat API like after a reload: content 5046 characters, `sources` 5 in the order of the list, unique ids, no file. The button action (`POST /api/chat/actions/bebbi_deep_research_download` as the chat user, as the UI does) attached one 40 kB file; the second call attached nothing; download as the user 200. The file opens with python-docx (3 pages, 2 tables, hyperlinks) and renders in LibreOffice ([page 1](img/word-report-p1.png), [sources](img/word-report-sources.png)) |
 | 8 | Daytime run again after the fix (chat `c987918b…`, grossrat, quick) | passed: 19 sources, 19 unique, one Word file, download as the user 200 |
 
+Own sources (verified 2026-10-09 on the same stack, API level exactly as the browser sends the chat: file upload with background
+processing, `files` in the completion request, test user "tester" without admin rights; section 5b). Quick runs, 4 research jobs in total:
+
+| # | Scenario | Result |
+|---|---|---|
+| 9 | File in the chat, preset Recht (job `24888517d1ec`, 78 s, 13k prompt tokens): a self-made 1-page PDF (734 characters, no personal data) with a deadline and fee for stalls on public ground, question needs the file plus the public law | passed. The clarifying step no longer asks for the file; the plan lists "Eigene Quellen: Datei merkblatt.pdf (734 Zeichen)"; the file (small: read directly) is source [1] in the report with the right figures (28/42 days, CHF 135/67.50), the law sources come from opencaselaw. Stored message: 4 `sources` events (kind `upload` first), badge/list as for any source, link `http://localhost:3000/api/v1/files/<id>/content` returns 200 `application/pdf` for the tester; the Word file lists "Art der Quelle: Hochgeladene Datei" |
+| 10 | Knowledge base of the tester (3 text files) attached to the chat, preset Verwaltung, "heute Nacht" (job `79b3b69ee797`) | passed. Queued with the sources named in the message (window 03:00-04:00, job stayed `queued`); restart with `RA_NIGHT_WINDOW=00:00-23:59` ran it without any user session: 16 s, two `knowledge_search` calls, no web call, `delivery ok`; the stored message cites the two relevant documents (kind `knowledge:Beschaffung und Personal (Test)`) with file links and Stand. Knowledge base attached to the *model* (admin, Workspace): the plan step lists it as well (checked on `bebbi_deep_research.verwaltung_web`, no job) |
+| 11 | Access control: a knowledge base of the admin, not shared, attached by id by the tester next to the tester's own (job `a76b17a12fd0`) | passed. The plan says "Wissensbasis 8eb67fe4-... ist für Sie nicht lesbar und wird nicht verwendet"; the job stores one collection; the service log shows `knowledge query` only for the tester's base (2 queries); the report says that "Projekt Zeta" (only in the admin's document) was not found. The same for a foreign file id is a unit test (the real Open WebUI check ran for the knowledge base) |
+| 12 | `own_sources: only` (preset Eigene Dokumente), file + knowledge base (job `3fddd112aef9`, 15 s) | passed. Tool trail: one `knowledge_search`, nothing else (no `web_search`, no MCP tool; `tools_used` and the trail of `GET /jobs/{id}/evidence`); sources `upload` + `knowledge`. Without attachments the model answers "Dieses Modell arbeitet nur mit eigenen Quellen. Bitte laden Sie eine Datei hoch ..." |
+| 13 | Large file, many files, scans, pipeline engine | not run live (job budget of the test round). Covered by unit tests with fakes: limits and cut notes, `read_upload` on a long text (passage selection, embeddings once), the pipeline's evidence cards and the `only` mode of the pipeline engine. A first live run of web_survey with attachments is still due |
+
 Known limitations:
 
 * The rendered chat (badges, source popup, file chip, action button) was **not** looked at in the browser pane in this
@@ -214,7 +303,8 @@ Known limitations:
   installed, the file is still available from the service (`/jobs/{id}/report.docx`).
 * The native source list shows URLs only; the Markdown list under the report keeps title, Stand and retrieval date, so the
   list is visible twice (one collapsed).
-* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (pinned to v0.11.4); re-test it on upgrades.
+* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (pinned to v0.11.4); re-test it on upgrades (checklist in section 9).
+* Own sources were exercised through the API the way the browser sends them; the attach menu and the `#` picker were not clicked in the browser pane.
 * The delivery key can write every chat (admin); keep NetworkPolicy and secret handling as described.
 * A message that carries a status text (job still running when the user writes again) is a new assistant message; the
   report is delivered into the original one.
@@ -231,3 +321,25 @@ OWUI_ADMIN_EMAIL=... OWUI_ADMIN_PASSWORD=... RA_TOKEN=... uv run python scripts/
 
 Set `RA_NIGHT_WINDOW=00:00-23:59` in `.env` to let every job run at once while testing. With the evaluation stack on the
 same host add `-f compose.eval-net.yaml` (see the comment in that file).
+
+## 9. Upgrade checklist: Open WebUI internals we depend on
+
+Re-test these when the Open WebUI version changes (pinned: v0.11.4). Unit tests fake them (`tests/test_pipe_own.py:
+test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not if Open WebUI changes); the end-to-end check is
+`scripts/e2e_owui.py` (section 7).
+
+| Dependency | Used for | Look at |
+|---|---|---|
+| `POST /api/v1/chats/{id}/messages/{mid}` and `.../event`, `output` vs `content` of a message | report delivery, queued-message `replace` event | sections 3 and 5 |
+| `source` events, `metadata.source` / `metadata.name` unique per source | citation badges | section 5a |
+| `open_webui.routers.files.upload_file_handler`, `open_webui.models.users.Users` | Word file as the user's file | section 5a |
+| `__files__` / `__metadata__["files"]` and `["user_message"]` of a pipe; item types `file`, `collection` | which attachments the chat has (own sources) | `functions.py`, `utils/middleware.py` |
+| `capabilities.file_context` and `file_upload` of the model | no RAG rewrite of the user's message; upload button | `utils/middleware.py: chat_completion_files_handler` |
+| `open_webui.models.files.Files.get_file_by_id`, `file.data["content"]`, `.created_at`, `.meta["name"]` | text, name and date of uploads | `models/files.py` |
+| `open_webui.utils.access_control.files.has_access_to_file(file_id, "read", user)` | may the user read this file | `utils/access_control/files.py` |
+| `open_webui.retrieval.utils.filter_accessible_collections({id}, user)`, `open_webui.models.knowledge.Knowledges.get_knowledge_by_id` | may the user read this knowledge base | `retrieval/utils.py`, `models/knowledge.py` |
+| `open_webui.models.models.Models.get_model_by_id(...).meta.knowledge` | knowledge attached to the model | `models/models.py` |
+| `open_webui.config.Config.get("webui.url")` | public base URL for file links | `config.py` |
+| `POST /api/v1/retrieval/query/collection` (admin key): response `documents`, `metadatas` (`file_id`, `name`), `distances` | `knowledge_search` | `routers/retrieval.py` |
+| `GET /api/v1/files/{id}` (`created_at`), `GET /api/v1/files/{id}/content` | Stand of knowledge documents, links in the source list | `routers/files.py` |
+| permission `workspace.knowledge` | users can create knowledge bases | Admin Panel, Users, Groups |

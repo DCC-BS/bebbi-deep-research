@@ -45,6 +45,9 @@ class Settings:
     owui_url: str = ""
     owui_api_key: str = ""
     log_level: str = "INFO"
+    own_max_files: int = 10                 # uploaded files per research (own sources)
+    own_max_file_chars: int = 2_000_000     # extracted text per file; longer texts are cut
+    own_max_collections: int = 5            # knowledge bases per research
     parse_errors: list[str] = field(default_factory=list)
 
     @classmethod
@@ -83,6 +86,8 @@ class Settings:
             poll_seconds=num("RA_POLL_SECONDS", 5.0, float), stale_seconds=num("RA_STALE_SECONDS", 120.0, float),
             owui_url=env.get("OWUI_URL", "").rstrip("/"), owui_api_key=env.get("OWUI_API_KEY", ""),
             log_level=env.get("RA_LOG_LEVEL", "INFO").upper(),
+            own_max_files=num("RA_OWN_MAX_FILES", 10), own_max_file_chars=num("RA_OWN_MAX_FILE_CHARS", 2_000_000),
+            own_max_collections=num("RA_OWN_MAX_COLLECTIONS", 5),
         )
         s.parse_errors = errors
         return s
