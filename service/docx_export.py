@@ -17,7 +17,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from .report import split_report
+from .report import source_label, split_report
 
 MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 BLUE = RGBColor(0x1F, 0x4E, 0x9C)
@@ -260,9 +260,7 @@ def add_markdown(doc, md: str, cited: set[int] | None, skip_title: str | None = 
 
 
 def kind_label(kind: str, de: bool = True) -> str:
-    if kind.startswith("mcp:"):
-        return (f"Fachdatenbank {kind[4:]}" if de else f"specialist database {kind[4:]}")
-    return "Web"
+    return source_label(kind, de)
 
 
 def add_sources(doc, sources: list[dict], L: dict):

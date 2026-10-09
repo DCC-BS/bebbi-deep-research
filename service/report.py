@@ -9,6 +9,22 @@ cites the source). Nothing in the engines has to change for this.
 
 import re
 
+# Readable names for the kind of a source; a citation never names "MCP" or a tool.
+SOURCE_LABELS = {
+    "web": ("Web", "Web"),
+    "mcp:grossrat": ("Grosser Rat Basel-Stadt (Geschäfte und Dokumente)", "Grand Council of Basel-Stadt (business and documents)"),
+    "mcp:opencaselaw": ("Rechtsdatenbank (Erlasse und Entscheide, opencaselaw.ch)", "Legal database (laws and decisions, opencaselaw.ch)"),
+    "mcp:data-bs": ("Open-Data-Portal Basel-Stadt (data.bs.ch)", "Open data portal Basel-Stadt (data.bs.ch)"),
+    "mcp:statistik": ("Statistisches Amt Basel-Stadt (statistik.bs.ch)", "Statistical Office Basel-Stadt (statistik.bs.ch)"),
+}
+
+
+def source_label(kind: str, de: bool = True) -> str:
+    """'mcp:grossrat' -> 'Grosser Rat Basel-Stadt (Geschäfte und Dokumente)'; unknown servers -> 'Fachdatenbank'."""
+    if kind in SOURCE_LABELS:
+        return SOURCE_LABELS[kind][0 if de else 1]
+    return ("Fachdatenbank" if de else "specialist database") if kind.startswith("mcp:") else "Web"
+
 SOURCES_HEADING = re.compile(r"^## (Quellen|Sources)[ \t]*$", re.M)
 _LINE = re.compile(r"^\[(\d+)\][ \t]+(.+?)[.:]?[ \t]+(https?://\S+|keine öffentliche URL|no public URL)[ \t]+\((.*)\)[ \t]*$")
 _CITE = re.compile(r"\[(\d+)\]")
@@ -133,7 +149,7 @@ def owui_source_events(sources: list[dict]) -> list[dict]:
         used_names.add(name)
         lines = [f"**{s['title']}**", ""]
         facts = [f"Stand: {s['stand']}" if s["stand"] else "", f"abgerufen am {s['fetched']}" if s["fetched"] else "",
-                 f"Quelle: {s['kind']}" if s["kind"] else ""]
+                 f"Quelle: {source_label(s['kind'])}" if s["kind"] else ""]
         lines += ["  \n".join(f for f in facts if f)]
         if s["excerpt"]:
             lines += ["", ("Auszug aus der Quelle:" if s["excerpt_kind"] == "quote" else "Aussage im Bericht:"), "", f"> {s['excerpt']}"]
