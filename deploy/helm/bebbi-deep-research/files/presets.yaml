@@ -13,12 +13,24 @@ mcp_servers:
       opencaselaw (Swiss law, external): search_legislation finds whole enactments by name or topic
       (canton code, e.g. canton="BS"); get_law returns the text of one article (canton + systematic number
       + article); search_laws finds articles by topic; search_decisions finds court decisions.
+    tools:   # shown to the model instead of the server's descriptions (up to 1,000 characters each)
+      search_legislation: Find whole laws (Erlasse) by name or subject, federal or cantonal (canton="BS"). Returns title, systematic number and a LexFind ID. Start here for "which law regulates X".
+      get_legislation: Full text and article list of one law by systematic_number + canton, or by lexfind_id. Long; prefer get_law when you know the article.
+      get_law: Text of one article (§) of a law. Give canton, sr_number (the systematic number, also for cantonal law) and article without the § sign.
+      search_laws: Find articles by topic across all laws (full text). Use German legal terms; filter with canton.
+      search_decisions: Find court decisions by topic; filter by canton, court or date. Returns docket numbers and links.
+      get_erwaegung: Verbatim text of one numbered consideration (Erwägung) of a decision.
   data-bs:
     url: https://mcp.data.bs.ch/mcp
     hint: |
       data_bs (open data portal data.bs.ch): get_datasets finds datasets by topic; call get_dataset before
       get_records to learn the real field names; get_records with group_by/order_by/limit returns figures
-      (use select and where to keep results small).
+      (use select and where to keep results small). Year fields are often text: do not compare them with
+      >= or <; use group_by=jahr, order_by="jahr desc" and limit instead, or where jahr in ("2015","2024").
+    tools:
+      get_datasets: Search the open data catalogue of Basel-Stadt by topic (semantic) or exact name (search_mode="lexical"). Returns dataset ids, titles and URLs.
+      get_dataset: Metadata of one dataset, above all the real field names and types. Call it before get_records.
+      get_records: Rows of a dataset with ODSQL select/where/group_by/order_by/limit. Use field names from get_dataset; text year fields need group_by/order_by, not >=.
   grossrat:
     url: https://mcp-grosserrat.statistik.bs.ch/mcp
     hint: |
@@ -27,12 +39,22 @@ mcp_servers:
       "Stadtklima", "Hitzeminderung"), filter with since/until (YYYY-MM-DD) or geschaeftsart; then
       get_geschaeft for the important items (status, documents, Regierungsrat answers, decisions); search_documents
       finds passages; get_document reads a document. Filter values in exact spelling come from list_facets.
+    tools:
+      find_geschaefte: Complete list of Grosser Rat business items for a question. Give 3-6 German phrasings (council wording, whole compounds); filter with since/until (YYYY-MM-DD), geschaeftsart, status. Returns number, title, type, status, URL; no texts.
+      get_geschaeft: Dossier of one business item by number (e.g. "23.5544"). Status, all documents with date and URL, assignments with deadlines, council decisions.
+      search_documents: Full-text search for passages in all documents (motions, Regierungsrat answers, Ratschläge, minutes). Returns snippets with a citation link and dok_laufnr.
+      get_document: Text of one document by dok_laufnr (20,000 characters per window; continue with offset). Use it to read what a Regierungsrat answer or Ratschlag actually says.
+      list_facets: Allowed values of a filter (partei, geschaeftsart, status, dokumentart) in exact spelling.
   statistik:
     url: https://mcp.statistik.bs.ch/mcp
     enabled: false            # not working yet (2026-10-09): switch on when the server is fixed
     hint: |
       statistik (Indikatorenportal statistik.bs.ch): search_indicators with German terms, get_indicator for
       definitions and sources, get_indicator_data for the time series.
+    tools:
+      search_indicators: Find indicators of the Statistisches Amt Basel-Stadt with German terms. Returns ids, titles, portal URLs.
+      get_indicator: Definition, sources and notes of one indicator.
+      get_indicator_data: Time series of one indicator (headers, rows, unit, source, portal URL).
 
 budgets:
   # rounds: research rounds incl. follow-ups; max_subq: sub-questions in the plan;
