@@ -89,7 +89,33 @@ suggestion prompts per preset ("Deep Research · Recht", ...) in the format of `
    again in that chat before the delivery, the pipe asks the service for the job and returns the report (or status) in the
    new reply. If the delivery failed, the report is retrievable this way and via `GET /jobs/{id}`.
 
-After a delivery the marker is gone (the report replaces the message), so the next message starts a new research.
+After a delivery the marker is gone (the report replaces the message), so the next message starts a new research. This
+is acceptable: the report is the end of a research, and a follow-up question becomes a new task (the pipe asks
+clarifying questions or shows a plan). A follow-up that asks about the report content is not answered from the report;
+users should use a normal model for that. Making the delivered message carry a "finished" marker would only make the
+pipe answer the next message with the same report again, so we left it out. The same holds for a report that the pipe
+returns itself (`jetzt` run that finishes while streaming): it carries no marker either.
+
+### How the pipe and the delivery fit Open WebUI v0.11.4 (found in the end-to-end test)
+
+* **State marker**: a markdown link reference definition `[//]: # (research-agent:<base64>)`. It is valid markdown and
+  never rendered. The first version used an HTML comment, which Open WebUI shows as text.
+* **`output` wins over `content`**: v0.11 stores the pipe answer as `output` items and the UI renders `output` in
+  preference to `content`. `POST /chats/{id}/messages/{mid}` (and the `chat:message` event) change only `content`, so
+  a delivery into a normal pipe answer is stored but never shown. The pipe therefore sends the text of every message
+  that the service will replace later ("queued for the night", "runs in the background") as a `replace` event and
+  returns an empty string; the stored message then has `content` and an empty `output`, and the delivery is
+  displayed, live in an open chat and after reload.
+* **Background tasks** (title, tags, follow-ups) are sent by Open WebUI to the chat model, i.e. to the pipe. The pipe
+  answers them locally (`__task__`) and never calls the service for them; the chat title comes from the question/plan.
+* **Citations**: Open WebUI turns `[1]` into a citation chip and removes it when the message has no `sources`; the
+  source list also collapsed into one paragraph. Reports are shown with a zero-width space after the bracket
+  (`ui_markdown()` in the pipe and in `service/jobs.py`); the stored job report (`GET /jobs/{id}`) stays unchanged.
+  Copying `[1]` out of the chat includes the invisible character.
+* **Models** need `access_grants` (read for everyone, or groups); `access_control: null` of older versions means
+  "admin only" in v0.11.4. `deploy/openwebui/models.json` has the grant.
+* **Model list cache**: after installing a function or model, open Open WebUI once (`GET /api/models`) before sending
+  completions with the new model id; the first completion otherwise answers "Model not found".
 
 ## 6. Network
 
@@ -98,13 +124,44 @@ After a delivery the marker is gone (the report replaces the message), so the ne
 * Service to vLLM, Firecrawl, Postgres: cluster-internal, in `NO_PROXY`. Serper and the MCP servers go through the
   proxy unless they are reachable directly. See [operations.md](operations.md#proxy).
 
-## 7. Local end-to-end test (compose)
+## 7. End-to-end test with a real Open WebUI (verified 2026-10-09)
+
+Setup: `docker compose -f compose.yaml -f compose.eval-net.yaml up -d` (Open WebUI v0.11.4, service, Postgres; LLM
+gateway, search and Firecrawl of the evaluation stack), admin from `WEBUI_ADMIN_EMAIL/PASSWORD`, API key and the
+pipe/models via `scripts/install_pipe.py --create-api-key --models`, a normal user "tester" for the chats. Keys only in
+the git-ignored `.env`. `scripts/e2e_owui.py` drives Open WebUI like the browser (`POST /api/v1/chats/new`, then
+`POST /api/chat/completions` with `chat_id`, `id` = assistant message, `parent_id`, `user_message`; v0.11 runs this
+as a background task and stores both messages itself, the script polls the stored chat). One run through the real UI
+was done in the browser pane (typing into the chat). Screenshots: [plan](img/plan-turn.jpg),
+[report](img/report-top.jpg), [sources](img/report-sources.jpg).
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | Daytime quick run (preset grossrat, 16:2x local, outside the window): question, clarifying question, answer, plan, plan edit, "ok jetzt" | passed. Job `928532b4e965`, 182 s, 23k prompt tokens, `when=now`. Report with 14 numbered sources with URLs, state marker invisible (see screenshots). Delivery was `skipped` there (the key was not yet in the service); the pipe returned the report itself |
+| 2 | Night run with delivery by admin key | passed. "heute Nacht" queued the job (`research_in_night_window 0`, stayed `queued`); restart with `RA_NIGHT_WINDOW=00:00-23:59` ran it: job `472eb33c7e5a`, 157 s, `delivery ok`; the stored assistant message of the tester's chat is the 6186-character report. Live update in an open chat verified with the delivery endpoint on a message of an open page (content replaced without reload), after the `output` fix above. Job `8382516f4090` (247 s, `delivery ok`) delivered into the chat as well |
+| 3 | Fallback (service without `OWUI_API_KEY`) | passed. Job `02ae007b9453` (282 s) finished, `delivery skipped`; the chat still showed the queued text. Typing "Ist der Bericht schon fertig?" in the real UI returned the report in the new reply, sources visible, no marker |
+| 4 | Error path (wrong model name `RA_LLM_MODEL_*`) | passed for the chat-turn endpoints: the user sees "Deep Research ist nicht verfügbar: Die Anfrage konnte nicht verarbeitet werden. Das Sprachmodell lehnt die Anfrage ab (Modellname oder Zugang falsch konfiguriert) ..." (was a bare "Internal Server Error"). A failing *job* was not run live (job budget); unit test `test_llm_errors_are_reported_in_german` covers the job error and its delivery text |
+| 5 | Service restart while a job runs | passed. `docker compose restart service` 41 s into job `8382516f4090`: log "job re-queued on shutdown", restarted 2 s after the start, finished (247 s total). The crash path (no heartbeat, `RA_STALE_SECONDS`) is covered by the unit tests only |
+
+Known limitations:
+
+* No Playwright/Chrome was available; the browser run used the desktop app's browser pane. The status events
+  ("Erstelle Rechercheplan", ...) are stored with the message (`Plan erstellt` shows in the UI); live status of a
+  running "jetzt" job was not observed because the UI session of that run was a script.
+* After a delivery the next message starts a new research (see above).
+* `[1]` carries a zero-width space in the chat; the plain report is available from the API.
+* The delivery key can write every chat (admin); keep NetworkPolicy and secret handling as described.
+* A message that carries a status text (job still running when the user writes again) is a new assistant message; the
+  report is delivered into the original one.
+
+## 8. Local end-to-end test (compose)
 
 ```bash
 cp .env.example .env     # set RA_*, POSTGRES_PASSWORD, WEBUI_SECRET_KEY, WEBUI_ADMIN_EMAIL/PASSWORD
 docker compose up -d --build
 OWUI_ADMIN_EMAIL=... OWUI_ADMIN_PASSWORD=... RA_TOKEN=... uv run python scripts/install_pipe.py --create-api-key --models
-# put the printed OWUI_API_KEY into .env, then: docker compose up -d service
+# put the printed OWUI_API_KEY into .env, then recreate the service so that it reads it: docker compose up -d service
+# (without the key the delivery is `skipped`; after code changes build with `docker compose build service`)
 ```
 
 Set `RA_NIGHT_WINDOW=00:00-23:59` in `.env` to let every job run at once while testing. With the evaluation stack on the

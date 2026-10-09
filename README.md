@@ -70,7 +70,7 @@ scripts/smoke_local.sh                   # starts the service on SQLite against 
 | `deploy/helm/bebbi-deep-research/` | Helm chart |
 | `deploy/openwebui/` | `function.json` and `models.json` for the seeder |
 | `docs/` | integration, operations, presets, evaluation, MCP servers |
-| `tests/`, `scripts/` | unit and service tests; pipe simulator, installer, smoke test |
+| `tests/`, `scripts/` | unit and service tests; pipe simulator, installer, smoke test, `e2e_owui.py` (drives a local Open WebUI like the browser) |
 
 ## Documentation
 

@@ -12,7 +12,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project
 COPY research_agent ./research_agent
 COPY service ./service
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-editable
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-editable --reinstall-package bebbi-deep-research
 
 FROM python:3.12-slim-bookworm
 LABEL org.opencontainers.image.title="bebbi-deep-research" \
