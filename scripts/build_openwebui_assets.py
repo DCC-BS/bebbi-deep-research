@@ -42,7 +42,7 @@ def build() -> dict[str, str]:
     for name, p in cfg["presets"].items():
         models.append({
             "id": f"{FUNCTION_ID}.{name}", "base_model_id": None, "name": f"Deep Research · {LABELS.get(name, name)}",
-            "params": {}, "access_control": None, "is_active": True,
+            "params": {}, "access_grants": [{"principal_type": "user", "principal_id": "*", "permission": "read"}], "is_active": True,
             "meta": {"description": p["description"], "capabilities": {"vision": False, "file_upload": False, "citations": False},
                      "suggestion_prompts": [{"content": s} for s in SUGGESTIONS.get(name, [])]},
         })

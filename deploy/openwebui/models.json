@@ -4,7 +4,13 @@
     "base_model_id": null,
     "name": "Deep Research · Web",
     "params": {},
-    "access_control": null,
+    "access_grants": [
+      {
+        "principal_type": "user",
+        "principal_id": "*",
+        "permission": "read"
+      }
+    ],
     "is_active": true,
     "meta": {
       "description": "Broad research across the web (international topics, markets, technology, science).",
@@ -25,7 +31,13 @@
     "base_model_id": null,
     "name": "Deep Research · Verwaltung",
     "params": {},
-    "access_control": null,
+    "access_grants": [
+      {
+        "principal_type": "user",
+        "principal_id": "*",
+        "permission": "read"
+      }
+    ],
     "is_active": true,
     "meta": {
       "description": "Recherche zu Verwaltung, Strategien und Webangeboten von Bund, Kantonen und Städten.",
@@ -46,7 +58,13 @@
     "base_model_id": null,
     "name": "Deep Research · Recht",
     "params": {},
-    "access_control": null,
+    "access_grants": [
+      {
+        "principal_type": "user",
+        "principal_id": "*",
+        "permission": "read"
+      }
+    ],
     "is_active": true,
     "meta": {
       "description": "Rechtsrecherche Bund und Kanton Basel-Stadt (Erlasse, Rechtsprechung, Materialien).",
@@ -67,7 +85,13 @@
     "base_model_id": null,
     "name": "Deep Research · Grosser Rat",
     "params": {},
-    "access_control": null,
+    "access_grants": [
+      {
+        "principal_type": "user",
+        "principal_id": "*",
+        "permission": "read"
+      }
+    ],
     "is_active": true,
     "meta": {
       "description": "Recherche in Geschäften, Vorstössen und Beschlüssen des Grossen Rates Basel-Stadt.",
@@ -88,7 +112,13 @@
     "base_model_id": null,
     "name": "Deep Research · Statistik",
     "params": {},
-    "access_control": null,
+    "access_grants": [
+      {
+        "principal_type": "user",
+        "principal_id": "*",
+        "permission": "read"
+      }
+    ],
     "is_active": true,
     "meta": {
       "description": "Zahlen und Zeitreihen aus der amtlichen Statistik (Basel-Stadt, Bund).",

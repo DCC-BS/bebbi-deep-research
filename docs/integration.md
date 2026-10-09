@@ -77,7 +77,7 @@ in `GET /jobs/{id}`: `ok`, `skipped` when the job has no chat, or `failed: ...`)
 
 The manifold creates the models automatically. `deploy/openwebui/models.json` adds names, descriptions and
 suggestion prompts per preset ("Deep Research · Recht", ...) in the format of `POST /api/v1/models/import`; set
-`access_control` there for Entra groups (G1 is optional).
+`access_grants` there. In v0.11.4 a model without grants is visible to admins only (the old `access_control: null` no longer means public); the file grants read to everyone (`principal_type: user, principal_id: "*"`). Replace it with `principal_type: group` entries for Entra groups (G1 is optional).
 
 ## 5. Chat flow and the fallback
 

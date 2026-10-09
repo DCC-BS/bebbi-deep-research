@@ -85,7 +85,26 @@ class Pipe:
                 raise RuntimeError(r.json().get("detail", r.text) if r.headers.get("content-type", "").startswith("application/json") else r.text)
             return r.json()
 
-    async def pipe(self, body: dict, __user__: dict, __event_emitter__=None, __chat_id__=None, __message_id__=None):
+    @staticmethod
+    def _task_reply(task: str, body: dict) -> str:
+        """Open WebUI sends background tasks (chat title, tags, follow-ups) to the model of the chat. They must not start
+        a research: answer them locally with the JSON the task expects."""
+        if task == "title_generation":
+            prompt = " ".join(str(m.get("content", "")) for m in body.get("messages", []))
+            found = MARK.search(prompt)       # the chat history of the task carries our state marker (clarify state: the task)
+            task_text = json.loads(found.group(1)).get("task", "") if found else ""
+            title = " ".join(task_text.split())[:50] or "Deep Research"
+            return json.dumps({"title": title}, ensure_ascii=False)
+        if task == "tags_generation":
+            return json.dumps({"tags": ["Recherche"]}, ensure_ascii=False)
+        if task == "follow_up_generation":
+            return json.dumps({"follow_ups": []})
+        return ""
+
+    async def pipe(self, body: dict, __user__: dict, __event_emitter__=None, __chat_id__=None, __message_id__=None, __task__=None):
+        if __task__:
+            return self._task_reply(str(__task__), body)
+
         async def status(text: str, done: bool = False):
             if __event_emitter__:
                 await __event_emitter__({"type": "status", "data": {"description": text, "done": done}})
@@ -118,7 +137,8 @@ class Pipe:
                         why = (" Tagsüber laufen nur schnelle Recherchen (Tiefe quick) sofort." if when == "now" else "")
                         return (f"Auftrag eingereiht für das Nachtfenster ({job['window']}).{why} Der Bericht erscheint "
                                 "in diesem Chat, sobald er fertig ist." + _marker(st))
-                    return await self._stream(job["job_id"], status) + _marker(st)
+                    text, finished = await self._stream(job["job_id"], status)
+                    return text if finished else text + _marker(st)   # a finished report carries no marker: the next message starts anew
                 if st.get("edits", 0) >= 3:
                     return "Der Plan wurde bereits dreimal angepasst. Bitte mit **ok** starten oder neu beginnen." + _marker(st)
                 await status("Passe den Plan an")
@@ -149,20 +169,21 @@ class Pipe:
             await status("Fehler", done=True)
             return f"Deep Research ist nicht verfügbar: {e}" + (_marker(st) if st else "")
 
-    async def _stream(self, job_id: str, status) -> str:
+    async def _stream(self, job_id: str, status) -> tuple[str, bool]:
+        """Stream the status of a running job. Returns (text, finished): the report or error when the job ended, else a hint."""
         deadline = time.time() + 60 * self.valves.MAX_WAIT_MINUTES
         last = ""
         while time.time() < deadline:
             job = await self._api("GET", f"/jobs/{job_id}")
             if job["status"] == "done":
                 await status("Bericht fertig", done=True)
-                return job["report"]
+                return job["report"], True
             if job["status"] == "error":
                 await status("Fehler", done=True)
-                return f"Die Recherche ist fehlgeschlagen: {job.get('error')}"
+                return f"Die Recherche ist fehlgeschlagen: {job.get('error')}", True
             if job["events"] and job["events"][-1]["text"] != last:
                 last = job["events"][-1]["text"]
                 await status(last)
             await asyncio.sleep(self.valves.POLL_SECONDS)
         await status("Läuft im Hintergrund weiter", done=True)
-        return "Die Recherche dauert länger. Der Bericht erscheint in diesem Chat, sobald er fertig ist."
+        return "Die Recherche dauert länger. Der Bericht erscheint in diesem Chat, sobald er fertig ist.", False
