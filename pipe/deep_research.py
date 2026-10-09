@@ -32,6 +32,14 @@ NOW = re.compile(r"\b(jetzt|sofort|now)\b", re.I)
 DEPTH_WORDS = {"quick": re.compile(r"\b(schnell|kurz|quick)\b", re.I), "deep": re.compile(r"\b(gründlich|gruendlich|tief|deep)\b", re.I)}
 
 
+def ui_markdown(report: str) -> str:
+    """Open WebUI v0.11 turns `[1]` into a citation chip and drops it when the message has no `sources`, so the
+    references of the report would vanish and the source list would collapse into one paragraph. A zero-width space
+    after the bracket keeps `[1]` visible; source lines get their own paragraph. (Same function in service/jobs.py.)"""
+    text = re.sub(r"\[(\d+)\]", "[\u200b\\1]", report)
+    return re.sub(r"\n(?=\[\u200b\d+\] )", "\n\n", text)
+
+
 def _marker(state: dict) -> str:
     payload = base64.urlsafe_b64encode(json.dumps(state, ensure_ascii=False).encode()).decode()
     return f"\n\n[//]: # (research-agent:{payload})"
@@ -140,7 +148,7 @@ class Pipe:
             if st.get("state") == "job":
                 job = await self._api("GET", f"/jobs/{st['job']}")
                 if job["status"] == "done":
-                    return job["report"]
+                    return ui_markdown(job["report"])
                 if job["status"] == "error":
                     return f"Die Recherche ist fehlgeschlagen: {job.get('error')}"
                 last = job["events"][-1]["text"] if job["events"] else "wartet in der Warteschlange"
@@ -198,7 +206,7 @@ class Pipe:
             job = await self._api("GET", f"/jobs/{job_id}")
             if job["status"] == "done":
                 await status("Bericht fertig", done=True)
-                return job["report"], True
+                return ui_markdown(job["report"]), True
             if job["status"] == "error":
                 await status("Fehler", done=True)
                 return f"Die Recherche ist fehlgeschlagen: {job.get('error')}", True

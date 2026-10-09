@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -19,6 +20,14 @@ from .settings import Settings
 
 logger = logging.getLogger("service.jobs")
 LIVE = ("starting", "running")
+
+
+def ui_markdown(report: str) -> str:
+    """Report text for the Open WebUI chat: v0.11 turns `[1]` into a citation chip and drops it when the message has no
+    `sources`; a zero-width space after the bracket keeps the reference visible. Source lines get their own paragraph.
+    The same function is in pipe/deep_research.py (the pipe has no dependencies); a test checks both."""
+    text = re.sub(r"\[(\d+)\]", "[\u200b\\1]", report)
+    return re.sub(r"\n(?=\[\u200b\d+\] )", "\n\n", text)
 
 
 def in_window(settings: Settings, now: datetime | None = None) -> bool:
@@ -165,13 +174,14 @@ class JobRunner:
         s = self.settings
         if not (s.owui_url and s.owui_api_key and job.get("chat_id") and job.get("message_id")):
             await self.db.execute("update jobs set delivery='skipped' where id=:i", i=job["id"])
+            log(logger, "delivery skipped", job=job["id"], reason="no OWUI_URL/OWUI_API_KEY or job without chat")
             return
         outcome = "failed"
         for attempt in range(3):
             try:
                 async with self.http_factory() as http:
                     r = await http.post(f"{s.owui_url}/api/v1/chats/{job['chat_id']}/messages/{job['message_id']}",
-                                        json={"content": content}, headers={"Authorization": f"Bearer {s.owui_api_key}"})
+                                        json={"content": ui_markdown(content)}, headers={"Authorization": f"Bearer {s.owui_api_key}"})
                 if r.status_code < 300:
                     outcome = "ok"
                     break

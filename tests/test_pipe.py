@@ -103,3 +103,13 @@ def test_queued_message_is_sent_as_replace_event_with_empty_output():
     replace = [e for e in events if e["type"] == "replace"]
     assert len(replace) == 1 and "Nachtfenster" in replace[0]["data"]["content"]
     assert mod._state([{"role": "assistant", "content": replace[0]["data"]["content"]}, {}])["job"] == "j1"
+
+
+def test_ui_markdown_keeps_citations_visible_and_matches_service():
+    from service.jobs import ui_markdown as service_version
+
+    mod = load_pipe()
+    report = "Beleg [1][2].\n\n## Quellen\n\n[1] Eins. https://a.ch\n[2] Zwei. https://b.ch"
+    out = mod.ui_markdown(report)
+    assert "[​1][​2]" in out and "\n\n[​2] Zwei" in out and "https://a.ch" in out
+    assert service_version(report) == out

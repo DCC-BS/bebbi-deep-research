@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from service.db import DB
-from service.jobs import in_window
+from service.jobs import in_window, ui_markdown
 from service.settings import Settings, normalize_db_url
 
 from .conftest import PLAN, FakeAgent, running, submit, utc_window, wait_status
@@ -68,7 +68,7 @@ async def test_job_lifecycle_and_delivery(tmp_path):
                 break
             await asyncio.sleep(0.05)
         assert j["delivery"] == "ok"
-        assert posted == [("http://owui/api/v1/chats/chat1/messages/msg1", "Bearer k", {"content": j["report"]})]
+        assert posted == [("http://owui/api/v1/chats/chat1/messages/msg1", "Bearer k", {"content": ui_markdown(j["report"])})]
         assert "cards" in (await c.get(f"/jobs/{job['job_id']}/evidence")).json()
         assert 'research_jobs{status="done"} 1' in (await c.get("/metrics")).text
 
