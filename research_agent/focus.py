@@ -185,7 +185,7 @@ class FocusEngine:
                       "mcp_errors": dict(self.agent._mcp_errors)})
         u = self.llm.usage
         await self.agent._emit("status", "Bericht fertig")
-        return Result(report=report, plan=plan or {}, ledger={"sources": reg.to_list(), "trail": trail},
+        return Result(report=report, plan=plan or {}, ledger={"sources": reg.to_list(), "trail": trail, "draft": final},
                       usage={"calls": u.calls, "prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens,
                              "by_step": u.by_step}, stats=stats)
 
@@ -222,15 +222,18 @@ def finalize(text: str, reg: Registry, task: str, de: bool, stats: dict) -> str:
 
 def verify(text: str, reg: Registry, task_ev: Evidence, de: bool, stats: dict) -> str:
     """Per sentence: unknown IDs go; numbers must be in a cited source. If not, re-point to a source that
-    has them; if no source at all has any of them, a cited prose sentence goes (reliable signal), a table
-    row is marked. Sentences without citation are never removed, only given a citation when one source
-    has all their numbers."""
+    has them (paragraph first, then report, then any source); bare years never decide, they occur in too
+    many sources. If no source at all has any of the numbers, a cited prose sentence goes (reliable signal),
+    a table row is marked. Sentences without citation are never removed; they get a citation only from a
+    source the report already cites. Every change is logged in stats["citation_changes"]."""
     def bump(k):
         stats[k] = stats.get(k, 0) + 1
 
+    report_ids = list(dict.fromkeys(f"S{i}" for i in re.findall(r"\[S(\d+)\]", text) if f"S{i}" in reg.sources))
     out_lines = []
     open_section = False
     for line in text.split("\n"):
+        line_ids = list(dict.fromkeys(f"S{i}" for i in re.findall(r"\[S(\d+)\]", line) if f"S{i}" in reg.sources))
         if line.lstrip().startswith("#"):
             open_section = bool(re.search(r"offene punkte|grenzen|open questions|limitations", line, re.I))
             out_lines.append(line)
@@ -263,9 +266,23 @@ def verify(text: str, reg: Registry, task_ev: Evidence, de: bool, stats: dict) -
                 bump("cited_ok" if ids else "uncited_numbers")
                 new_units.append(u)
                 continue
-            fix = _find_source(reg, [f for _, f in missing], prefer=cited)
+            if not any(_distinctive(tok) for tok, _ in missing):
+                # only years are missing: too common to pick another source by (a letter on e-mobility that
+                # mentions "2022" is not a source for a 2022 vote); leave the model's citation as it is
+                bump("years_only" if ids else "uncited_numbers")
+                new_units.append(u)
+                continue
+            # where code may look: for a cited sentence the sources of this paragraph, then of the report, then
+            # any; for an uncited one only sources the report already cites (code never introduces a source)
+            near = [reg.sources[i] for i in line_ids if i not in ids]
+            pool = near + [reg.sources[i] for i in report_ids if i not in ids and i not in line_ids]
+            if ids:
+                pool += [x for x in reg.sources.values() if x not in pool and x not in cited]
+            fix = _find_source(pool, [f for _, f in missing]) or \
+                _find_source(pool, [f for tok, f in missing if _distinctive(tok)])
             if fix:
                 tag = f"[{fix.id}]"
+                before = u
                 if ids and len(ids) >= 2:
                     u = u.replace(f"[{ids[-1]}]", tag, 1)
                 elif ids:
@@ -273,6 +290,9 @@ def verify(text: str, reg: Registry, task_ev: Evidence, de: bool, stats: dict) -
                 else:
                     u = _append_tag(u, tag)
                 bump("repaired" if ids else "added_citation")
+                stats.setdefault("citation_changes", []).append({
+                    "action": "repaired" if ids else "added", "sentence": before.strip()[:240],
+                    "numbers": [tok for tok, _ in missing], "from": [c.title[:100] for c in cited], "to": fix.title[:100]})
                 new_units.append(u)
                 continue
             anywhere = [tok for tok, f in nums if any(s.ev().supports(f) for s in reg.sources.values())]
@@ -285,6 +305,7 @@ def verify(text: str, reg: Registry, task_ev: Evidence, de: bool, stats: dict) -
                 else:
                     bump("dropped_sentences")
                     stats.setdefault("dropped", []).append(u.strip()[:200])
+                    stats.setdefault("citation_changes", []).append({"action": "dropped", "sentence": u.strip()[:240]})
                 continue
             bump("partly_supported" if ids else "uncited_numbers")
             new_units.append(u)
@@ -297,9 +318,13 @@ def _append_tag(u: str, tag: str) -> str:
     return u[:m.start()] + f" {tag}" + m.group(1) if m else u + f" {tag}"
 
 
-def _find_source(reg: Registry, forms: list[dict], prefer: list[Source]) -> Source | None:
-    pool = prefer + [s for s in reg.sources.values() if s not in prefer]
-    return next((s for s in pool if all(s.ev().supports(f) for f in forms)), None)
+def _find_source(pool: list[Source], forms: list[dict]) -> Source | None:
+    return next((s for s in pool if forms and all(s.ev().supports(f) for f in forms)), None)
+
+
+def _distinctive(tok: str) -> bool:
+    """A number that can pick a source: amounts, percentages, identifiers, full dates; not a bare year."""
+    return not re.fullmatch(r"(?:19|20)\d{2}", re.sub(r"['’\u202f\u2009 ]", "", tok))
 
 
 def resolve(text: str, reg: Registry, de: bool, stats: dict) -> str:

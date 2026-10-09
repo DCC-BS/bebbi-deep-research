@@ -28,11 +28,33 @@ def test_repoint_and_drop():
     assert stats["unknown_ids"] == 1
 
 
-def test_uncited_numbers_get_citation_and_sr_fix():
+def test_uncited_numbers_get_citation_only_from_cited_sources_and_sr_fix():
     stats = {}
     out = finalize("Die Leerwohnungsziffer lag 2024 bei 1,1 %. Das IDG (SR 153.260) regelt dies [S3].", _reg(), "Frage", True, stats)
-    assert stats["added_citation"] == 1 and "1,1 % [1]" in out
+    assert "added_citation" not in stats            # S2 has 1,1 % but the report does not cite it: no new source
     assert "SG 153.260" in out and "SR 153.260" not in out
+    stats = {}
+    out = finalize("Es gab 1'176 leere Wohnungen [S2]. Die Leerwohnungsziffer lag 2024 bei 1,1 %.", _reg(), "Frage", True, stats)
+    assert stats["added_citation"] == 1 and "1,1 % [1]" in out
+    assert stats["citation_changes"][0]["action"] == "added"
+
+
+def test_years_never_pick_another_source():
+    reg = _reg()
+    reg.add("https://example.org/e-mobility", "Masterplan Elektromobilität", "web", "Bericht vom März 2022 zur Elektromobilität")
+    stats = {}
+    out = finalize("Die Motion wurde 2022 überwiesen [S1].", reg, "Frage", True, stats)
+    assert "repaired" not in stats and stats["years_only"] == 1
+    assert "Elektromobilität" not in out
+
+
+def test_repair_prefers_source_of_same_paragraph():
+    reg = _reg()
+    reg.add("https://example.org/other", "Fremdes Dokument", "web", "irgendwo 1'176 erwähnt")      # S4
+    stats = {}
+    out = finalize("Die Ziffer betrug 1,1 % [S2]. Es gab 1'176 leere Wohnungen [S1].", reg, "Frage", True, stats)
+    assert stats["citation_changes"][0]["to"] == "Leerwohnungen"
+    assert "Fremdes Dokument" not in out
 
 
 def test_table_row_marked():
