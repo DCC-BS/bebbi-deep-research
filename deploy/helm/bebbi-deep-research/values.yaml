@@ -1,0 +1,84 @@
+# Helm values of the bebbi-deep-research job service. Everything is configured here (GitOps, no click-ops).
+# Reference of all variables: docs/operations.md.
+
+replicaCount: 1            # >1 is safe (jobs are claimed atomically in Postgres), but one replica is enough
+                           # for the load-limited setup (RA_WORKERS / RA_DAY_WORKERS are per replica).
+
+image:
+  repository: ghcr.io/CHANGE-ME/bebbi-deep-research
+  tag: ""                  # default: chart appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+service:
+  port: 8088
+
+# Plain (non-secret) configuration as environment variables.
+env:
+  RA_LLM_BASE_URL: http://vllm.llm.svc:8000/v1
+  RA_LLM_MODEL_THINK: RedHatAI/gemma-4-31B-it-NVFP4
+  RA_LLM_MODEL_FAST: RedHatAI/gemma-4-31B-it-NVFP4
+  RA_LLM_MODEL_EMBED: Qwen/Qwen3-Embedding-4B
+  # Thinking switch per role (chat template kwargs of vLLM). Verify the key against the model's chat template.
+  RA_LLM_EXTRA_BODY_THINK: '{"chat_template_kwargs": {"enable_thinking": true}}'
+  RA_LLM_EXTRA_BODY_FAST: '{"chat_template_kwargs": {"enable_thinking": false}}'
+  RA_SEARCH_URL: https://google.serper.dev/search
+  RA_FIRECRAWL_URL: http://firecrawl.web.svc:3002
+  OWUI_URL: http://open-webui.open-webui.svc:8080
+  RA_NIGHT_WINDOW: "20:00-05:00"
+  RA_TIMEZONE: Europe/Zurich
+  RA_WORKERS: "1"          # concurrent jobs inside the night window
+  RA_DAY_WORKERS: "1"      # concurrent jobs outside it (only quick runs of focus presets start by day)
+  RA_QUOTA_PER_DAY: "0"    # 0 = no quota
+  RA_LOG_LEVEL: INFO
+
+# Secrets are read from an existing Secret (SealedSecret / External Secrets / Vault). Keys default to the variable name.
+# required: true makes the pod fail to start when the key is missing; false = variable stays unset.
+secrets:
+  existingSecret: bebbi-deep-research
+  keys:
+    RA_TOKEN: {required: true}           # bearer token, same value as the SERVICE_TOKEN valve of the pipe
+    RA_DATABASE_URL: {required: true}    # postgresql://user:password@host:5432/db
+    RA_LLM_API_KEY: {required: false}
+    RA_SEARCH_KEY: {required: true}      # Serper key
+    RA_FIRECRAWL_KEY: {required: false}
+    OWUI_API_KEY: {required: false}      # API key of the Open WebUI admin service account (report delivery)
+    # Per variable another Secret / key name is possible: RA_SEARCH_KEY: {secretName: serper, key: api-key, required: true}
+
+# Egress goes through the HTTP proxy. The LLM, Firecrawl, Open WebUI and Postgres are cluster-internal and MUST be in
+# noProxy; the MCP servers (*.bs.ch) and Serper may or may not need the proxy, depending on where they are reachable.
+# NO_PROXY syntax (httpx): comma-separated host names, domain suffixes (.svc), IPs and CIDRs. No wildcards.
+proxy:
+  http: http://proxy.bs.ch:3128
+  https: http://proxy.bs.ch:3128
+  noProxy: localhost,127.0.0.1,.svc,.cluster.local,.llm.svc
+
+# Presets: by default the chart ships files/presets.yaml (copy of config/presets.yaml). Override inline or reference
+# an own ConfigMap (key presets.yaml).
+presets:
+  existingConfigMap: ""
+  inline: ""
+
+extraEnv: []                 # raw container env entries
+podAnnotations: {}
+tmpSizeLimit: 100Mi          # emptyDir for /tmp (Kyverno caps emptyDir at 250Mi)
+terminationGracePeriodSeconds: 30   # on SIGTERM running jobs are re-queued (uvicorn waits up to 20 s)
+
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {memory: 1Gi}
+
+nodeSelector: {}
+tolerations: []
+
+networkPolicy:
+  enabled: false
+  openWebUIPodLabels: {app.kubernetes.io/name: open-webui}
+  extraIngressFrom: []        # e.g. n8n: [{podSelector: {matchLabels: {app: n8n}}}]
+  # Adapt to the cluster: DNS, the proxy, Postgres, the LLM service, Firecrawl, Open WebUI.
+  egress:
+    - ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - ports: [{port: 3128, protocol: TCP}]      # HTTP proxy
+    - ports: [{port: 5432, protocol: TCP}]      # Postgres
+    - ports: [{port: 8000, protocol: TCP}, {port: 3002, protocol: TCP}, {port: 8080, protocol: TCP}]   # vLLM, Firecrawl, Open WebUI
+    - ports: [{port: 443, protocol: TCP}]       # MCP servers / Serper if reachable directly (no proxy)

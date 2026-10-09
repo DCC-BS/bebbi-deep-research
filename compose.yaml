@@ -1,0 +1,82 @@
+# Local development stack: job service + Postgres + Open WebUI (v0.11.4, same as production).
+# LLM, search and Firecrawl are NOT part of this file: point RA_LLM_BASE_URL, RA_SEARCH_URL and RA_FIRECRAWL_URL
+# (see .env.example) at services on the host or in another compose network (compose.eval-net.yaml).
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d --build
+#   uv run python scripts/install_pipe.py          # installs the pipe + valves into Open WebUI (docs/integration.md)
+
+name: bebbi-dr
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: research
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: research
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U research -d research"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  service:
+    build: .
+    image: bebbi-deep-research:dev
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      RA_TOKEN: ${RA_TOKEN:?set RA_TOKEN in .env}
+      RA_DATABASE_URL: postgresql://research:${POSTGRES_PASSWORD}@postgres:5432/research
+      RA_LLM_BASE_URL: ${RA_LLM_BASE_URL:?}
+      RA_LLM_API_KEY: ${RA_LLM_API_KEY:-}
+      RA_LLM_MODEL_THINK: ${RA_LLM_MODEL_THINK:-gemma-think}
+      RA_LLM_MODEL_FAST: ${RA_LLM_MODEL_FAST:-gemma-fast}
+      RA_LLM_MODEL_EMBED: ${RA_LLM_MODEL_EMBED:-qwen-embed}
+      RA_LLM_EXTRA_BODY_THINK: ${RA_LLM_EXTRA_BODY_THINK:-}
+      RA_LLM_EXTRA_BODY_FAST: ${RA_LLM_EXTRA_BODY_FAST:-}
+      RA_SEARCH_URL: ${RA_SEARCH_URL:?}
+      RA_SEARCH_KEY: ${RA_SEARCH_KEY:-}
+      RA_FIRECRAWL_URL: ${RA_FIRECRAWL_URL:?}
+      RA_FIRECRAWL_KEY: ${RA_FIRECRAWL_KEY:-}
+      RA_NIGHT_WINDOW: ${RA_NIGHT_WINDOW:-20:00-05:00}
+      RA_DAY_WORKERS: ${RA_DAY_WORKERS:-1}
+      RA_WORKERS: ${RA_WORKERS:-1}
+      OWUI_URL: ${OWUI_URL:-http://open-webui:8080}
+      OWUI_API_KEY: ${OWUI_API_KEY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      - ./config/presets.yaml:/app/config/presets.yaml:ro
+    ports: ["127.0.0.1:8088:8088"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.11.4
+    depends_on: [service]
+    environment:
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?set WEBUI_SECRET_KEY in .env}
+      ENABLE_SIGNUP: "false"
+      ENABLE_API_KEYS: "true"
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+      OPENAI_API_BASE_URL: ${RA_LLM_BASE_URL}
+      OPENAI_API_KEY: ${RA_LLM_API_KEY:-none}
+      OFFLINE_MODE: "true"
+      ENABLE_OLLAMA_API: "false"
+    volumes: [owui-data:/app/backend/data]
+    ports: ["127.0.0.1:3000:8080"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  owui-data:

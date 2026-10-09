@@ -1,0 +1,22 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "bdr.fullname" . }}
+  labels: {{- include "bdr.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "bdr.selector" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.openWebUIPodLabels | nindent 14 }}
+        {{- range .Values.networkPolicy.extraIngressFrom }}
+        - {{- toYaml . | nindent 10 }}
+        {{- end }}
+      ports:
+        - {port: 8088, protocol: TCP}
+  egress:
+    {{- toYaml .Values.networkPolicy.egress | nindent 4 }}
+{{- end }}

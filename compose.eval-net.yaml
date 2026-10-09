@@ -1,0 +1,13 @@
+# Optional override: join the network of the evaluation stack (deep-research-evaluation repo), where the LLM
+# gateway ("meter") and Firecrawl ("firecrawl-api") listen only on 127.0.0.1 of the host.
+#   docker compose -f compose.yaml -f compose.eval-net.yaml up -d
+# .env: RA_LLM_BASE_URL=http://meter:4000/v1  RA_SEARCH_URL=http://meter:4000/serper/search  RA_FIRECRAWL_URL=http://firecrawl-api:3002
+services:
+  service:
+    networks: [default, eval]
+  open-webui:
+    networks: [default, eval]
+networks:
+  eval:
+    name: dr-eval
+    external: true

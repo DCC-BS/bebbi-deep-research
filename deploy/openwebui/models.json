@@ -1,0 +1,107 @@
+[
+  {
+    "id": "bebbi_deep_research.web_survey",
+    "base_model_id": null,
+    "name": "Deep Research · Web",
+    "params": {},
+    "access_control": null,
+    "is_active": true,
+    "meta": {
+      "description": "Broad research across the web (international topics, markets, technology, science).",
+      "capabilities": {
+        "vision": false,
+        "file_upload": false,
+        "citations": false
+      },
+      "suggestion_prompts": [
+        {
+          "content": "Which approaches exist for citizen participation platforms in European cities?"
+        }
+      ]
+    }
+  },
+  {
+    "id": "bebbi_deep_research.verwaltung_web",
+    "base_model_id": null,
+    "name": "Deep Research · Verwaltung",
+    "params": {},
+    "access_control": null,
+    "is_active": true,
+    "meta": {
+      "description": "Recherche zu Verwaltung, Strategien und Webangeboten von Bund, Kantonen und Städten.",
+      "capabilities": {
+        "vision": false,
+        "file_upload": false,
+        "citations": false
+      },
+      "suggestion_prompts": [
+        {
+          "content": "Wie organisieren andere Kantone die Open-Data-Strategie?"
+        }
+      ]
+    }
+  },
+  {
+    "id": "bebbi_deep_research.rechtsrecherche",
+    "base_model_id": null,
+    "name": "Deep Research · Recht",
+    "params": {},
+    "access_control": null,
+    "is_active": true,
+    "meta": {
+      "description": "Rechtsrecherche Bund und Kanton Basel-Stadt (Erlasse, Rechtsprechung, Materialien).",
+      "capabilities": {
+        "vision": false,
+        "file_upload": false,
+        "citations": false
+      },
+      "suggestion_prompts": [
+        {
+          "content": "Welche Rechtsgrundlagen regeln Videoüberwachung durch Kantonsbehörden in Basel-Stadt?"
+        }
+      ]
+    }
+  },
+  {
+    "id": "bebbi_deep_research.grossrat",
+    "base_model_id": null,
+    "name": "Deep Research · Grosser Rat",
+    "params": {},
+    "access_control": null,
+    "is_active": true,
+    "meta": {
+      "description": "Recherche in Geschäften, Vorstössen und Beschlüssen des Grossen Rates Basel-Stadt.",
+      "capabilities": {
+        "vision": false,
+        "file_upload": false,
+        "citations": false
+      },
+      "suggestion_prompts": [
+        {
+          "content": "Welche Vorstösse zum Stadtklima hat der Grosse Rat in den letzten Jahren behandelt?"
+        }
+      ]
+    }
+  },
+  {
+    "id": "bebbi_deep_research.statistik",
+    "base_model_id": null,
+    "name": "Deep Research · Statistik",
+    "params": {},
+    "access_control": null,
+    "is_active": true,
+    "meta": {
+      "description": "Zahlen und Zeitreihen aus der amtlichen Statistik (Basel-Stadt, Bund).",
+      "capabilities": {
+        "vision": false,
+        "file_upload": false,
+        "citations": false
+      },
+      "suggestion_prompts": [
+        {
+          "content": "Wie hat sich die Leerwohnungsziffer in Basel-Stadt seit 2015 entwickelt?"
+        }
+      ]
+    }
+  }
+]

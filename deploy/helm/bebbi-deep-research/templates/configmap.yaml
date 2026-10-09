@@ -1,0 +1,14 @@
+{{- if not .Values.presets.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bdr.presetsConfigMap" . }}
+  labels: {{- include "bdr.labels" . | nindent 4 }}
+data:
+  presets.yaml: |
+{{- if .Values.presets.inline }}
+{{ .Values.presets.inline | indent 4 }}
+{{- else }}
+{{ .Files.Get "files/presets.yaml" | indent 4 }}
+{{- end }}
+{{- end }}

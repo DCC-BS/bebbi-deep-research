@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bdr.fullname" . }}
+  labels: {{- include "bdr.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "bdr.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "bdr.selector" . | nindent 8 }}
+      annotations:
+        checksum/presets: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "bdr.fullname" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: service
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: {drop: [ALL]}
+          ports:
+            - {name: http, containerPort: 8088}
+          env:
+            - {name: RA_PRESETS, value: /config/presets.yaml}
+            {{- range $k, $v := .Values.env }}
+            - {name: {{ $k }}, value: {{ $v | toString | quote }}}
+            {{- end }}
+            {{- with .Values.proxy.http }}
+            - {name: HTTP_PROXY, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.proxy.https }}
+            - {name: HTTPS_PROXY, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.proxy.noProxy }}
+            - {name: NO_PROXY, value: {{ . | quote }}}
+            {{- end }}
+            {{- range $envName, $spec := .Values.secrets.keys }}
+            {{- $secret := default $.Values.secrets.existingSecret $spec.secretName }}
+            {{- if $secret }}
+            - name: {{ $envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ default $envName $spec.key }}
+                  optional: {{ not $spec.required }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 3
+            failureThreshold: 40
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: presets, mountPath: /config, readOnly: true}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: {{ .Values.tmpSizeLimit }}}
+        - name: presets
+          configMap: {name: {{ include "bdr.presetsConfigMap" . }}}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}

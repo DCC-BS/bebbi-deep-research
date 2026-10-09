@@ -1,0 +1,169 @@
+# research-agent presets (docs/research-agent-design.md). One preset = one research profile; in Open WebUI
+# each preset becomes its own model ("Deep Research · Recht", ...). Only steering surface: no code per topic.
+#
+# engine: focus    = bounded tool-calling loop with code-resolved citations (administrative presets)
+#         pipeline = plan, research rounds, section-wise writing (broad web surveys)
+
+# MCP servers. `hint` is shown to the focus engine next to the tools; `enabled: false` keeps a server
+# configured but unused (presets that list it simply do without it).
+mcp_servers:
+  opencaselaw:
+    url: https://mcp.opencaselaw.ch/
+    hint: |
+      opencaselaw (Swiss law, external): search_legislation finds whole enactments by name or topic
+      (canton code, e.g. canton="BS"); get_law returns the text of one article (canton + systematic number
+      + article); search_laws finds articles by topic; search_decisions finds court decisions.
+  data-bs:
+    url: https://mcp.data.bs.ch/mcp
+    hint: |
+      data_bs (open data portal data.bs.ch): get_datasets finds datasets by topic; call get_dataset before
+      get_records to learn the real field names; get_records with group_by/order_by/limit returns figures
+      (use select and where to keep results small).
+  grossrat:
+    url: https://mcp-grosserrat.statistik.bs.ch/mcp
+    hint: |
+      grossrat (all business of the Grosser Rat Basel-Stadt since 1973, full texts): to list the business
+      items on a topic use find_geschaefte with 3-6 German phrasings (council wording, whole compounds such as
+      "Stadtklima", "Hitzeminderung"), filter with since/until (YYYY-MM-DD) or geschaeftsart; then
+      get_geschaeft for the important items (status, documents, Regierungsrat answers, decisions); search_documents
+      finds passages; get_document reads a document. Filter values in exact spelling come from list_facets.
+  statistik:
+    url: https://mcp.statistik.bs.ch/mcp
+    enabled: false            # not working yet (2026-10-09): switch on when the server is fixed
+    hint: |
+      statistik (Indikatorenportal statistik.bs.ch): search_indicators with German terms, get_indicator for
+      definitions and sources, get_indicator_data for the time series.
+
+budgets:
+  # rounds: research rounds incl. follow-ups; max_subq: sub-questions in the plan;
+  # queries_per_subq: web queries per sub-question and round; fetch_per_subq: pages read per sub-question and round;
+  # max_follow_up: new sub-questions the reflection may add per round; max_tokens: hard stop for research.
+  # focus_calls / focus_words: tool calls and typical report length of the focus engine.
+  quick:    {rounds: 1, max_subq: 4, queries_per_subq: 2, fetch_per_subq: 3, max_follow_up: 0, max_tokens: 200000, words_per_part: 350, parts: [2, 3], focus_calls: 8, focus_words: 600}
+  standard: {rounds: 2, max_subq: 8, queries_per_subq: 3, fetch_per_subq: 4, max_follow_up: 4, max_tokens: 450000, words_per_part: 800, parts: [4, 6], focus_calls: 14, focus_words: 900}
+  deep:     {rounds: 3, max_subq: 10, queries_per_subq: 3, fetch_per_subq: 5, max_follow_up: 6, max_tokens: 900000, words_per_part: 1100, parts: [5, 8], focus_calls: 20, focus_words: 1300}
+
+defaults: &defaults
+  avoid_domains: [facebook.com, instagram.com, tiktok.com, x.com, twitter.com, pinterest.com, linkedin.com,
+                  apps.apple.com, play.google.com, quora.com, reddit.com, medium.com, scribd.com, coursehero.com]
+  verify_entailment: true
+
+presets:
+  web_survey:
+    <<: *defaults
+    engine: pipeline
+    description: Broad research across the web (international topics, markets, technology, science).
+    language: auto
+    routes: {primary: [web], data: [web], secondary: [web]}
+    prefer_domains:
+      primary: []
+      data: []
+    query_rules: |
+      Prefer authoritative sources: official statistics, regulators, peer-reviewed research, company filings,
+      established research institutes. Use the language in which the best sources are published (often English).
+    budget: {fetch_per_subq: 6}         # v5: more pages per sub-question (DRB +2 RACE with the rules below)
+    report:
+      parts_hint: []
+      analysis_part: "Analysis and assessment"
+      closing_part: "Open questions and limitations"
+      words_per_part: 1100
+      length_rule: >-
+        Write about {words} words: use all evidence that serves this part and go into detail (figures,
+        examples, comparisons, causes, consequences); never pad with general statements.
+      format_rule: >-
+        Write connected analytical paragraphs; use at most two ### sub-headings and at most one Markdown
+        table, only for a central comparison of several entities or periods.
+
+  verwaltung_web:
+    <<: *defaults
+    engine: focus
+    description: Recherche zu Verwaltung, Strategien und Webangeboten von Bund, Kantonen und Städten.
+    language: de
+    routes: {primary: [web], data: [web], secondary: [web]}
+    mcp:
+      grossrat: [find_geschaefte, search_documents, get_geschaeft]
+      data-bs: [get_datasets, get_dataset, get_records]
+      statistik: [search_indicators, get_indicator, get_indicator_data]
+      opencaselaw: [search_legislation, get_law]
+    prefer_domains:
+      primary: [bs.ch, admin.ch, ch.ch, grosserrat.bs.ch, zh.ch, be.ch, bl.ch, ge.ch, ti.ch, vd.ch, lu.ch, sg.ch, stadt-zuerich.ch, bern.ch, lugano.ch, egovernment.ch, ssk-cds.ch, kdk.ch]
+      data: [statistik.bs.ch, data.bs.ch, bfs.admin.ch, opendata.swiss]
+    query_rules: |
+      Schweizer Verwaltungskontext. Verwende die offiziellen Bezeichnungen der jeweiligen Behörde.
+      Für Kantone/Städte der Romandie französische, für das Tessin italienische Suchanfragen.
+      Amtliche Primärquellen (Kanton, Stadt, Bund, Konferenzen) haben Vorrang vor Medien und Beratern.
+    report:
+      parts_hint: []
+      words_per_part: 350          # administrative answers: concise, sourced throughout (German set analysis)
+      analysis_part: null          # no separate synthesis part
+      closing_part: "Offene Punkte und Grenzen der Recherche"
+      writer_rules: "Kantonale Erlasse von Basel-Stadt tragen SG-Nummern, Bundeserlasse SR-Nummern; andere Kantone ihre eigene Systematik (BL: SGS, ZH: LS, BE: BSG)."
+
+  rechtsrecherche:
+    <<: *defaults
+    engine: focus
+    description: Rechtsrecherche Bund und Kanton Basel-Stadt (Erlasse, Rechtsprechung, Materialien).
+    language: de
+    routes: {primary: [mcp:opencaselaw, web], data: [web], secondary: [web]}
+    mcp:
+      opencaselaw: [search_legislation, get_law, search_laws, get_legislation, search_decisions, get_erwaegung]
+      grossrat: [find_geschaefte, get_geschaeft]
+    prefer_domains:
+      primary: [gesetzessammlung.bs.ch, fedlex.admin.ch, lexfind.ch, bger.ch, dsb.bs.ch, edoeb.admin.ch, bs.ch]
+      data: []
+    query_rules: |
+      Nenne Erlasse mit Kürzel und Nummer (Basel-Stadt: SG-Nummer, Bund: SR-Nummer), Urteile mit BGE- bzw.
+      Dossiernummer. Kantonales und eidgenössisches Recht klar unterscheiden. Für Erlasse zuerst die
+      opencaselaw-Werkzeuge verwenden, danach amtliche Webseiten (Merkblätter, Praxis der Verwaltung).
+      Materialien (Ratschläge, Berichte) zu kantonalen Erlassen findet das grossrat-Werkzeug.
+    report:
+      parts_hint: [Rechtsgrundlagen, Praxis und Zuständigkeiten]
+      words_per_part: 350
+      analysis_part: null
+      closing_part: "Offene Punkte und Grenzen der Recherche"
+      writer_rules: "Kantonale Erlasse von Basel-Stadt tragen SG-Nummern (nicht SR), Bundeserlasse SR-Nummern, andere Kantone ihre eigene Systematik (BL: SGS, ZH: LS, BE: BSG); nenne Paragraph bzw. Artikel und den Stand (in Kraft seit)."
+
+  grossrat:
+    <<: *defaults
+    engine: focus
+    description: Recherche in Geschäften, Vorstössen und Beschlüssen des Grossen Rates Basel-Stadt.
+    language: de
+    routes: {primary: [mcp:grossrat, web], data: [mcp:grossrat, web], secondary: [web]}
+    mcp:
+      grossrat: [find_geschaefte, search_documents, get_geschaeft, get_document, list_facets]
+    prefer_domains:
+      primary: [grosserrat.bs.ch, bs.ch]
+      data: [grosserrat.bs.ch, statistik.bs.ch]
+    query_rules: |
+      Geschäfte des Grossen Rates zuerst mit dem grossrat-Werkzeug suchen (vollständig, mit Status und
+      Dokumenten). Web-Suche nur ergänzend: Geschäftsnummern in Anführungszeichen (z. B. "23.5544"),
+      Medienberichte nur für Kontext.
+    report:
+      parts_hint: [Chronologie der Geschäfte, Beschlüsse und Stand]
+      words_per_part: 350
+      analysis_part: null
+      closing_part: "Offene Punkte und Grenzen der Recherche"
+      writer_rules: "Nenne jedes Geschäft mit Geschäftsnummer, Geschäftsart, Datum und Status; Listen von Geschäften als Tabelle."
+
+  statistik:
+    <<: *defaults
+    engine: focus
+    description: Zahlen und Zeitreihen aus der amtlichen Statistik (Basel-Stadt, Bund).
+    language: de
+    routes: {primary: [mcp:data-bs, web], data: [mcp:data-bs], secondary: [web]}
+    mcp:
+      statistik: [search_indicators, get_indicator, get_indicator_data]
+      data-bs: [get_datasets, get_dataset, get_records]
+      grossrat: [find_geschaefte, get_geschaeft]
+    prefer_domains:
+      primary: [statistik.bs.ch, data.bs.ch, bfs.admin.ch]
+      data: [data.bs.ch, statistik.bs.ch, bfs.admin.ch]
+    query_rules: |
+      Zahlen nur aus amtlichen Datensätzen oder Publikationen übernehmen, mit Datensatz-ID bzw. Tabelle,
+      Stichtag und Einheit. Methodische Brüche und Definitionen ausweisen. Keine Zahlen schätzen.
+    report:
+      parts_hint: [Entwicklung in Zahlen, Erklärungen aus amtlichen Publikationen]
+      words_per_part: 350
+      analysis_part: null
+      closing_part: "Methodische Hinweise, offene Punkte und Grenzen"
+      writer_rules: "Zahlen nur mit Datensatz bzw. Tabelle, Stichtag und Einheit."
