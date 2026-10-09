@@ -234,8 +234,9 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
 
 **Limits and behaviour to know**
 
-* Text only: what Open WebUI extracts (PDF text layer, Office, text; no OCR unless Open WebUI is configured for it). A scan without text is
-  reported ("enthält keinen lesbaren Text") and not used. A file still being processed is reported as such.
+* The pipe uses the text Open WebUI extracted from the file (`file.data.content`). In the Bebbi Bot deployment every
+  upload goes through Docling (with OCR), so scans and Office files arrive as text. Only if extraction fails or is still
+  running does the pipe say so ("enthält keinen lesbaren Text" / "wird noch verarbeitet") and leave the file out.
 * Attachments of the type `url`, `note`, `chat`, `folder` are reported and not used. Images are ignored.
 * A knowledge base is approved when the plan is approved. If the user loses access before a night run starts, the run still reads it with
   the service key (the content was approved by the system at approval time). Delete or re-share in Open WebUI and cancel the job if that matters.

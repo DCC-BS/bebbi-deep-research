@@ -184,7 +184,7 @@ async def collect_own_sources(request, user_id: str, model_id: str, chat_files: 
         if not text:
             pending = data.get("status") in ("pending", "processing")
             notes.append(f"Datei „{label}“ " + ("wird noch verarbeitet; bitte später erneut fragen." if pending
-                                             else "enthält keinen lesbaren Text (z. B. ein Scan ohne Texterkennung) und wird nicht verwendet."))
+                                             else "enthält keinen lesbaren Text (die Texterkennung ist fehlgeschlagen) und wird nicht verwendet."))
             continue
         if len(files) >= max_files:
             notes.append(f"Datei „{label}“ wird nicht verwendet: höchstens {max_files} Dateien pro Recherche.")
