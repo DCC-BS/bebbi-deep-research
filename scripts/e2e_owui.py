@@ -64,22 +64,16 @@ class Client:
     def say(self, chat_id: str, text: str, model: str, timeout: float = 900) -> tuple[str, str]:
         """One user turn exactly as the UI does it. Returns (assistant message id, answer text)."""
         chat = self.get_chat(chat_id)
-        c = chat["chat"]
-        hist = c["history"]
-        parent = hist.get("currentId")
-        now = int(time.time())
+        prev = self.path(chat)
+        parent = chat["chat"]["history"].get("currentId")
         uid, aid = str(uuid.uuid4()), str(uuid.uuid4())
-        user = {"id": uid, "parentId": parent, "childrenIds": [aid], "role": "user", "content": text, "timestamp": now, "models": [model]}
-        asst = {"id": aid, "parentId": uid, "childrenIds": [], "role": "assistant", "content": "", "model": model,
-                "modelName": model, "timestamp": now, "done": False}
-        if parent:
-            hist["messages"][parent]["childrenIds"].append(uid)
-        hist["messages"][uid], hist["messages"][aid], hist["currentId"] = user, asst, aid
-        c["messages"] = self.path({"chat": c})
-        self.http.post(f"/api/v1/chats/{chat_id}", json={"chat": c}).raise_for_status()
-        msgs = [{"role": m["role"], "content": m["content"]} for m in self.path({"chat": c})[:-1]]
+        user = {"id": uid, "parentId": parent, "childrenIds": [aid], "role": "user", "content": text,
+                "timestamp": int(time.time()), "models": [model]}
+        msgs = [{"role": m["role"], "content": m["content"]} for m in prev] + [{"role": "user", "content": text}]
+        # Open WebUI 0.11 stores both messages itself: parent_id is the previous assistant message, user_message the new one
         payload = {"model": model, "messages": msgs, "stream": True, "chat_id": chat_id, "id": aid, "session_id": uuid.uuid4().hex[:20],
-                   "parent_id": uid, "background_tasks": {"title_generation": True, "tags_generation": True, "follow_up_generation": True},
+                   "parent_id": parent, "user_message": user,
+                   "background_tasks": {"title_generation": True, "tags_generation": True, "follow_up_generation": True},
                    "features": {}, "params": {}}
         # With chat_id + message id Open WebUI runs the completion as a background task and the browser receives the
         # result over the websocket; the backend stores the finished message. We poll the stored chat instead.

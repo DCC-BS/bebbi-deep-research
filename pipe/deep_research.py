@@ -15,6 +15,7 @@ requirements: httpx
 #      which writes the report into this message when done); "heute Nacht": queued for the night window.
 
 import asyncio
+import base64
 import json
 import re
 import time
@@ -22,7 +23,9 @@ import time
 import httpx
 from pydantic import BaseModel, Field
 
-MARK = re.compile(r"<!--\s*research-agent:(\{.*?\})\s*-->", re.S)
+# The state marker is a markdown link reference definition with a comment label: valid markdown, never rendered.
+# (An HTML comment is shown as text by the Open WebUI renderer.) The payload is base64 so no markdown syntax can break it.
+MARK = re.compile(r"^\[//\]: # \(research-agent:([A-Za-z0-9_=-]+)\)[ \t]*$", re.M)
 APPROVE = re.compile(r"^\s*(ok|okay|ja|yes|start|starten|los|passt|go|einverstanden|approve|jetzt|heute nacht|nachts?)\b", re.I)
 NIGHT = re.compile(r"nacht|night|später|spaeter", re.I)
 NOW = re.compile(r"\b(jetzt|sofort|now)\b", re.I)
@@ -30,24 +33,31 @@ DEPTH_WORDS = {"quick": re.compile(r"\b(schnell|kurz|quick)\b", re.I), "deep": r
 
 
 def _marker(state: dict) -> str:
-    return f"\n\n<!-- research-agent:{json.dumps(state, ensure_ascii=False)} -->"
+    payload = base64.urlsafe_b64encode(json.dumps(state, ensure_ascii=False).encode()).decode()
+    return f"\n\n[//]: # (research-agent:{payload})"
+
+
+def _decode(payload: str) -> dict:
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+    except ValueError:
+        return {}
 
 
 def _state(messages: list[dict]) -> dict:
     for m in reversed(messages[:-1]):
         if m.get("role") == "assistant":
             found = MARK.search(m.get("content") or "")
-            return json.loads(found.group(1)) if found else {}
+            return _decode(found.group(1)) if found else {}
     return {}
 
 
 def _render_plan(plan: dict, depth: str) -> str:
     lines = [f"**Rechercheplan: {plan['title']}**", "", f"*Auftrag:* {plan['task_core']}", ""]
     for p in plan["parts"]:
-        lines.append(f"**{p['title']}**: {p['goal']}")
-        for q in plan["sub_questions"]:
-            if q["part"] == p["id"]:
-                lines.append(f"- {q['text']}")
+        lines += [f"**{p['title']}**: {p['goal']}", ""]       # blank lines: else the next part title becomes part of the last list item
+        lines += [f"- {q['text']}" for q in plan["sub_questions"] if q["part"] == p["id"]]
+        lines.append("")
     if plan.get("must_name"):
         lines += ["", f"*Muss abgedeckt werden:* {', '.join(plan['must_name'])}"]
     lines += ["", f"Tiefe: **{depth}**. Antworten Sie mit **ok** (jetzt starten), **heute Nacht** (Nachtlauf) "
@@ -92,8 +102,9 @@ class Pipe:
         if task == "title_generation":
             prompt = " ".join(str(m.get("content", "")) for m in body.get("messages", []))
             found = MARK.search(prompt)       # the chat history of the task carries our state marker (clarify state: the task)
-            task_text = json.loads(found.group(1)).get("task", "") if found else ""
-            title = " ".join(task_text.split())[:50] or "Deep Research"
+            task_text = _decode(found.group(1)).get("task", "") if found else ""
+            plan_title = re.search(r"\*\*Rechercheplan: (.+?)\*\*", prompt)       # plan state: the title of the plan
+            title = " ".join((task_text or (plan_title.group(1) if plan_title else "")).split())[:50] or "Deep Research"
             return json.dumps({"title": title}, ensure_ascii=False)
         if task == "tags_generation":
             return json.dumps({"tags": ["Recherche"]}, ensure_ascii=False)

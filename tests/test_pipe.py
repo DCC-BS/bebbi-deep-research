@@ -67,7 +67,23 @@ def test_running_job_keeps_marker_and_night_run_is_queued():
     mod = load_pipe()
     pipe, _ = _pipe_with_service(mod, {"j1": {"status": "running", "events": [{"text": "suche"}], "report": None}})
     out = asyncio.run(pipe.pipe(_plan_history(mod, "heute Nacht"), {"id": "u"}, __chat_id__="c1", __message_id__="m1"))
-    assert "Nachtfenster" in out and '"state": "job"' in out
+    assert "Nachtfenster" in out and mod._state([{"role": "assistant", "content": out}, {}]) == {"state": "job", "job": "j1"}
+    assert "<!--" not in out
     follow_up = {"model": "x.grossrat", "messages": [{"role": "assistant", "content": out}, {"role": "user", "content": "und?"}]}
     again = asyncio.run(pipe.pipe(follow_up, {"id": "u"}))
-    assert "läuft noch" in again and '"job": "j1"' in again
+    assert "läuft noch" in again and mod._state([{"role": "assistant", "content": again}, {}])["job"] == "j1"
+
+
+def test_title_from_plan():
+    mod = load_pipe()
+    body = {"messages": [{"role": "user", "content": "<chat_history>\nASSISTANT: **Rechercheplan: Fasnacht im Grossen Rat**\n\n- x\n</chat_history>"}]}
+    out = asyncio.run(mod.Pipe().pipe(body, {"id": "u"}, __task__="title_generation"))
+    assert json.loads(out)["title"] == "Fasnacht im Grossen Rat"
+
+
+def test_plan_markdown_separates_parts_and_lists():
+    mod = load_pipe()
+    plan = {"title": "T", "task_core": "c", "parts": [{"id": "a", "title": "A", "goal": "ga"}, {"id": "b", "title": "B", "goal": "gb"}],
+            "sub_questions": [{"part": "a", "text": "q1"}, {"part": "b", "text": "q2"}], "must_name": []}
+    text = mod._render_plan(plan, "quick")
+    assert "- q1\n\n**B**: gb\n\n- q2" in text
