@@ -96,12 +96,16 @@ class Pipe:
         return out
 
     async def _api(self, method: str, path: str, body: dict | None = None) -> dict:
-        async with httpx.AsyncClient(timeout=300) as http:
-            r = await http.request(method, self.valves.SERVICE_URL.rstrip("/") + path, json=body,
-                                   headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}"})
-            if r.status_code >= 400:
-                raise RuntimeError(r.json().get("detail", r.text) if r.headers.get("content-type", "").startswith("application/json") else r.text)
-            return r.json()
+        try:
+            async with httpx.AsyncClient(timeout=300) as http:
+                r = await http.request(method, self.valves.SERVICE_URL.rstrip("/") + path, json=body,
+                                       headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}"})
+        except httpx.TransportError as e:
+            raise RuntimeError(f"Der Recherche-Dienst ist nicht erreichbar ({type(e).__name__}). Bitte später erneut versuchen.") from e
+        if r.status_code >= 400:
+            is_json = r.headers.get("content-type", "").startswith("application/json")
+            raise RuntimeError(r.json().get("detail", r.text) if is_json else r.text)
+        return r.json()
 
     @staticmethod
     def _task_reply(task: str, body: dict) -> str:

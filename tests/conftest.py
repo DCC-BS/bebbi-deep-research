@@ -80,7 +80,7 @@ async def running(tmp_path, http_factory=None, keep_db=False, **kw):
         await app.state.db.run("drop table if exists jobs")
         await app.state.db.run("drop table if exists drafts")
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", headers=H) as c:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://t", headers=H) as c:
             yield c, app
 
 

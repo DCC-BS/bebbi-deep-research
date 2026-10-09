@@ -14,12 +14,13 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from research_agent import load_config
 
 from .db import DB
-from .jobs import JobRunner, in_window, make_agent_factory, new_id, runs_by_day
+from .jobs import JobRunner, describe_error, in_window, make_agent_factory, new_id, runs_by_day
 from .logging_config import log, setup_logging
 from .settings import Settings
 
@@ -75,6 +76,12 @@ def create_app(settings: Settings | None = None, agent_factory=None, db: DB | No
         await db.close()
 
     app = FastAPI(title="bebbi-deep-research", lifespan=lifespan)
+    @app.exception_handler(Exception)
+    async def unexpected(request: Request, exc: Exception):
+        """LLM or tool failures in the chat-turn endpoints: a readable German detail for the pipe instead of a bare 500."""
+        logger.error("unhandled error in %s", request.url.path, exc_info=exc)
+        return JSONResponse({"detail": "Die Anfrage konnte nicht verarbeitet werden. " + describe_error(exc)}, status_code=502)
+
     app.state.settings, app.state.db, app.state.runner, app.state.cfg = settings, db, runner, cfg
 
     def auth(request: Request) -> None:

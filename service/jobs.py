@@ -30,6 +30,22 @@ def ui_markdown(report: str) -> str:
     return re.sub(r"\n(?=\[\u200b\d+\] )", "\n\n", text)
 
 
+def describe_error(e: BaseException) -> str:
+    """German, user-facing reason for a failure (shown in the chat); the technical detail follows in short form."""
+    import openai
+
+    detail = " ".join(str(getattr(e, "message", None) or e).split())[:200]
+    if isinstance(e, (openai.APIConnectionError, openai.APITimeoutError)):
+        reason = "Das Sprachmodell ist nicht erreichbar."
+    elif isinstance(e, (openai.NotFoundError, openai.BadRequestError, openai.AuthenticationError, openai.PermissionDeniedError)):
+        reason = "Das Sprachmodell lehnt die Anfrage ab (Modellname oder Zugang falsch konfiguriert)."
+    elif isinstance(e, httpx.HTTPError):
+        reason = "Ein Dienst der Recherche (Suche oder Seitenabruf) ist nicht erreichbar."
+    else:
+        reason = "Unerwarteter Fehler."
+    return f"{reason} Bitte versuchen Sie es später erneut oder wenden Sie sich an den Betrieb. (Technisch: {type(e).__name__}: {detail})"
+
+
 def in_window(settings: Settings, now: datetime | None = None) -> bool:
     start, end = settings.window()
     t = (now or datetime.now(ZoneInfo(settings.timezone))).time()
@@ -161,9 +177,10 @@ class JobRunner:
             raise
         except Exception as e:
             log(logger, "job failed", logging.ERROR, job=job_id, error=repr(e)[:500])
+            message = describe_error(e)
             await self.db.execute("update jobs set status='error', finished=:t, error=:e where id=:i",
-                                  t=time.time(), e=str(e)[:2000], i=job_id)
-            await self.deliver(job, f"Die Recherche ist fehlgeschlagen: {str(e)[:300]}")
+                                  t=time.time(), e=message, i=job_id)
+            await self.deliver(job, f"Die Recherche ist fehlgeschlagen. {message}")
         finally:
             if agent is not None:
                 await asyncio.shield(close_agent(agent))

@@ -106,6 +106,25 @@ async def test_failed_job(tmp_path):
         assert "llm down" in j["error"]
 
 
+async def test_llm_errors_are_reported_in_german(tmp_path, monkeypatch):
+    import openai
+
+    req = httpx.Request("POST", "http://llm/v1/chat/completions")
+    err = openai.NotFoundError("model nonexistent not found", response=httpx.Response(404, request=req), body=None)
+
+    async def broken(self, *a, **k):
+        raise err
+
+    monkeypatch.setattr(FakeAgent, "clarify", broken)
+    monkeypatch.setattr(FakeAgent, "run", broken)
+    async with running(tmp_path, night_window=utc_window(True)) as (c, _):
+        r = await c.post("/clarify", json={"task": "x"}, )
+        assert r.status_code == 502 and "Modellname" in r.json()["detail"]
+        job = await submit(c)
+        j = await wait_status(c, job["job_id"], {"error"})
+        assert j["error"].startswith("Das Sprachmodell lehnt die Anfrage ab")
+
+
 # ------------------------------------------------- night window and daytime rule
 def test_in_window():
     s = Settings.from_env({"RA_TIMEZONE": "UTC", "RA_NIGHT_WINDOW": "20:00-05:00"})

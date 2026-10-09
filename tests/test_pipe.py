@@ -113,3 +113,24 @@ def test_ui_markdown_keeps_citations_visible_and_matches_service():
     out = mod.ui_markdown(report)
     assert "[​1][​2]" in out and "\n\n[​2] Zwei" in out and "https://a.ch" in out
     assert service_version(report) == out
+
+
+def test_service_errors_reach_the_user_in_german():
+    import httpx
+
+    mod = load_pipe()
+    pipe = mod.Pipe()
+    pipe.valves.SERVICE_URL = "http://service.invalid:1"
+    out = asyncio.run(pipe.pipe({"model": "x.grossrat", "messages": [{"role": "user", "content": "Frage"}]}, {"id": "u"}))
+    assert out.startswith("Deep Research ist nicht verfügbar: Der Recherche-Dienst ist nicht erreichbar")
+
+    def handler(request):
+        return httpx.Response(502, json={"detail": "Das Sprachmodell ist nicht erreichbar."})
+
+    real = httpx.AsyncClient
+    mod.httpx.AsyncClient = lambda **kw: real(transport=httpx.MockTransport(handler), **kw)
+    try:
+        out = asyncio.run(pipe.pipe({"model": "x.grossrat", "messages": [{"role": "user", "content": "Frage"}]}, {"id": "u"}))
+    finally:
+        mod.httpx.AsyncClient = real
+    assert out == "Deep Research ist nicht verfügbar: Das Sprachmodell ist nicht erreichbar."
