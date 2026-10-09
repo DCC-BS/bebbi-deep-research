@@ -120,6 +120,15 @@ class Pipe:
             if __event_emitter__:
                 await __event_emitter__({"type": "status", "data": {"description": text, "done": done}})
 
+        async def hold(text: str) -> str:
+            """Text of a message that the service replaces with the report later. Open WebUI v0.11 renders the stored
+            `output` of a message in preference to its `content`, and no API lets the service change `output`. So the text
+            goes out as a `replace` event (stored as content, output stays empty) and the pipe returns nothing."""
+            if not __event_emitter__:
+                return text
+            await __event_emitter__({"type": "replace", "data": {"content": text}})
+            return ""
+
         messages = body.get("messages") or []
         text = (messages[-1].get("content") or "") if messages else ""
         if isinstance(text, list):  # multimodal content parts
@@ -146,10 +155,11 @@ class Pipe:
                     st = {"state": "job", "job": job["job_id"]}
                     if job.get("when", when) == "night":   # the service decides: by day only quick focus runs
                         why = (" Tagsüber laufen nur schnelle Recherchen (Tiefe quick) sofort." if when == "now" else "")
-                        return (f"Auftrag eingereiht für das Nachtfenster ({job['window']}).{why} Der Bericht erscheint "
-                                "in diesem Chat, sobald er fertig ist." + _marker(st))
+                        return await hold(f"Auftrag eingereiht für das Nachtfenster ({job['window']}).{why} Der Bericht erscheint "
+                                          "in diesem Chat, sobald er fertig ist." + _marker(st))
                     text, finished = await self._stream(job["job_id"], status)
-                    return text if finished else text + _marker(st)   # a finished report carries no marker: the next message starts anew
+                    # a finished report carries no marker: the next message starts anew
+                    return text if finished else await hold(text + _marker(st))
                 if st.get("edits", 0) >= 3:
                     return "Der Plan wurde bereits dreimal angepasst. Bitte mit **ok** starten oder neu beginnen." + _marker(st)
                 await status("Passe den Plan an")

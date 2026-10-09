@@ -87,3 +87,19 @@ def test_plan_markdown_separates_parts_and_lists():
             "sub_questions": [{"part": "a", "text": "q1"}, {"part": "b", "text": "q2"}], "must_name": []}
     text = mod._render_plan(plan, "quick")
     assert "- q1\n\n**B**: gb\n\n- q2" in text
+
+
+def test_queued_message_is_sent_as_replace_event_with_empty_output():
+    """The delivery can only change `content`; Open WebUI shows `output` first, so the queued text must not become output."""
+    mod = load_pipe()
+    pipe, _ = _pipe_with_service(mod, {"j1": {"status": "queued", "events": [], "report": None}})
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+
+    out = asyncio.run(pipe.pipe(_plan_history(mod, "heute Nacht"), {"id": "u"}, __event_emitter__=emit, __chat_id__="c", __message_id__="m"))
+    assert out == ""
+    replace = [e for e in events if e["type"] == "replace"]
+    assert len(replace) == 1 and "Nachtfenster" in replace[0]["data"]["content"]
+    assert mod._state([{"role": "assistant", "content": replace[0]["data"]["content"]}, {}])["job"] == "j1"
