@@ -17,6 +17,7 @@ dependencies = [
     "asyncpg>=0.30",
     "aiosqlite>=0.20",
     "tzdata>=2024.2",
+    "python-docx>=1.2.0",
 ]
 
 [project.scripts]

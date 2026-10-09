@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import re
 import time
 import uuid
 from collections.abc import Callable
@@ -16,18 +15,11 @@ from research_agent import LLM, ResearchAgent, Tools
 
 from .db import DB
 from .logging_config import log
+from .report import build_sources, owui_source_events, ui_markdown
 from .settings import Settings
 
 logger = logging.getLogger("service.jobs")
 LIVE = ("starting", "running")
-
-
-def ui_markdown(report: str) -> str:
-    """Report text for the Open WebUI chat: v0.11 turns `[1]` into a citation chip and drops it when the message has no
-    `sources`; a zero-width space after the bracket keeps the reference visible. Source lines get their own paragraph.
-    The same function is in pipe/deep_research.py (the pipe has no dependencies); a test checks both."""
-    text = re.sub(r"\[(\d+)\]", "[\u200b\\1]", report)
-    return re.sub(r"\n(?=\[\u200b\d+\] )", "\n\n", text)
 
 
 def describe_error(e: BaseException) -> str:
@@ -169,7 +161,8 @@ class JobRunner:
             u = res.usage or {}
             log(logger, "job done", job=job_id, runtime_s=round(time.time() - started, 1), calls=u.get("calls"),
                 prompt_tokens=u.get("prompt_tokens"), completion_tokens=u.get("completion_tokens"))
-            await self.deliver(job, res.report)
+            sources = build_sources(res.report, res.ledger)
+            await self.deliver(job, ui_markdown(res.report, sources), sources)
         except asyncio.CancelledError:
             # shutdown: the job starts again from the beginning on the next start
             await asyncio.shield(self.db.execute("update jobs set status='queued' where id=:i", i=job_id))
@@ -185,30 +178,52 @@ class JobRunner:
             if agent is not None:
                 await asyncio.shield(close_agent(agent))
 
-    async def deliver(self, job: dict, content: str) -> None:
+    async def _has_sources(self, chat_id: str, message_id: str) -> bool:
+        """True if the Open WebUI message already carries sources (the pipe returned the report itself and emitted them)."""
+        try:
+            async with self.http_factory() as http:
+                r = await http.get(f"{self.settings.owui_url}/api/v1/chats/{chat_id}", headers={"Authorization": f"Bearer {self.settings.owui_api_key}"})
+            return r.status_code == 200 and bool(r.json()["chat"]["history"]["messages"][message_id].get("sources"))
+        except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            return False
+
+    async def deliver(self, job: dict, content: str, sources: list[dict] | None = None) -> None:
         """Write the finished report into the Open WebUI assistant message (only if configured and the job came from a chat).
-        Retried 3 times; the outcome is stored in jobs.delivery. The pipe returns the report on the next message anyway."""
+
+        Two kinds of calls, both with the admin key: one `source` event per cited source (Open WebUI stores them in the
+        `sources` of the message and shows the citation badges and the source list), then the message text. Sources go
+        first so that the badges exist when the text appears. Retried 3 times, each step only once it succeeded; the
+        outcome is stored in jobs.delivery. The pipe returns the report on the next message anyway."""
         s = self.settings
         if not (s.owui_url and s.owui_api_key and job.get("chat_id") and job.get("message_id")):
             await self.db.execute("update jobs set delivery='skipped' where id=:i", i=job["id"])
             log(logger, "delivery skipped", job=job["id"], reason="no OWUI_URL/OWUI_API_KEY or job without chat")
             return
+        base = f"{s.owui_url}/api/v1/chats/{job['chat_id']}/messages/{job['message_id']}"
+        events = owui_source_events(sources or [])
+        if events and await self._has_sources(job["chat_id"], job["message_id"]):    # the pipe was faster: stored twice they would double the list
+            events = []
+        steps = [(f"{base}/event", ev) for ev in events] + [(base, {"content": content})]
         outcome = "failed"
         for attempt in range(3):
             try:
                 async with self.http_factory() as http:
-                    r = await http.post(f"{s.owui_url}/api/v1/chats/{job['chat_id']}/messages/{job['message_id']}",
-                                        json={"content": ui_markdown(content)}, headers={"Authorization": f"Bearer {s.owui_api_key}"})
-                if r.status_code < 300:
+                    while steps:
+                        url, payload = steps[0]
+                        r = await http.post(url, json=payload, headers={"Authorization": f"Bearer {s.owui_api_key}"})
+                        if r.status_code >= 300 or (url.endswith("/event") and r.text.strip() != "true"):
+                            outcome = f"failed: HTTP {r.status_code} {r.text[:200]}"
+                            break
+                        steps.pop(0)
+                if not steps:
                     outcome = "ok"
                     break
-                outcome = f"failed: HTTP {r.status_code} {r.text[:200]}"
             except httpx.HTTPError as e:
                 outcome = f"failed: {type(e).__name__}: {e}"[:300]
             if attempt < 2:
                 await asyncio.sleep(self.retry_delay * (attempt + 1))
         level = logging.INFO if outcome == "ok" else logging.ERROR
-        log(logger, "delivery " + outcome[:60], level, job=job["id"], chat=job["chat_id"])
+        log(logger, "delivery " + outcome[:60], level, job=job["id"], chat=job["chat_id"], sources=len(sources or []))
         await self.db.execute("update jobs set delivery=:d where id=:i", d=outcome[:300], i=job["id"])
 
 

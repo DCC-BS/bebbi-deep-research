@@ -112,7 +112,9 @@ Bearer token on all except probes. Compatible with the pipe and usable from n8n.
 | `POST /plans` `{task, preset, depth}` | plan draft: `{draft_id, plan}` |
 | `POST /plans/{draft}/edit` `{instruction}` | edited plan |
 | `POST /jobs` `{draft_id, user_id, chat_id?, message_id?, when}` | submit: `{job_id, when, ahead, window}` |
-| `GET /jobs/{id}` | status, last 10 events, report, stats (token usage), delivery state |
+| `GET /jobs/{id}` | status, last 10 events, report, stats (token usage), delivery state, `sources` (number, title, url, stand, fetched, kind, excerpt), `ui_report`, `owui_events`, `docx` |
+| `GET /jobs/{id}/report.docx` | the report as Word file (409 while the job runs) |
+| `GET /jobs/lookup?chat_id&message_id&user_id` | job that delivers into a chat message (used by the download action) |
 | `GET /jobs/{id}/evidence` | evidence trail: sources, queries, pages, quotes |
 
 ## Logs and metrics

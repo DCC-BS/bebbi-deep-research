@@ -18,6 +18,28 @@ PLAN = {"title": "T", "task_core": "core", "language": "de", "parts": [{"id": "p
         "sub_questions": [{"id": "q1", "part": "p1", "text": "Frage?", "intent": "primary"}], "must_name": [], "constraints": []}
 
 
+REPORT = """# Bericht
+
+## Teil
+
+Der Grosse Rat hat den Vorstoss überwiesen [1]. Die Frist beträgt 30 Tage [2].
+
+| Jahr | Anzahl |
+|---|---|
+| 2023 | 4 [2] |
+
+## Quellen
+
+[1] Vorstoss 23.5001: Stadtklima. https://grosserrat.bs.ch/geschaefte/23.5001 (Stand 2023-05-01; abgerufen am 2026-10-09)
+[2] Kantonsverfassung, § 5: https://gesetzessammlung.bs.ch/app/de/texts_of_law/111.100 (abgerufen am 2026-10-09)
+"""
+LEDGER = {"cards": [
+    {"id": "E1", "url": "https://grosserrat.bs.ch/geschaefte/23.5001", "title": "Vorstoss 23.5001: Stadtklima", "quote": "Der Regierungsrat wird beauftragt, ein Stadtklima-Konzept vorzulegen.",
+     "finding": "f", "source_kind": "mcp:grossrat", "fetched_at": "2026-10-09", "date": "2023-05-01"},
+    {"id": "E2", "url": "https://gesetzessammlung.bs.ch/app/de/texts_of_law/111.100", "title": "Kantonsverfassung, § 5", "quote": "kurz",
+     "finding": "Die Frist beträgt 30 Tage nach Eingang.", "source_kind": "web", "fetched_at": "2026-10-09", "date": ""}]}
+
+
 class FakeAgent:
     """Stands in for ResearchAgent: no LLM, no search. `block` makes run() wait until cancelled."""
     runs: list = []
@@ -44,7 +66,7 @@ class FakeAgent:
             await asyncio.sleep(3600)
         if FakeAgent.fail:
             raise RuntimeError("llm down")
-        return Result(report="# Bericht\n\nInhalt [1]", plan=plan, ledger={"cards": {}},
+        return Result(report=REPORT, plan=plan, ledger=LEDGER,
                       usage={"calls": 3, "prompt_tokens": 10, "completion_tokens": 5, "by_step": {}}, stats={"cards": 1})
 
 

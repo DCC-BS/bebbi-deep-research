@@ -17,7 +17,7 @@
       "capabilities": {
         "vision": false,
         "file_upload": false,
-        "citations": false
+        "citations": true
       },
       "suggestion_prompts": [
         {
@@ -44,7 +44,7 @@
       "capabilities": {
         "vision": false,
         "file_upload": false,
-        "citations": false
+        "citations": true
       },
       "suggestion_prompts": [
         {
@@ -71,7 +71,7 @@
       "capabilities": {
         "vision": false,
         "file_upload": false,
-        "citations": false
+        "citations": true
       },
       "suggestion_prompts": [
         {
@@ -98,7 +98,7 @@
       "capabilities": {
         "vision": false,
         "file_upload": false,
-        "citations": false
+        "citations": true
       },
       "suggestion_prompts": [
         {
@@ -125,7 +125,7 @@
       "capabilities": {
         "vision": false,
         "file_upload": false,
-        "citations": false
+        "citations": true
       },
       "suggestion_prompts": [
         {

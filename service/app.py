@@ -20,8 +20,10 @@ from pydantic import BaseModel
 from research_agent import load_config
 
 from .db import DB
+from .docx_export import MIME, docx_filename, render_docx
 from .jobs import JobRunner, describe_error, in_window, make_agent_factory, new_id, runs_by_day
 from .logging_config import log, setup_logging
+from .report import build_sources, owui_source_events, ui_markdown
 from .settings import Settings
 
 logger = logging.getLogger("service.app")
@@ -43,6 +45,10 @@ class JobIn(BaseModel):
     chat_id: str | None = None
     message_id: str | None = None
     when: str = "night"           # now | night
+
+
+def _title(report: str) -> str:
+    return next((ln[2:].strip() for ln in (report or "").splitlines() if ln.startswith("# ")), "Bericht")
 
 
 def create_app(settings: Settings | None = None, agent_factory=None, db: DB | None = None, http_factory=None) -> FastAPI:
@@ -173,14 +179,42 @@ def create_app(settings: Settings | None = None, agent_factory=None, db: DB | No
         log(logger, "job queued", job=job_id, preset=d["preset"], depth=d["depth"], when=when, user=body.user_id)
         return {"job_id": job_id, "status": "queued", "when": when, "ahead": ahead, "window": settings.night_window}
 
+    @app.get("/jobs/lookup", dependencies=[Depends(auth)])
+    async def job_lookup(chat_id: str, message_id: str, user_id: str | None = None):
+        """The newest job that delivers into this chat message (used by the Open WebUI download action)."""
+        rows = await db.run("select id, status, user_id from jobs where chat_id=:c and message_id=:m order by created desc limit 1",
+                            c=chat_id, m=message_id)
+        if not rows or (user_id and rows[0]["user_id"] != user_id):
+            raise HTTPException(404, "no job for this message")
+        return {"job_id": rows[0]["id"], "status": rows[0]["status"]}
+
     @app.get("/jobs/{job_id}", dependencies=[Depends(auth)])
     async def job_status(job_id: str):
-        rows = await db.run("select id, status, run_when, created, started, finished, events, report, stats, error, delivery"
-                            " from jobs where id=:i", i=job_id)
+        rows = await db.run("select id, status, run_when, created, started, finished, events, report, stats, error, delivery,"
+                            " evidence from jobs where id=:i", i=job_id)
         if not rows:
             raise HTTPException(404, "unknown job")
         j = rows[0]
-        return {**j, "events": json.loads(j["events"] or "[]")[-10:], "stats": json.loads(j["stats"] or "null")}
+        evidence = json.loads(j.pop("evidence") or "null")
+        sources = build_sources(j["report"], evidence) if j["report"] and j["status"] == "done" else []
+        return {**j, "events": json.loads(j["events"] or "[]")[-10:], "stats": json.loads(j["stats"] or "null"),
+                "sources": sources, "ui_report": ui_markdown(j["report"], sources) if sources else j["report"],
+                "owui_events": owui_source_events(sources), "docx": f"/jobs/{job_id}/report.docx" if j["status"] == "done" else None,
+                "docx_name": docx_filename(_title(j["report"]), j["finished"], settings.timezone) if j["status"] == "done" else None}
+
+    @app.get("/jobs/{job_id}/report.docx", dependencies=[Depends(auth)])
+    async def job_docx(job_id: str):
+        rows = await db.run("select status, report, evidence, task, preset, depth, finished from jobs where id=:i", i=job_id)
+        if not rows:
+            raise HTTPException(404, "unknown job")
+        j = rows[0]
+        if j["status"] != "done" or not j["report"]:
+            raise HTTPException(409, f"job is {j['status']}, no report yet")
+        sources = build_sources(j["report"], json.loads(j["evidence"] or "null"))
+        data = render_docx(j["report"], sources, task=j["task"], preset=j["preset"], depth=j["depth"], finished=j["finished"],
+                           tz=settings.timezone)
+        name = docx_filename(_title(j["report"]), j["finished"], settings.timezone)
+        return Response(data, media_type=MIME, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.get("/jobs/{job_id}/evidence", dependencies=[Depends(auth)])
     async def job_evidence(job_id: str):

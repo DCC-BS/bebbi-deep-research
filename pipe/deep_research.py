@@ -16,6 +16,7 @@ requirements: httpx
 
 import asyncio
 import base64
+import io
 import json
 import re
 import time
@@ -32,12 +33,29 @@ NOW = re.compile(r"\b(jetzt|sofort|now)\b", re.I)
 DEPTH_WORDS = {"quick": re.compile(r"\b(schnell|kurz|quick)\b", re.I), "deep": re.compile(r"\b(gründlich|gruendlich|tief|deep)\b", re.I)}
 
 
-def ui_markdown(report: str) -> str:
-    """Open WebUI v0.11 turns `[1]` into a citation chip and drops it when the message has no `sources`, so the
-    references of the report would vanish and the source list would collapse into one paragraph. A zero-width space
-    after the bracket keeps `[1]` visible; source lines get their own paragraph. (Same function in service/jobs.py.)"""
-    text = re.sub(r"\[(\d+)\]", "[\u200b\\1]", report)
-    return re.sub(r"\n(?=\[\u200b\d+\] )", "\n\n", text)
+async def store_user_file(request, user_id: str, filename: str, data: bytes, content_type: str) -> dict:
+    """Store `data` in the Open WebUI file store as a file of the chat's user (in-process, like Open WebUI's own upload).
+    A file uploaded with the service's admin key would belong to the admin and give the user a 404 on download; this
+    code runs inside Open WebUI as the user. Returns the message-file item for a `files` event.
+    (The same function is in the other file of pipe/; a test checks that both are identical.)"""
+    from fastapi import UploadFile
+    from open_webui.models.users import Users
+    from open_webui.routers.files import upload_file_handler
+    from starlette.datastructures import Headers
+
+    user = await Users.get_user_by_id(user_id)
+    upload = UploadFile(file=io.BytesIO(data), filename=filename, headers=Headers({"content-type": content_type}))
+    stored = await upload_file_handler(request, file=upload, metadata={}, process=False, process_in_background=False, user=user)
+    return {"type": "file", "id": stored.id, "url": stored.id, "name": filename, "size": len(data), "status": "uploaded",
+            "meta": {"name": filename, "content_type": content_type, "size": len(data)}}
+
+
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _filename(job: dict) -> str:
+    """File name of the Word file: the one the service proposes, else a generic one."""
+    return job.get("docx_name") or f"Bebbi-Deep-Research_{job.get('id', 'Bericht')}.docx"
 
 
 def _marker(state: dict) -> str:
@@ -107,6 +125,16 @@ class Pipe:
             raise RuntimeError(r.json().get("detail", r.text) if is_json else r.text)
         return r.json()
 
+    async def _download(self, path: str) -> bytes:
+        try:
+            async with httpx.AsyncClient(timeout=120) as http:
+                r = await http.get(self.valves.SERVICE_URL.rstrip("/") + path, headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}"})
+        except httpx.TransportError as e:
+            raise RuntimeError(f"Der Recherche-Dienst ist nicht erreichbar ({type(e).__name__})") from e
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}")
+        return r.content
+
     @staticmethod
     def _task_reply(task: str, body: dict) -> str:
         """Open WebUI sends background tasks (chat title, tags, follow-ups) to the model of the chat. They must not start
@@ -124,7 +152,8 @@ class Pipe:
             return json.dumps({"follow_ups": []})
         return ""
 
-    async def pipe(self, body: dict, __user__: dict, __event_emitter__=None, __chat_id__=None, __message_id__=None, __task__=None):
+    async def pipe(self, body: dict, __user__: dict, __event_emitter__=None, __chat_id__=None, __message_id__=None, __task__=None,
+                   __request__=None):
         if __task__:
             return self._task_reply(str(__task__), body)
 
@@ -152,7 +181,7 @@ class Pipe:
             if st.get("state") == "job":
                 job = await self._api("GET", f"/jobs/{st['job']}")
                 if job["status"] == "done":
-                    return ui_markdown(job["report"])
+                    return await self._publish(job, __event_emitter__, __user__, __request__)
                 if job["status"] == "error":
                     return f"Die Recherche ist fehlgeschlagen: {job.get('error')}"
                 last = job["events"][-1]["text"] if job["events"] else "wartet in der Warteschlange"
@@ -169,7 +198,9 @@ class Pipe:
                         why = (" Tagsüber laufen nur schnelle Recherchen (Tiefe quick) sofort." if when == "now" else "")
                         return await hold(f"Auftrag eingereiht für das Nachtfenster ({job['window']}).{why} Der Bericht erscheint "
                                           "in diesem Chat, sobald er fertig ist." + _marker(st))
-                    text, finished = await self._stream(job["job_id"], status)
+                    text, finished, done = await self._stream(job["job_id"], status)
+                    if done:
+                        text = await self._publish(done, __event_emitter__, __user__, __request__)
                     # a finished report carries no marker: the next message starts anew
                     return text if finished else await hold(text + _marker(st))
                 if st.get("edits", 0) >= 3:
@@ -202,21 +233,46 @@ class Pipe:
             await status("Fehler", done=True)
             return f"Deep Research ist nicht verfügbar: {e}" + (_marker(st) if st else "")
 
-    async def _stream(self, job_id: str, status) -> tuple[str, bool]:
-        """Stream the status of a running job. Returns (text, finished): the report or error when the job ended, else a hint."""
+    async def _publish(self, job: dict, emitter, user: dict, request) -> str:
+        """The report of a finished job for this message: one `source` event per source (Open WebUI shows `[n]` as a
+        citation badge of the n-th source and lists the sources under the message) and the Word file as a message file.
+        Returns the report text. Sources and file are best effort; the text is always returned."""
+        text = job.get("ui_report") or job["report"]
+        if emitter:
+            # The service delivers the report into the same message with the admin key (also for "jetzt" jobs). If it did,
+            # the sources are there already; stored twice they would double the list and shift nothing but confuse.
+            for _ in range(10):
+                if job.get("delivery") or not job.get("id"):
+                    break
+                await asyncio.sleep(min(self.valves.POLL_SECONDS, 2))
+                job = await self._api("GET", f"/jobs/{job['id']}")
+            for event in [] if job.get("delivery") == "ok" else job.get("owui_events") or []:     # [n] is the n-th event
+                await emitter(event)
+            if job.get("docx") and request is not None and (user or {}).get("id"):
+                try:
+                    data = await self._download(job["docx"])
+                    name = _filename(job)
+                    item = await store_user_file(request, user["id"], name, data, DOCX)
+                    await emitter({"type": "files", "data": {"files": [item]}})
+                except Exception as e:      # the report is more important than the file
+                    text += f"\n\n*Die Word-Datei konnte nicht angehängt werden ({type(e).__name__}).*"
+        return text
+
+    async def _stream(self, job_id: str, status) -> tuple[str, bool, dict | None]:
+        """Stream the status of a running job. Returns (text, finished, job): the report or error when the job ended, else a hint."""
         deadline = time.time() + 60 * self.valves.MAX_WAIT_MINUTES
         last = ""
         while time.time() < deadline:
             job = await self._api("GET", f"/jobs/{job_id}")
             if job["status"] == "done":
                 await status("Bericht fertig", done=True)
-                return ui_markdown(job["report"]), True
+                return "", True, job
             if job["status"] == "error":
                 await status("Fehler", done=True)
-                return f"Die Recherche ist fehlgeschlagen: {job.get('error')}", True
+                return f"Die Recherche ist fehlgeschlagen: {job.get('error')}", True, None
             if job["events"] and job["events"][-1]["text"] != last:
                 last = job["events"][-1]["text"]
                 await status(last)
             await asyncio.sleep(self.valves.POLL_SECONDS)
         await status("Läuft im Hintergrund weiter", done=True)
-        return "Die Recherche dauert länger. Der Bericht erscheint in diesem Chat, sobald er fertig ist.", False
+        return "Die Recherche dauert länger. Der Bericht erscheint in diesem Chat, sobald er fertig ist.", False, None

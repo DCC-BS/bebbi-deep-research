@@ -1,12 +1,12 @@
 # Integration into Open WebUI
 
 Target: `ghcr.io/fd-itbs/open-webui` v0.11.4 (fork of Open WebUI v0.11.4), Kubernetes, GitOps. The integration uses
-only extension points: one function (pipe), model entries, one API key. No fork patch.
+only extension points: two functions (the pipe and the Word download action), model entries, one API key. No fork patch.
 
 ```
 Open WebUI ──(pipe, valves)──► bebbi-deep-research service ──► Postgres, vLLM, Serper, Firecrawl, MCP
      ▲                                     │
-     └──── POST /api/v1/chats/{chat}/messages/{message}  (admin API key, report delivery)
+     └──── POST /api/v1/chats/{chat}/messages/{message}[/event]  (admin API key, report and sources delivery)
 ```
 
 ## 1. Deploy the service
@@ -31,20 +31,21 @@ Open WebUI imports a function as Python source. The source is `pipe/deep_researc
 `pydantic`, both in the Open WebUI image). The function id is `bebbi_deep_research`; the models appear as
 `bebbi_deep_research.<preset>` (the pipe takes the preset from the part after the last dot).
 
-**Seeder (GitOps).** `deploy/openwebui/function.json` is one entry in the format of `POST /api/v1/functions/sync`
-(id, name, type `pipe`, content, valves, `is_active`, `is_global`). Let the seeder post it with an admin key, with
+**Seeder (GitOps).** `deploy/openwebui/function.json` holds two entries in the format of `POST /api/v1/functions/sync`
+(id, name, type `pipe` and `action`, content, valves, `is_active`, `is_global`): `bebbi_deep_research` and
+`bebbi_deep_research_download` (section 5a). Both have the valves `SERVICE_URL` and `SERVICE_TOKEN`. Let the seeder post it with an admin key, with
 `SERVICE_TOKEN` filled in from the seeder's secret store (the file contains an empty token on purpose).
 Regenerate after changing the pipe or presets: `uv run python scripts/build_openwebui_assets.py`
 (`--check` fails if the files are stale; a unit test does the same).
 
-**By hand / local.** `scripts/install_pipe.py` calls `functions/create` (or `update` if it exists), activates the
-function globally and sets the valves:
+**By hand / local.** `scripts/install_pipe.py` calls `functions/create` (or `update` if it exists) for both functions,
+activates them globally and sets the valves:
 
 ```bash
 OWUI_URL=http://localhost:3000 OWUI_API_KEY=sk-... RA_TOKEN=... uv run python scripts/install_pipe.py --models
 ```
 
-Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py`, save, enable, set "global". The gear icon opens the valves.
+Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py` (and `pipe/deep_research_download.py`), save, enable, set "global". The gear icon opens the valves.
 
 ### Valves
 
@@ -61,8 +62,8 @@ Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py`, save, 
 ## 3. Admin service account for report delivery
 
 The service writes the finished report into the assistant message with
-`POST /api/v1/chats/{chat_id}/messages/{message_id}`. In v0.11.4 this endpoint accepts the chat owner or an admin
-(decision: admin service key).
+`POST /api/v1/chats/{chat_id}/messages/{message_id}` (text) and `POST .../messages/{message_id}/event` (one `source`
+event per source, section 5a). In v0.11.4 both endpoints accept the chat owner or an admin (decision: admin service key).
 
 1. Create a user "deep-research-service" with role admin (Entra group sync can map it, or create it locally).
 2. Enable API keys (`ENABLE_API_KEYS=true`); if `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` is on, allow `/api/v1/chats`.
@@ -108,14 +109,61 @@ returns itself (`jetzt` run that finishes while streaming): it carries no marker
   displayed, live in an open chat and after reload.
 * **Background tasks** (title, tags, follow-ups) are sent by Open WebUI to the chat model, i.e. to the pipe. The pipe
   answers them locally (`__task__`) and never calls the service for them; the chat title comes from the question/plan.
-* **Citations**: Open WebUI turns `[1]` into a citation chip and removes it when the message has no `sources`; the
-  source list also collapsed into one paragraph. Reports are shown with a zero-width space after the bracket
-  (`ui_markdown()` in the pipe and in `service/jobs.py`); the stored job report (`GET /jobs/{id}`) stays unchanged.
-  Copying `[1]` out of the chat includes the invisible character.
+* **Citations**: see section 5a. The zero-width-space workaround of the first version is gone.
 * **Models** need `access_grants` (read for everyone, or groups); `access_control: null` of older versions means
-  "admin only" in v0.11.4. `deploy/openwebui/models.json` has the grant.
+  "admin only" in v0.11.4. `deploy/openwebui/models.json` has the grant. The models must not set
+  `capabilities.citations: false`: Open WebUI then removes every `[n]` from the text (models.json sets it to `true`).
 * **Model list cache**: after installing a function or model, open Open WebUI once (`GET /api/models`) before sending
   completions with the new model id; the first completion otherwise answers "Model not found".
+
+## 5a. Citations and Word download (how Open WebUI v0.11.4 does it)
+
+**What Open WebUI expects** (read in the image: backend `/app/backend/open_webui`, frontend from the source maps of
+`/app/build/_app/immutable`):
+
+* A message has a list `sources`. The pipe adds to it with `__event_emitter__({"type": "source", "data": {...}})`
+  (`socket/main.py`, `get_event_emitter`: for `source`/`citation` it appends `data` to the message's `sources`, stored
+  in the chat). Item format: `{"source": {"name", "url"}, "document": [text], "metadata": [{"source": id, "name": title}]}`.
+* `[n]` in the text becomes a badge (`utils/marked/citation-extension.ts`, `Markdown/SourceToken.svelte`). The badge
+  label is the n-th entry of the list of `metadata.name` (`ContentRenderer.svelte`, duplicates removed!), the list under the
+  message and the click target are the n-th entry grouped by `metadata.source` (`Messages/Citations.svelte`; a
+  `source` starting with `http` is shown as URL). So `metadata.source` and `metadata.name` must be unique per source or
+  the numbering shifts. Without `sources` the badge is dropped; a `[2024]` in the text with fewer sources is an empty badge.
+* Sources can be written after the fact: `POST /api/v1/chats/{chat}/messages/{message}/event` with `{"type": "source",
+  "data": {...}}` (owner or admin; `routers/chats.py`) stores it like the emitter and pushes it to an open chat. The plain
+  `POST .../messages/{message}` accepts only `content`.
+* Message files: list `files` of the message (event `files`), item `{"type": "file", "id", "url": id, "name", "size"}`
+  (`ResponseMessage.svelte`, `common/FileItem.svelte`); a click opens the file preview, which has a Word preview and a
+  download. The file must be readable by the user: `/api/v1/files/{id}/content` allows the owner, admins, or users who
+  reach the file through a knowledge base, channel, shared chat or shared model (`utils/access_control/files.py`).
+  **A file uploaded with the service's admin key belongs to the admin, the chat user gets 404.**
+
+**What we do**
+
+* The service returns the structured sources with the job (`GET /jobs/{id}`): `sources` (`n`, `title`, `url`, `stand`,
+  `fetched`, `kind` = `web` or `mcp:<server>`, `excerpt`, `excerpt_kind` = `quote` for the verbatim card quote of the
+  pipeline engine, `claim` for the sentence of the report that cites the source in the focus engine), `ui_report`,
+  `owui_events` (ready-made source events) and `docx`/`docx_name`. They are derived from the report text and the evidence
+  ledger (`service/report.py`); the engines are unchanged and the stored report text is unchanged. Old clients ignore the new fields.
+* `ui_report` is the report for the chat: the source list becomes a numbered list (a line starting with `[1]` would turn into a
+  badge), stray `[n]` without a source are escaped. The list stays in the text because Open WebUI's own list shows only the
+  URL (collapsed under "n Sources") and neither Stand nor the retrieval date; the preview of a source (click on a badge) shows
+  title, Stand, retrieval date, kind and the excerpt.
+* **Pipe path** (report returned in the chat): the pipe emits the `source` events in the order of the numbers, returns
+  `ui_report`, and stores the Word file as a file of the user *inside Open WebUI* (`store_user_file`, the upload handler
+  of Open WebUI called in-process with the chat user) and emits a `files` event.
+* **Delivery path** (night run): the service posts the `source` events, then the text, with the admin key; after a reload the
+  message carries `sources`, badges and list work. The Word file cannot be attached by the service (ownership, see above).
+  The action function `bebbi_deep_research_download` adds a button ("Word-Datei") under every Deep Research answer; it runs as
+  the user inside Open WebUI, looks up the job by chat and message id (`GET /jobs/lookup`, checks the user), fetches the
+  `.docx` and attaches it. A second click does not attach it again.
+* The pipe and the service both write into the same message for "jetzt" jobs. The service skips the source events if the
+  message already has sources; the pipe waits for the delivery and skips its source events if the delivery succeeded.
+* `GET /jobs/{id}/report.docx` (bearer token) returns the Word file for n8n and other apps (409 while the job runs).
+  python-docx renders title, header block (question, date, preset, depth), headings, lists, Markdown tables as Word tables,
+  citations as links to the source list, the source list with hyperlinks, Stand and retrieval date, and a footer.
+  Rendering is on demand from the stored report; old jobs work too.
+
 
 ## 6. Network
 
@@ -143,13 +191,30 @@ was done in the browser pane (typing into the chat). Screenshots: [plan](img/pla
 | 4 | Error path (wrong model name `RA_LLM_MODEL_*`) | passed for the chat-turn endpoints: the user sees "Deep Research ist nicht verfügbar: Die Anfrage konnte nicht verarbeitet werden. Das Sprachmodell lehnt die Anfrage ab (Modellname oder Zugang falsch konfiguriert) ..." (was a bare "Internal Server Error"). A failing *job* was not run live (job budget); unit test `test_llm_errors_are_reported_in_german` covers the job error and its delivery text |
 | 5 | Service restart while a job runs | passed. `docker compose restart service` 41 s into job `8382516f4090`: log "job re-queued on shutdown", restarted 2 s after the start, finished (247 s total). The crash path (no heartbeat, `RA_STALE_SECONDS`) is covered by the unit tests only |
 
+Citations and Word download (verified 2026-10-09 against the same stack, API level, see limitations for the UI):
+
+| # | Scenario | Result |
+|---|---|---|
+| 6 | Daytime run, pipe path (chat `b0cee6d1…`, job `6f3219d8b44e`, grossrat, quick, 107 s) | passed with one finding: the stored message had 26 sources, the 13 sources twice, because the pipe and the service delivery (key now set) both wrote them. Fixed (see section 5a); re-run below. The file was attached (41 kB), `GET /api/v1/files/{id}/content` as the chat user returned 200 with `attachment` |
+| 7 | Night run, delivery by admin key (chat `ed9fc2f9…`, job `c9cb672c08ce`, rechtsrecherche, 101 s) | passed. Queued with "heute Nacht", window opened by restart, `delivery ok`. Re-read through the chat API like after a reload: content 5046 characters, `sources` 5 in the order of the list, unique ids, no file. The button action (`POST /api/chat/actions/bebbi_deep_research_download` as the chat user, as the UI does) attached one 40 kB file; the second call attached nothing; download as the user 200. The file opens with python-docx (3 pages, 2 tables, hyperlinks) and renders in LibreOffice ([page 1](img/word-report-p1.png), [sources](img/word-report-sources.png)) |
+| 8 | Daytime run again after the fix (chat `c987918b…`, grossrat, quick) | passed: 19 sources, 19 unique, one Word file, download as the user 200 |
+
 Known limitations:
 
-* No Playwright/Chrome was available; the browser run used the desktop app's browser pane. The status events
+* The rendered chat (badges, source popup, file chip, action button) was **not** looked at in the browser pane in this
+  round: the pane had no logged-in session and the credentials could not be passed to it. The behaviour above is verified by
+  the stored chat data and the Open WebUI source (section 5a), not by screenshots of the new elements. Check once in the UI:
+  badges clickable, "n Sources" under the message, file chip, the download icon under the message.
+* No Playwright/Chrome was available earlier; the browser run used the desktop app's browser pane. The status events
   ("Erstelle Rechercheplan", ...) are stored with the message (`Plan erstellt` shows in the UI); live status of a
   running "jetzt" job was not observed because the UI session of that run was a script.
 * After a delivery the next message starts a new research (see above).
-* `[1]` carries a zero-width space in the chat; the plain report is available from the API.
+* In the delivery path the Word file is attached when the user clicks the action button (the service has no way to create a
+  file owned by the user); the pipe path attaches it automatically. If Open WebUI restarts or the action function is not
+  installed, the file is still available from the service (`/jobs/{id}/report.docx`).
+* The native source list shows URLs only; the Markdown list under the report keeps title, Stand and retrieval date, so the
+  list is visible twice (one collapsed).
+* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (pinned to v0.11.4); re-test it on upgrades.
 * The delivery key can write every chat (admin); keep NetworkPolicy and secret handling as described.
 * A message that carries a status text (job still running when the user writes again) is a new assistant message; the
   report is delivered into the original one.

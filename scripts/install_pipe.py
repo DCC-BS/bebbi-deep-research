@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install (or update) the Deep Research pipe in a running Open WebUI and set its valves. Idempotent.
+"""Install (or update) the Deep Research pipe and the Word download action in a running Open WebUI and set its valves. Idempotent.
 
   OWUI_URL=http://localhost:3000 OWUI_API_KEY=sk-... RA_TOKEN=... uv run python scripts/install_pipe.py
 
@@ -18,6 +18,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
 FUNCTION_ID = "bebbi_deep_research"
+ACTION_ID = "bebbi_deep_research_download"
 
 
 def main() -> int:
@@ -43,23 +44,25 @@ def main() -> int:
         r.raise_for_status()
         print("OWUI_API_KEY=" + r.json()["api_key"])
 
-    content = (ROOT / "pipe" / "deep_research.py").read_text()
-    form = {"id": FUNCTION_ID, "name": "Deep Research (Bebbi Bot)", "content": content,
-            "meta": {"description": "Deep research with clarifying questions, plan approval and night queue."}}
-    existing = http.get(f"/api/v1/functions/id/{FUNCTION_ID}")
-    if existing.status_code == 200 and existing.json():       # already installed: update the code
-        r = http.post(f"/api/v1/functions/id/{FUNCTION_ID}/update", json=form)
-    else:
-        r = http.post("/api/v1/functions/create", json=form)
-    r.raise_for_status()
-    fn = r.json()
-    if not fn["is_active"]:
-        http.post(f"/api/v1/functions/id/{FUNCTION_ID}/toggle").raise_for_status()
-    if not fn["is_global"]:
-        http.post(f"/api/v1/functions/id/{FUNCTION_ID}/toggle/global").raise_for_status()
-    r = http.post(f"/api/v1/functions/id/{FUNCTION_ID}/valves/update", json={"SERVICE_URL": args.service_url, "SERVICE_TOKEN": token})
-    r.raise_for_status()
-    print("pipe installed and active; valves set:", json.dumps({**r.json(), "SERVICE_TOKEN": "***"}))
+    for function_id, name, file in ((FUNCTION_ID, "Deep Research (Bebbi Bot)", "deep_research.py"),
+                                    (ACTION_ID, "Word-Datei (Deep Research)", "deep_research_download.py")):
+        form = {"id": function_id, "name": name, "content": (ROOT / "pipe" / file).read_text(),
+                "meta": {"description": "Deep research with clarifying questions, plan approval and night queue."
+                         if function_id == FUNCTION_ID else "Attaches the research report as a Word file to the answer."}}
+        existing = http.get(f"/api/v1/functions/id/{function_id}")
+        if existing.status_code == 200 and existing.json():       # already installed: update the code
+            r = http.post(f"/api/v1/functions/id/{function_id}/update", json=form)
+        else:
+            r = http.post("/api/v1/functions/create", json=form)
+        r.raise_for_status()
+        fn = r.json()
+        if not fn["is_active"]:
+            http.post(f"/api/v1/functions/id/{function_id}/toggle").raise_for_status()
+        if not fn["is_global"]:
+            http.post(f"/api/v1/functions/id/{function_id}/toggle/global").raise_for_status()
+        r = http.post(f"/api/v1/functions/id/{function_id}/valves/update", json={"SERVICE_URL": args.service_url, "SERVICE_TOKEN": token})
+        r.raise_for_status()
+        print(f"{function_id} installed and active; valves set:", json.dumps({**r.json(), "SERVICE_TOKEN": "***"}))
 
     if args.models:
         models = json.loads((ROOT / "deploy" / "openwebui" / "models.json").read_text())

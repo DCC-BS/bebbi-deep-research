@@ -32,9 +32,11 @@ tuning history) lives in the evaluation repository, see [docs/evaluation.md](doc
 ```
 
 * **pipe** (`pipe/deep_research.py`): Open WebUI manifold function, one model per preset. Depends only on `httpx` and
-  `pydantic`. Keeps the conversation state in a hidden marker of the assistant message.
+  `pydantic`. Keeps the conversation state in a hidden marker of the assistant message, emits the sources as native
+  citations (`[n]` badges, source list) and attaches the Word file. `pipe/deep_research_download.py` is the action that
+  adds the Word file to a report delivered later.
 * **service** (`service/`): FastAPI job service. Chat-turn endpoints, a job queue in Postgres (SQLite for development),
-  the night window, report delivery into the chat. Stateless apart from the database, so restarts re-queue running jobs.
+  the night window, report delivery into the chat, structured sources and the Word export (`GET /jobs/{id}/report.docx`). Stateless apart from the database, so restarts re-queue running jobs.
 * **engine** (`research_agent/`): the evaluated version v5. Focus engine (tool-calling loop with code-resolved citations)
   for administrative presets, pipeline engine (plan, research rounds, section-wise writing) for broad web surveys.
 * **config** (`config/presets.yaml`): presets, MCP servers, budgets. Mounted as ConfigMap in Kubernetes.
@@ -64,7 +66,7 @@ scripts/smoke_local.sh                   # starts the service on SQLite against 
 |---|---|
 | `research_agent/` | engine (copied unchanged from the evaluation, v5; only `llm.py` got the per-role extra body) |
 | `service/` | job service: settings, DB layer, job runner, FastAPI app, JSON logging |
-| `pipe/deep_research.py` | Open WebUI function |
+| `pipe/` | Open WebUI functions: pipe and Word download action |
 | `config/presets.yaml` | presets, MCP servers, budgets |
 | `Dockerfile`, `compose.yaml` | image (multi-stage, uv, uid 10001, read-only root) and local stack |
 | `deploy/helm/bebbi-deep-research/` | Helm chart |
@@ -74,7 +76,7 @@ scripts/smoke_local.sh                   # starts the service on SQLite against 
 
 ## Documentation
 
-* [docs/integration.md](docs/integration.md): installing the pipe, valves, admin service account, seeder, fallback
+* [docs/integration.md](docs/integration.md): installing the pipe, valves, admin service account, seeder, fallback, native citations and Word download (section 5a)
 * [docs/operations.md](docs/operations.md): all environment variables, night window, scaling, logs, troubleshooting
 * [docs/presets.md](docs/presets.md): presets, engines, budgets, adding presets and MCP servers
 * [docs/evaluation.md](docs/evaluation.md): results and decisions of the evaluation

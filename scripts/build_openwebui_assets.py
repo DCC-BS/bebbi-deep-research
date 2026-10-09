@@ -4,7 +4,7 @@
   uv run python scripts/build_openwebui_assets.py          # write the files
   uv run python scripts/build_openwebui_assets.py --check  # exit 1 if they are out of date (CI, tests)
 
-function.json  one entry in the format of Open WebUI's /api/v1/functions/sync (seeder: POST it with an admin key).
+function.json  two entries (pipe and download action) in the format of Open WebUI's /api/v1/functions/sync (seeder: POST it with an admin key).
 models.json    one model entry per preset ("Deep Research · Recht", ...) in the format of /api/v1/models/import.
 """
 
@@ -17,6 +17,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "deploy" / "openwebui"
 FUNCTION_ID = "bebbi_deep_research"
+ACTION_ID = "bebbi_deep_research_download"
 LABELS = {"rechtsrecherche": "Recht", "grossrat": "Grosser Rat", "statistik": "Statistik",
           "verwaltung_web": "Verwaltung", "web_survey": "Web"}      # same as the PRESETS valve default of the pipe
 SUGGESTIONS = {
@@ -30,20 +31,22 @@ SUGGESTIONS = {
 
 def build() -> dict[str, str]:
     cfg = yaml.safe_load((ROOT / "config" / "presets.yaml").read_text())
-    content = (ROOT / "pipe" / "deep_research.py").read_text()
+    valves = {"SERVICE_URL": "http://bebbi-deep-research:8088", "SERVICE_TOKEN": ""}     # the seeder fills the token from its own secret store
     function = [{
-        "id": FUNCTION_ID, "name": "Deep Research (Bebbi Bot)", "type": "pipe", "content": content,
+        "id": FUNCTION_ID, "name": "Deep Research (Bebbi Bot)", "type": "pipe", "content": (ROOT / "pipe" / "deep_research.py").read_text(),
         "meta": {"description": "Deep research with clarifying questions, plan approval and night queue."},
-        # SERVICE_TOKEN is a secret: the seeder fills it from its own secret store (see docs/integration.md)
-        "valves": {"SERVICE_URL": "http://bebbi-deep-research:8088", "SERVICE_TOKEN": ""},
-        "is_active": True, "is_global": True, "user_id": None, "updated_at": 0, "created_at": 0,
+        "valves": valves, "is_active": True, "is_global": True, "user_id": None, "updated_at": 0, "created_at": 0,
+    }, {
+        "id": ACTION_ID, "name": "Word-Datei (Deep Research)", "type": "action", "content": (ROOT / "pipe" / "deep_research_download.py").read_text(),
+        "meta": {"description": "Hängt den Recherchebericht als Word-Datei an die Antwort an."},
+        "valves": valves, "is_active": True, "is_global": True, "user_id": None, "updated_at": 0, "created_at": 0,
     }]
     models = []
     for name, p in cfg["presets"].items():
         models.append({
             "id": f"{FUNCTION_ID}.{name}", "base_model_id": None, "name": f"Deep Research · {LABELS.get(name, name)}",
             "params": {}, "access_grants": [{"principal_type": "user", "principal_id": "*", "permission": "read"}], "is_active": True,
-            "meta": {"description": p["description"], "capabilities": {"vision": False, "file_upload": False, "citations": False},
+            "meta": {"description": p["description"], "capabilities": {"vision": False, "file_upload": False, "citations": True},
                      "suggestion_prompts": [{"content": s} for s in SUGGESTIONS.get(name, [])]},
         })
     return {"function.json": json.dumps(function, indent=2, ensure_ascii=False) + "\n",

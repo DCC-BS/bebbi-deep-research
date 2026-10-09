@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from service.db import DB
-from service.jobs import in_window, ui_markdown
+from service.jobs import in_window
 from service.settings import Settings, normalize_db_url
 
 from .conftest import PLAN, FakeAgent, running, submit, utc_window, wait_status
@@ -52,7 +52,7 @@ async def test_job_lifecycle_and_delivery(tmp_path):
 
     def handler(request: httpx.Request):
         posted.append((str(request.url), request.headers["authorization"], json.loads(request.content)))
-        return httpx.Response(200, json={})
+        return httpx.Response(200, json=request.url.path.endswith("/event"))
 
     factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
     async with running(tmp_path, http_factory=factory, night_window=utc_window(True),
@@ -68,7 +68,14 @@ async def test_job_lifecycle_and_delivery(tmp_path):
                 break
             await asyncio.sleep(0.05)
         assert j["delivery"] == "ok"
-        assert posted == [("http://owui/api/v1/chats/chat1/messages/msg1", "Bearer k", {"content": ui_markdown(j["report"])})]
+        # one source event per source (in the order of the numbers), then the message text
+        base = "http://owui/api/v1/chats/chat1/messages/msg1"
+        assert [(u, a) for u, a, _ in posted] == [(base + "/event", "Bearer k")] * 2 + [(base, "Bearer k")]
+        events = [b for _, _, b in posted[:2]]
+        assert [e["type"] for e in events] == ["source", "source"]
+        assert [e["data"]["metadata"][0]["source"] for e in events] == [s["url"] for s in j["sources"]]
+        assert posted[2][2] == {"content": j["ui_report"]} and "\n1. Vorstoss 23.5001" in j["ui_report"]
+        assert j["owui_events"] == events
         assert "cards" in (await c.get(f"/jobs/{job['job_id']}/evidence")).json()
         assert 'research_jobs{status="done"} 1' in (await c.get("/metrics")).text
 
@@ -240,3 +247,84 @@ def test_llm_extra_body_per_role():
     llm = LLM("http://x/v1", "k", extra_body={"think": {"chat_template_kwargs": {"enable_thinking": True}}})
     assert llm._kw("think") == {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
     assert llm._kw("fast") == {} and LLM("http://x/v1", "k")._kw("think") == {}
+
+
+# ------------------------------------------------------- sources and Word export
+async def test_job_result_has_structured_sources_and_docx(tmp_path):
+    async with running(tmp_path, night_window=utc_window(True)) as (c, _):
+        job = await submit(c, chat_id="chat1", message_id="msg1")
+        j = await wait_status(c, job["job_id"], {"done"})
+        s1, s2 = j["sources"]
+        assert (s1["n"], s1["title"], s1["url"], s1["stand"], s1["fetched"], s1["kind"]) == (
+            1, "Vorstoss 23.5001: Stadtklima", "https://grosserrat.bs.ch/geschaefte/23.5001", "2023-05-01", "2026-10-09", "mcp:grossrat")
+        assert s1["excerpt"].startswith("Der Regierungsrat wird beauftragt") and s1["excerpt_kind"] == "quote"
+        assert s2["stand"] == "" and s2["excerpt"].startswith("Die Frist beträgt 30 Tage") and s2["kind"] == "web"
+        assert j["report"].count("## Quellen") == 1 and j["docx"] == f"/jobs/{job['job_id']}/report.docx"   # report text unchanged
+        r = await c.get(j["docx"])
+        assert r.status_code == 200 and r.headers["content-type"].startswith("application/vnd.openxmlformats")
+        assert 'filename="Bebbi-Deep-Research_Bericht_' in r.headers["content-disposition"]
+        from io import BytesIO
+
+        from docx import Document
+        doc = Document(BytesIO(r.content))
+        assert any("Der Grosse Rat hat den Vorstoss" in p.text for p in doc.paragraphs)
+        assert (await c.get(j["docx"], headers={"Authorization": "Bearer wrong"})).status_code == 401
+        assert (await c.get("/jobs/nope/report.docx")).status_code == 404
+        found = await c.get("/jobs/lookup", params={"chat_id": "chat1", "message_id": "msg1", "user_id": "u1"})
+        assert found.json() == {"job_id": job["job_id"], "status": "done"}
+        assert (await c.get("/jobs/lookup", params={"chat_id": "chat1", "message_id": "msg1", "user_id": "other"})).status_code == 404
+
+
+async def test_docx_only_for_finished_jobs(tmp_path):
+    from .conftest import FakeAgent
+    FakeAgent.block = True
+    async with running(tmp_path, night_window=utc_window(True)) as (c, _):
+        job = await submit(c)
+        await wait_status(c, job["job_id"], {"running"})
+        assert (await c.get(f"/jobs/{job['job_id']}/report.docx")).status_code == 409
+        assert (await c.get(f"/jobs/{job['job_id']}")).json()["sources"] == []
+
+
+async def test_source_delivery_is_not_repeated_on_retry(tmp_path):
+    """A failing text step is retried without sending the source events again (Open WebUI would store them twice)."""
+    calls = []
+
+    def handler(request: httpx.Request):
+        if request.method == "GET":
+            return httpx.Response(404)
+        calls.append("event" if request.url.path.endswith("/event") else "text")
+        if calls[-1] == "text" and calls.count("text") == 1:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, json=True)
+
+    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    async with running(tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k") as (c, app):
+        app.state.runner.retry_delay = 0
+        job = await submit(c, chat_id="chat1", message_id="msg1")
+        for _ in range(60):
+            j = (await c.get(f"/jobs/{job['job_id']}")).json()
+            if j["delivery"]:
+                break
+            await asyncio.sleep(0.05)
+        assert j["delivery"] == "ok" and calls == ["event", "event", "text", "text"]
+
+
+async def test_sources_already_on_the_message_are_not_delivered_again(tmp_path):
+    """"jetzt" jobs: the pipe returns the report itself and emits the sources; the service must not store them a second time."""
+    posted = []
+
+    def handler(request: httpx.Request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"chat": {"history": {"messages": {"msg1": {"sources": [{"source": {"name": "x"}}]}}}}})
+        posted.append(request.url.path)
+        return httpx.Response(200, json=True)
+
+    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    async with running(tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k") as (c, _):
+        job = await submit(c, chat_id="chat1", message_id="msg1")
+        for _ in range(60):
+            j = (await c.get(f"/jobs/{job['job_id']}")).json()
+            if j["delivery"]:
+                break
+            await asyncio.sleep(0.05)
+        assert j["delivery"] == "ok" and posted == ["/api/v1/chats/chat1/messages/msg1"]
