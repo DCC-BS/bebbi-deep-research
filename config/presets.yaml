@@ -154,6 +154,7 @@ presets:
     <<: *defaults
     engine: focus
     description: Recherche in Geschäften, Vorstössen und Beschlüssen des Grossen Rates Basel-Stadt.
+    budget: {focus_words: 550}    # v7: shorter reports, fewer unsourced claims (full-text tasks 80.2% vs 76.1%)
     language: de
     routes: {primary: [mcp:grossrat, web], data: [mcp:grossrat, web], secondary: [web]}
     mcp:

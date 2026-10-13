@@ -91,4 +91,4 @@ scripts/smoke_local.sh                   # starts the service on SQLite against 
 * [docs/operations.md](docs/operations.md): all environment variables, night window, scaling, logs, troubleshooting
 * [docs/presets.md](docs/presets.md): presets, engines, budgets, adding presets and MCP servers
 * [docs/evaluation.md](docs/evaluation.md): results and decisions of the evaluation
-* [docs/mcp-servers.md](docs/mcp-servers.md): state and needs of the MCP servers
+* [docs/mcp-servers.md](docs/mcp-servers.md): state and needs of the MCP servers; [docs/grossrat-mcp-changes.md](docs/grossrat-mcp-changes.md): requested changes to the Grossrat server

@@ -1,8 +1,9 @@
 # MCP servers: state and improvements
 
-Status 2026-10-09. What the research agent needs from an MCP server, what each server delivers today, and
-what to change. The code changes for our own servers are merged (2026-10-09): `mcp-data-bs` #7 and #5,
-`mcp-statistikportal` #3. They take effect once the servers are redeployed.
+Status 2026-10-13. What the research agent needs from an MCP server, what each server delivers today, and
+what to change. The code changes for our own servers are merged: `mcp-data-bs` #5, #7, #8 and
+`mcp-statistikportal` #3, #4. data.bs and statistik run the new code (checked 2026-10-13); the statistik container
+still cannot reach the portal.
 
 ## What the agent needs
 
@@ -19,8 +20,8 @@ what to change. The code changes for our own servers are merged (2026-10-09): `m
 | Server | Who | In presets | State |
 |---|---|---|---|
 | `mcp-grosserrat.statistik.bs.ch/mcp` | us (code not in this workspace) | grossrat, rechtsrecherche, statistik, verwaltung_web | Works. The best source for Grossrat tasks |
-| `mcp.data.bs.ch/mcp` | us | statistik, verwaltung_web | Works; fixes merged (#5, #7), not yet deployed |
-| `mcp.statistik.bs.ch/mcp` | us | statistik, verwaltung_web | Configured, **switched off** (`enabled: false` in `config/presets.yaml`) until it works |
+| `mcp.data.bs.ch/mcp` | us | statistik, verwaltung_web | Works with #5, #7, #8 deployed: citable records (URL, title, Stand), error reasons reach the model |
+| `mcp.statistik.bs.ch/mcp` | us | statistik, verwaltung_web | New code (#3, #4) deployed, but every tool call fails: "statistik.bs.ch is not reachable: ConnectError" (container egress/proxy). **Switched off** (`enabled: false`) until that is fixed |
 | `mcp.opencaselaw.ch` | external | rechtsrecherche, verwaltung_web | Works; labels need fixing (done in the engine) |
 
 ### Shared front proxy (all *.bs.ch hosts)
@@ -30,7 +31,7 @@ what to change. The code changes for our own servers are merged (2026-10-09): `m
   minute later all 200. During the first Grossrat test the server alternated 200/503 for minutes.
 - The engine now retries every request up to 6 times over about 45 s, and re-opens the session after a 404.
 - **Suggestion:** check the backend pool and health checks of the front proxy; monitor `/healthz` of every
-  host. `scripts/mcp_health.sh` logs the status every 30 s during evaluation runs (`logs/mcp-health.log`).
+  host. `scripts/mcp_health.sh` in the evaluation repository logs the status every 30 s during runs.
 
 ### Grosser Rat (`grossrat`)
 
@@ -57,27 +58,32 @@ Suggestions:
 - The `search`/`fetch` pair duplicates `search_documents`/`get_document` (ChatGPT convention). The presets do
   not allow it, which is fine.
 
-### data.bs.ch (`data-bs`), merged as #7 and #5
+### data.bs.ch (`data-bs`): #5, #7, #8 merged and deployed
 
 Observed in the focus engine (DE-ST1): both `get_records` calls failed because `jahr` is a text field and the
-model wrote `jahr >= '2016'`. The portal answers with a clear message
-(`IncompatibleTypesInComparisonFilter`), but the server swallowed it.
+model wrote `jahr >= '2016'`. The portal answers with a clear message (`IncompatibleTypesInComparisonFilter`), but
+the server swallowed it.
 
-Merged in #7 (tests pass, ruff clean); #5 adds a round-trip test for the encoded `where` clause of export URLs:
-- API errors, timeouts and network errors are raised as `ToolError` with the portal's message.
-- `url` (dataset page) in `get_datasets`, `get_dataset` and `get_records`; `dataset_id` in `get_records`.
-- List descriptions cut to 400 characters (`get_dataset` returns the full text): 8 hits took 7,500 characters.
-- `get_records` docstring: year fields are often text, use `group_by`/`order_by` or `in (...)`.
+- #7: API errors, timeouts and network errors are raised as `ToolError` with the portal's message; `url` (dataset
+  page) in every result; list descriptions cut to 400 characters; docstring hint on text year fields.
+- #8: `get_records` carries `dataset_id`, `url`, `title` and `modified` (Stand) at top level, so every records call
+  is a citable source on its own; `get_dataset` fields with label, description and unit; `next_offset` paging;
+  output capped at about 12,000 characters; short tool descriptions. `export_dataset_url` now returns an object
+  (download URL plus dataset page, title, Stand) instead of a string, a breaking change for other clients.
+- #5: round-trip test for the encoded `where` clause of export URLs.
 
-Further suggestions: units and field descriptions in `get_dataset` (`fields[].description` from the
-portal); `modified` labelled as Stand; keep `/mcp` stable.
+Checked live on 2026-10-13: a grouped `get_records` call returns the 12-year vacancy series with URL, title and Stand
+in under 600 characters; `jahr >= 2016` returns the portal's reason to the model.
 
-### Statistics portal (`statistik`), merged as #3
+### Statistics portal (`statistik`): #3, #4 merged and deployed, egress blocked
 
-Not called in this round, as agreed. Code only: `fetch` raises `ToolError` with a reason (unknown id, portal
-not reachable, no JSON) instead of a bare crash. 17 tests pass. Results already carry `portal_url`,
-`aktualisierungsdatum` and `quellenangabe`, which the source layer uses as URL, Stand and title. Switch the
-server on with `enabled: true` in `config/presets.yaml` once it works.
+- #3: `fetch` raises `ToolError` with a reason (unknown id, portal not reachable, no JSON).
+- #4: values with `unit`, `aktualisierungsdatum`, `source`, `portal_url`, short method notes and a `latest` value;
+  umlaut- and inflection-tolerant search ("Leerwohnungen" finds "Leerwohnungsquote"); id validation; output cap;
+  short tool descriptions. Indicators outside the portal index (about 1,450 of 2,500) remain unsearchable.
+- The deployed container runs the new code but cannot reach statistik.bs.ch (ConnectError on every tool call,
+  checked 2026-10-13). Fix the container's egress (proxy or NO_PROXY, DNS), then set `enabled: true` for
+  `statistik` in `config/presets.yaml` and re-run DE-ST1.
 
 ### opencaselaw (external)
 
