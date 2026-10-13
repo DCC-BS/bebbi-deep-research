@@ -1,3 +1,5 @@
+"""Hausstil Kanton Basel-Stadt as writer rules for German research reports."""
+
 # Hausstil der Verwaltung Kanton Basel-Stadt.
 # Abgeleitet aus den amtlichen Leitfäden in assets/docs/
 # (Merkblatt Behördenbriefe, Rechtschreibleitfaden, Leitfaden geschlechtergerechte
