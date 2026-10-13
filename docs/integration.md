@@ -18,13 +18,15 @@ Helm chart `deploy/helm/bebbi-deep-research` (see [operations.md](operations.md)
 | Key | Content |
 |---|---|
 | `RA_TOKEN` | random string, shared with the pipe valve `SERVICE_TOKEN` |
+| `HMAC_SECRET` | random string (`openssl rand 32 \| base64`), pseudonymises user ids in usage events |
 | `RA_DATABASE_URL` | `postgresql://user:password@host:5432/db` (tables are created on start, `create table if not exists`) |
 | `RA_SEARCH_KEY` | Serper API key |
 | `RA_FIRECRAWL_KEY`, `RA_LLM_API_KEY` | only if the endpoints need keys |
 | `OWUI_API_KEY` | API key of the Open WebUI service account (step 3) |
 
-Check: `kubectl port-forward svc/bebbi-deep-research 8088` then `curl localhost:8088/readyz` returns `{"status":"ok"}`.
-`/readyz` lists missing configuration under `problems`.
+Check: `kubectl port-forward svc/bebbi-deep-research 8088` then `curl localhost:8088/health/readiness` returns
+`{"status":"ready",...}`; `checks` names an unreachable LLM endpoint or Open WebUI. Missing or invalid configuration stops
+the pod at start with the variable named in the log (varlock and the service's own check).
 
 ## 2. Install the pipe and set the valves
 
@@ -43,8 +45,13 @@ Regenerate after changing the pipe or presets: `uv run python scripts/build_open
 activates them globally and sets the valves:
 
 ```bash
-OWUI_URL=http://localhost:3000 OWUI_API_KEY=sk-... RA_TOKEN=... uv run python scripts/install_pipe.py --models
+OWUI_URL=http://localhost:3000 OWUI_API_KEY=sk-... RA_TOKEN=... uv run python scripts/install_pipe.py --models \
+  --service-url http://service:8088
 ```
+
+Pass `--service-url` explicitly: the default `http://service:8088` is the compose service name and is right only for the local compose
+stack. In a cluster use the Kubernetes service URL (the default of the `SERVICE_URL` valve, `http://bebbi-deep-research:8088`, add the
+namespace if Open WebUI runs in another one: `http://bebbi-deep-research.<ns>.svc:8088`). The URL is what Open WebUI (the pipe) reaches, not what your shell reaches.
 
 Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py` (and `pipe/deep_research_download.py`), save, enable, set "global". The gear icon opens the valves.
 
@@ -55,9 +62,8 @@ Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py` (and `p
 | `SERVICE_URL` | `http://bebbi-deep-research:8088` | base URL of the service (cluster-internal service name, include the namespace if needed) |
 | `SERVICE_TOKEN` | empty | must equal `RA_TOKEN` |
 | `DEFAULT_DEPTH` | `standard` | `quick`, `standard`, `deep`; the user can say "schnell" or "gründlich" in the question |
-| `NIGHT_FOR_DEPTH` | `deep` | depths that always go to the night window |
-| `POLL_SECONDS` | `10` | polling interval while a "jetzt" job is streamed |
-| `MAX_WAIT_MINUTES` | `25` | how long the pipe streams a running job before handing over to the delivery |
+| `DECISION_MINUTES` | `30` | how long the approve/change/discard card waits; no answer counts as no |
+| `POLL_SECONDS` | `10` | wait between checks whether the service has delivered a finished report (max 2 s per check) |
 | `PRESETS` | `rechtsrecherche:Recht,grossrat:Grosser Rat,statistik:Statistik,verwaltung_web:Verwaltung,web_survey:Web,dokumente:Eigene Dokumente` | `preset:label` pairs, one model per entry; preset names must exist in `presets.yaml` |
 | `OWN_SOURCES` | `true` | use the chat's uploaded files and knowledge bases as sources (section 5b); `false` ignores them |
 | `PUBLIC_URL` | empty | public base URL of Open WebUI for the links to uploaded files; empty = Open WebUI's `WEBUI_URL` setting, else the request URL. Set `WEBUI_URL` in production |
@@ -70,9 +76,16 @@ The service writes the finished report into the assistant message with
 event per source, section 5a). In v0.11.4 both endpoints accept the chat owner or an admin (decision: admin service key).
 
 1. Create a user "deep-research-service" with role admin (Entra group sync can map it, or create it locally).
-2. Enable API keys (`ENABLE_API_KEYS=true`); if `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` is on, allow `/api/v1/chats`.
+2. Enable API keys (`ENABLE_API_KEYS=true`); if `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` is on, allow `/api/v1/chats`, `/api/v1/retrieval` (knowledge bases) and `/api/v1/files` (own sources, Word file).
 3. Settings, Account, API keys: create a key, store it as `OWUI_API_KEY` in the service Secret.
 4. Set `OWUI_URL` (chart value `env.OWUI_URL`) to the in-cluster Open WebUI service.
+
+The pipe sends the chat user's id (`user_id`) on `POST /plans`, `POST /plans/{id}/edit`, `POST /jobs` and as `?user_id=` on `GET /jobs/{id}`
+(and the other job reads). When both the stored draft/job and the request carry a user id and they differ, the service answers 404. Calls
+without `user_id` (n8n, scripts) are not checked.
+
+`RA_TOKEN` is full trust: whoever holds it can read every job and report and submit for any user id; the admin key paths run through the
+service. There are no separate tokens per caller yet; keep the token in the Secret and restrict ingress with the NetworkPolicy.
 
 The key can read and write every chat. Keep it in the Secret only, and restrict ingress to the service with the
 NetworkPolicy (`networkPolicy.enabled`). Delivery is retried 3 times; the result is stored per job (`delivery`
@@ -88,10 +101,17 @@ suggestion prompts per preset ("Deep Research · Recht", ...) in the format of `
 ## 5. Chat flow and the fallback
 
 1. First message: the pipe asks up to two clarifying questions (answer, or "weiter").
-2. Plan shown: "ok" starts now, "heute Nacht" queues for the night window, free text edits the plan (max 3 times).
-3. A "jetzt" job streams status events (`status` emitter) for up to `MAX_WAIT_MINUTES`; otherwise the message says the
-   job is queued/running. When the job finishes, the service replaces the assistant message content with the report.
-4. **Fallback:** the assistant message carries a hidden state marker (`<!-- research-agent:{...} -->`). If the user writes
+2. Plan shown, then Open WebUI's ask-user card above the input field (`__event_call__` with `request:user_input`, the
+   dialog Open WebUI v0.11 uses for its `ask_user` tool), in the same turn: **Freigeben** queues the job for the night
+   window, **Ändern** opens an input dialog for the change, the plan is edited and the card shown again (max 3 changes,
+   then only Freigeben/Verwerfen), **Verwerfen** ends without a job. The card has no free-text option, so nothing is
+   interpreted. No answer (card cancelled, closed after `DECISION_MINUTES`, browser gone) counts as no: no job runs and
+   the plan is not kept; the user starts over by asking again. Clients without a browser session (n8n, plain API calls
+   through Open WebUI) are out of scope: they get no card and therefore never start a job.
+3. For now every job runs in the night window; starting right away is not offered (the service still accepts
+   `when=now` for its own API). The message says the job is queued. When the job finishes, the service replaces the
+   assistant message content with the report.
+4. **Fallback:** the queued message carries a hidden state marker (`[//]: # (research-agent:...)`). If the user writes
    again in that chat before the delivery, the pipe asks the service for the job and returns the report (or status) in the
    new reply. If the delivery failed, the report is retrievable this way and via `GET /jobs/{id}`.
 
@@ -100,7 +120,7 @@ is acceptable: the report is the end of a research, and a follow-up question bec
 clarifying questions or shows a plan). A follow-up that asks about the report content is not answered from the report;
 users should use a normal model for that. Making the delivered message carry a "finished" marker would only make the
 pipe answer the next message with the same report again, so we left it out. The same holds for a report that the pipe
-returns itself (`jetzt` run that finishes while streaming): it carries no marker either.
+returns itself (later message, fallback above): it carries no marker either.
 
 ### How the pipe and the delivery fit Open WebUI v0.11.4 (found in the end-to-end test)
 
@@ -149,7 +169,7 @@ returns itself (`jetzt` run that finishes while streaming): it carries no marker
   `fetched`, `kind` = `web` or `mcp:<server>`, `excerpt`, `excerpt_kind` = `quote` for the verbatim card quote of the
   pipeline engine, `claim` for the sentence of the report that cites the source in the focus engine), `ui_report`,
   `owui_events` (ready-made source events) and `docx`/`docx_name`. They are derived from the report text and the evidence
-  ledger (`service/report.py`); the engines are unchanged and the stored report text is unchanged. Old clients ignore the new fields.
+  ledger (`services/report.py`); the engines are unchanged and the stored report text is unchanged. Old clients ignore the new fields.
 * `ui_report` is the report for the chat: the source list becomes a numbered list (a line starting with `[1]` would turn into a
   badge), stray `[n]` without a source are escaped. The list stays in the text because Open WebUI's own list shows only the
   URL (collapsed under "n Sources") and neither Stand nor the retrieval date; the preview of a source (click on a badge) shows
@@ -162,8 +182,8 @@ returns itself (`jetzt` run that finishes while streaming): it carries no marker
   The action function `bebbi_deep_research_download` adds a button ("Word-Datei") under every Deep Research answer; it runs as
   the user inside Open WebUI, looks up the job by chat and message id (`GET /jobs/lookup`, checks the user), fetches the
   `.docx` and attaches it. A second click does not attach it again.
-* The pipe and the service both write into the same message for "jetzt" jobs. The service skips the source events if the
-  message already has sources; the pipe waits for the delivery and skips its source events if the delivery succeeded.
+* The pipe (fallback reply) and the service may both write a report. The service skips the source events if the message
+  already has sources; the pipe waits for the delivery and skips its source events if the delivery succeeded.
 * `GET /jobs/{id}/report.docx` (bearer token) returns the Word file for n8n and other apps (409 while the job runs).
   python-docx renders title, header block (question, date, preset, depth), headings, lists, Markdown tables as Word tables,
   citations as links to the source list, the source list with hyperlinks, Stand and retrieval date, and a footer.
@@ -211,7 +231,7 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
    (fail closed). The extracted text always comes from the file record, never from the browser's payload. The plan step sends only the first
    1,500 characters of each file; the approval sends the whole text (cut at 2,000,000 characters). Links: `<public base>/api/v1/files/<id>/content`,
    public base = valve `PUBLIC_URL`, else the `webui.url` setting (`WEBUI_URL`), else the request URL.
-2. **Service** (`service/own.py`). Applies the limits (`RA_OWN_MAX_FILES` 10, `RA_OWN_MAX_FILE_CHARS` 2,000,000, `RA_OWN_MAX_COLLECTIONS` 5) and
+2. **Service** (`services/own_sources.py`). Applies the limits (`RA_OWN_MAX_FILES` 10, `RA_OWN_MAX_FILE_CHARS` 2,000,000, `RA_OWN_MAX_COLLECTIONS` 5) and
    reports what it cut, in German, back to the pipe (shown in the plan and in the "queued" message). The plan step stores previews with the
    draft; the job stores the full texts and the knowledge base ids (`jobs.own_sources`), so a night run does not depend on the user's session.
    Old databases get the column added on start. `GET /jobs/{id}` returns names and sizes (`own_sources`), never texts.
@@ -219,7 +239,7 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
    `/api/v1/retrieval/query/collection` with the service's admin key for **one stored id at a time**. The tool has no collection argument, the
    retriever refuses ids that were not stored with the job, and every query is logged (`knowledge query`, collection id). The file date (Stand)
    comes from `GET /api/v1/files/{file_id}` (`created_at`).
-4. **Engine** (`research_agent/own.py`, additive). Source kinds `upload` (title = file name, Stand = upload date) and `knowledge:<name of the
+4. **Engine** (`engine/own.py`, additive). Source kinds `upload` (title = file name, Stand = upload date) and `knowledge:<name of the
    knowledge base>` (title = document name). Focus engine: uploads up to 6,000 characters (18,000 together) are put into the first message with
    their source IDs (no tool call); larger ones are read with `read_upload(file, query)` (the passages most similar to the query, embeddings,
    computed once per file and run); knowledge bases with `knowledge_search`. Pipeline engine (web_survey): in every sub-question the best three
@@ -254,7 +274,8 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
 
 ## 7. End-to-end test with a real Open WebUI (verified 2026-10-09)
 
-Setup: `docker compose -f compose.yaml -f compose.eval-net.yaml up -d` (Open WebUI v0.11.4, service, Postgres; LLM
+Setup (2026-10-09, then `compose.yaml` + `compose.eval-net.yaml`; today `docker-compose.dev.yml` +
+`docker/eval-net.compose.yml`): Open WebUI v0.11.4, service, Postgres; LLM
 gateway, search and Firecrawl of the evaluation stack), admin from `WEBUI_ADMIN_EMAIL/PASSWORD`, API key and the
 pipe/models via `scripts/install_pipe.py --create-api-key --models`, a normal user "tester" for the chats. Keys only in
 the git-ignored `.env`. `scripts/e2e_owui.py` drives Open WebUI like the browser (`POST /api/v1/chats/new`, then
@@ -314,19 +335,20 @@ Known limitations:
 ## 8. Local end-to-end test (compose)
 
 ```bash
-cp .env.example .env     # set RA_*, POSTGRES_PASSWORD, WEBUI_SECRET_KEY, WEBUI_ADMIN_EMAIL/PASSWORD
-docker compose up -d --build
-OWUI_ADMIN_EMAIL=... OWUI_ADMIN_PASSWORD=... RA_TOKEN=... uv run python scripts/install_pipe.py --create-api-key --models
-# put the printed OWUI_API_KEY into .env, then recreate the service so that it reads it: docker compose up -d service
-# (without the key the delivery is `skipped`; after code changes build with `docker compose build service`)
+mise run docker:up       # varlock loads the variables (.env.schema; secrets from Proton Pass), builds and starts
+OWUI_ADMIN_EMAIL=... OWUI_ADMIN_PASSWORD=... RA_TOKEN=... \
+  uv run python scripts/install_pipe.py --service-url http://service:8088 --create-api-key --models
+# store the printed OWUI_API_KEY in Proton Pass (or export it), then recreate the service: mise run docker:up
+# (without the key the delivery is `skipped`)
 ```
 
-Set `RA_NIGHT_WINDOW=00:00-23:59` in `.env` to let every job run at once while testing. With the evaluation stack on the
-same host add `-f compose.eval-net.yaml` (see the comment in that file).
+Every approved research is queued for the night window: set `RA_NIGHT_WINDOW=00:00-23:59` to let jobs run at once
+while testing. With the evaluation stack on the same host add `-f docker/eval-net.compose.yml` (see the comment in that
+file).
 
 ## 9. Upgrade checklist: Open WebUI internals we depend on
 
-Re-test these when the Open WebUI version changes (pinned: v0.11.4). Unit tests fake them (`tests/test_pipe_own.py:
+Re-test these when the Open WebUI version changes (pinned: v0.11.4). Unit tests fake them (`tests/unit/test_pipe_own.py:
 test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not if Open WebUI changes); the end-to-end check is
 `scripts/e2e_owui.py` (section 7).
 

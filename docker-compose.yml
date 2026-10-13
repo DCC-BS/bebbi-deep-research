@@ -1,0 +1,35 @@
+# Integration stack: job service + Postgres + Open WebUI (v0.11.4, as in production), with restart policies.
+# LLM, search and Firecrawl are external: set RA_LLM_BASE_URL, RA_SEARCH_URL and RA_FIRECRAWL_URL (.env.schema).
+#   varlock run -- docker compose up -d
+name: bebbi-dr
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  owui-data:
+
+services:
+  postgres:
+    extends: {file: ./docker/services.compose.yml, service: postgres}
+    networks: [app-network]
+    restart: unless-stopped
+
+  service:
+    extends: {file: ./docker/services.compose.yml, service: service}
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [app-network]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {memory: 1g}
+
+  open-webui:
+    extends: {file: ./docker/services.compose.yml, service: open-webui}
+    depends_on: [service]
+    ports: ["127.0.0.1:3000:8080"]
+    networks: [app-network]
+    restart: unless-stopped

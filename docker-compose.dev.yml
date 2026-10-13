@@ -1,0 +1,29 @@
+# Local development stack: builds the image, publishes the service on 127.0.0.1:8088 and Open WebUI on :3000.
+#   mise run docker:up          # = varlock run -- docker compose -f docker-compose.dev.yml up -d --build
+#   uv run python scripts/install_pipe.py --service-url http://service:8088 --models
+# Evaluation stack network (LLM gateway "meter", Firecrawl): add -f docker/eval-net.compose.yml
+name: bebbi-dr-dev
+
+volumes:
+  pgdata:
+  owui-data:
+
+services:
+  postgres:
+    extends: {file: ./docker/services.compose.yml, service: postgres}
+
+  service:
+    extends: {file: ./docker/services.compose.yml, service: service}
+    build: {context: ., dockerfile: Dockerfile}
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+    ports: ["127.0.0.1:8088:8088"]
+    volumes:
+      - ./config/presets.yaml:/app/config/presets.yaml:ro
+
+  open-webui:
+    extends: {file: ./docker/services.compose.yml, service: open-webui}
+    depends_on: [service]
+    ports: ["127.0.0.1:3000:8080"]

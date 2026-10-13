@@ -1,11 +1,11 @@
 # Helm values of the bebbi-deep-research job service. Everything is configured here (GitOps, no click-ops).
 # Reference of all variables: docs/operations.md.
 
-replicaCount: 1            # >1 is safe (jobs are claimed atomically in Postgres), but one replica is enough
-                           # for the load-limited setup (RA_WORKERS / RA_DAY_WORKERS are per replica).
+replicaCount: 1            # 1 recommended (docs/operations.md). >1 only once job claims carry an owner token (stale re-queue
+                           # can otherwise let two replicas finish the same job); RA_WORKERS / RA_DAY_WORKERS are per replica.
 
 image:
-  repository: ghcr.io/CHANGE-ME/bebbi-deep-research
+  repository: ghcr.io/dcc-bs/bebbi-deep-research
   tag: ""                  # default: chart appVersion
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -33,15 +33,16 @@ env:
   RA_OWN_MAX_FILES: "10"             # own sources: uploaded files per research
   RA_OWN_MAX_FILE_CHARS: "2000000"   # ... extracted characters per file (longer is cut)
   RA_OWN_MAX_COLLECTIONS: "5"        # ... knowledge bases per research
-  RA_LOG_LEVEL: INFO
+  LOG_LEVEL: INFO
 
 # Secrets are read from an existing Secret (SealedSecret / External Secrets / Vault). Keys default to the variable name.
 # required: true makes the pod fail to start when the key is missing; false = variable stays unset.
 secrets:
   existingSecret: bebbi-deep-research
   keys:
-    RA_TOKEN: {required: true}           # bearer token, same value as the SERVICE_TOKEN valve of the pipe
-    RA_DATABASE_URL: {required: true}    # postgresql://user:password@host:5432/db
+    HMAC_SECRET: {required: true}        # pseudonymises user ids in usage events (openssl rand 32 | base64)
+    RA_TOKEN: {required: true}           # bearer token, same value as the SERVICE_TOKEN valve of the pipe. Full trust: its holder can read all jobs
+    RA_DATABASE_URL: {required: true}    # postgresql://user:password@host:5432/db; URL-encode special characters in the password (@ -> %40, / -> %2F, : -> %3A, # -> %23)
     RA_LLM_API_KEY: {required: false}
     RA_SEARCH_KEY: {required: true}      # Serper key
     RA_FIRECRAWL_KEY: {required: false}
@@ -65,7 +66,8 @@ presets:
 extraEnv: []                 # raw container env entries
 podAnnotations: {}
 tmpSizeLimit: 100Mi          # emptyDir for /tmp (Kyverno caps emptyDir at 250Mi)
-terminationGracePeriodSeconds: 30   # on SIGTERM running jobs are re-queued (uvicorn waits up to 20 s)
+terminationGracePeriodSeconds: 45   # on SIGTERM running jobs are re-queued; uvicorn waits up to 20 s (Dockerfile entrypoint), keep this above that plus the re-queue
+strategy: {type: Recreate}   # never two pods at once during a rollout (stale-job re-queue, worker counts)
 
 resources:
   requests: {cpu: 100m, memory: 256Mi}
@@ -77,7 +79,10 @@ tolerations: []
 networkPolicy:
   enabled: false
   openWebUIPodLabels: {app.kubernetes.io/name: open-webui}
+  openWebUINamespaceLabels: {}   # Open WebUI usually runs in another namespace: e.g. {kubernetes.io/metadata.name: open-webui}.
+                                 # Set => the rule uses namespaceSelector AND podSelector; empty => only pods of this namespace match.
   extraIngressFrom: []        # e.g. n8n: [{podSelector: {matchLabels: {app: n8n}}}]
+                              # Prometheus scraping /metrics: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]
   # Adapt to the cluster: DNS, the proxy, Postgres, the LLM service, Firecrawl, Open WebUI.
   egress:
     - ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]

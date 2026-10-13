@@ -3,7 +3,7 @@ name = "bebbi-deep-research"
 version = "1.0.0"
 description = "Deep-research agent and job service for Bebbi Bot (Open WebUI, Kanton Basel-Stadt)"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28",
     "openai>=1.109",
@@ -18,35 +18,56 @@ dependencies = [
     "aiosqlite>=0.20",
     "tzdata>=2024.2",
     "python-docx>=1.2.0",
+    "dcc-backend-common[fastapi,pydantic-ai]>=0.1.23",
+    "dependency-injector>=4.49.1",
+    "rich>=15.0.0",
 ]
 
 [project.scripts]
-bebbi-deep-research = "service.main:main"
+bebbi-deep-research = "bebbi_deep_research.main:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["research_agent", "service"]
+packages = ["src/bebbi_deep_research"]
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.0",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
+    "ty>=0.0.1a20",
 ]
+
+[tool.uv]
+# dependency cooldown: ignore releases newer than one week (internal packages: one day)
+exclude-newer = "1 week"
+exclude-newer-package = { dcc-backend-common = "P1D" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tests"]
+testpaths = ["tests/unit"]
 asyncio_mode = "auto"
 
 [tool.ruff]
-line-length = 140
-target-version = "py312"
-extend-exclude = [".venv", "research_agent"]   # engine is kept as evaluated (v5), not re-linted
+line-length = 120
+target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
-ignore = ["E501", "E702", "E701", "B008"]
+select = ["E", "F", "I", "B", "UP", "D"]
+ignore = ["B008"]   # FastAPI's Depends() in argument defaults
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "E501"]   # fixtures copy real single-line formats (source lines, reports)
+"scripts/**" = ["D"]
+"pipe/**" = ["D", "E501"]   # single-file Open WebUI functions (docs/integration.md); their frontmatter must be one line
+"src/bebbi_deep_research/engine/prompts.py" = ["E501"]   # evaluated prompt texts: wrapping would change model input
+
+[tool.ty.environment]
+python-version = "3.13"

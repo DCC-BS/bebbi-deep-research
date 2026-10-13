@@ -1,32 +1,60 @@
-# syntax=docker/dockerfile:1
-# Multi-stage build with uv. The runtime image runs as non-root (uid 10001) and works with a read-only root
-# filesystem: it writes only to /tmp (HOME, SQLite dev database), no .pyc files are written at runtime.
+# Built from the shared FastAPI template (DCC-BS/dcc-docker-images, fastapi/Dockerfile): the mise base image installs
+# the toolchain pinned in mise.toml (uv, varlock); assemble-runtime strips it to python + varlock.
+#
+#   docker build -f Dockerfile .
+#
+# The python version lives in exactly one place: pyproject.toml (requires-python).
 
-FROM ghcr.io/astral-sh/uv:0.9 AS uv
+# Stage 1: Build the application
+FROM ghcr.io/dcc-bs/dcc-docker-images/mise:13-slim AS build
 
-FROM python:3.12-slim-bookworm AS build
-COPY --from=uv /uv /usr/local/bin/uv
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
+# Optional GitHub token to raise the API rate limit when mise resolves the `github:dmno-dev/varlock` release:
+#   docker build --build-arg GITHUB_TOKEN=<token> .
+ARG GITHUB_TOKEN=""
+ENV GITHUB_TOKEN="${GITHUB_TOKEN}"
+
+ENV APP_MODE=build
+ENV DOCKER_BUILD=1
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+ENV UV_HTTP_TIMEOUT=120
+ENV UV_PYTHON_INSTALL_DIR="/uv-python"
+
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project
-COPY research_agent ./research_agent
-COPY service ./service
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-editable --reinstall-package bebbi-deep-research
 
-FROM python:3.12-slim-bookworm
+# Source must be present before `mise install`: its postinstall hook runs `uv sync --locked --no-dev`
+COPY . .
+
+RUN mise trust -a && mise install
+
+# Minimal runtime: only python + varlock
+RUN assemble-runtime python
+
+# Stage 2: Run the application
+FROM debian:13-slim
+
 LABEL org.opencontainers.image.title="bebbi-deep-research" \
       org.opencontainers.image.description="Deep-research job service for Bebbi Bot (Open WebUI)"
-RUN groupadd --gid 10001 app && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app
+
 WORKDIR /app
-COPY --from=build /app/.venv /app/.venv
-COPY config ./config
-ENV PATH=/app/.venv/bin:$PATH \
-    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    HOME=/tmp \
-    RA_PRESETS=/app/config/presets.yaml \
-    RA_PORT=8088
-USER 10001:10001
+
+RUN useradd --create-home --uid 1000 app
+
+ENV APP_MODE=prod
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYDANTIC_AI_NO_BANNER=1
+# Read-only root filesystem in Kubernetes: everything that writes (varlock, the SQLite dev database) uses /tmp
+ENV HOME=/tmp
+ENV PATH="/runtime/varlock:/app/.venv/bin:$PATH"
+
+COPY --from=build --chown=app:app /app /app
+COPY --from=build --chown=app:app /runtime /runtime
+COPY --chown=app:app .env*.schema /app/
+
+USER app
+
 EXPOSE 8088
-HEALTHCHECK --interval=30s --timeout=3s CMD ["python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8088/healthz', timeout=2)"]
-ENTRYPOINT ["bebbi-deep-research"]
+
+# Load and validate the environment via varlock, then run uvicorn; SIGTERM re-queues running jobs (20 s grace)
+ENTRYPOINT ["/bin/sh", "-c", "varlock load && exec varlock run -- uvicorn bebbi_deep_research.app:create_app --factory --host 0.0.0.0 --port \"${PORT:-8088}\" --no-access-log --timeout-graceful-shutdown 20"]

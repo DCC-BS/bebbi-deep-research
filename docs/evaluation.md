@@ -28,11 +28,19 @@ were not adopted: same report quality, 280k and 780-860k tokens per report.
 ## Decisions carried into this repository
 
 On-prem models only; night window 20:00-05:00 with quick focus runs allowed by day (one at a time); no per-user quota;
-delivery into the chat with an admin API key and the pipe fallback; clarify (max 2 questions), plan edit and approval as
-chat turns; statistik MCP server switched off until it works.
+delivery into the chat with an admin API key and the pipe fallback; clarify (max 2 questions) as chat turns; statistik
+MCP server switched off until it works.
+
+Changed after the evaluation (2026-10-13): plan approval, change and discard happen in Open WebUI's ask-user card (no
+typed approval), and every approved research runs in the night window (the pipe does not offer "now"). The LLM layer
+moved from the plain OpenAI client to backend-common's pydantic-ai agents: prompts, presets and the citation layer are
+unchanged, but requests now carry `max_completion_tokens` and an explicit thinking switch per role, answers get ß
+replaced by ss, and both tool loops run as pydantic-ai runs (tools hidden once the budget is used, final prompt added
+to the instructions). The results above were measured before this change.
 
 ## Open items
 
-Statistics MCP container egress; legislature periods in the Grossrat server; domain review of the German test set and
+Re-run DRB and the German set on the pydantic-ai LLM layer (see above) before go-live; statistics MCP container
+egress; legislature periods in the Grossrat server; domain review of the German test set and
 the comparison with Gemini and Perplexity Deep Research; end-to-end test on the test cluster; UAT pilot with vLLM load
 measurement.
