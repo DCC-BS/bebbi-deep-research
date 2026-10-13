@@ -3,10 +3,11 @@
 Target: `ghcr.io/fd-itbs/open-webui` v0.11.4 (fork of Open WebUI v0.11.4), Kubernetes, GitOps. The integration uses
 only extension points: two functions (the pipe and the Word download action), model entries, one API key. No fork patch.
 
-```
-Open WebUI ──(pipe, valves)──► bebbi-deep-research service ──► Postgres, vLLM, Serper, Firecrawl, MCP
-     ▲                                     │
-     └──── POST /api/v1/chats/{chat}/messages/{message}[/event]  (admin API key, report and sources delivery)
+```mermaid
+flowchart LR
+    owui["Open WebUI"] -- "pipe, valves" --> svc["bebbi-deep-research service"]
+    svc --> deps["Postgres · vLLM · Serper · Firecrawl · MCP"]
+    svc -- "POST /api/v1/chats/{chat}/messages/{message}[/event]<br/>admin API key: report and sources delivery" --> owui
 ```
 
 ## 1. Deploy the service

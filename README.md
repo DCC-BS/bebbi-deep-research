@@ -10,25 +10,24 @@ tuning history) lives in the evaluation repository, see [docs/evaluation.md](doc
 
 ## Architecture
 
-```
- User ── Open WebUI v0.11.4 (Kubernetes)
-           │  model "Deep Research · <preset>"
-           ▼
-   ┌──────────────────┐  HTTP + bearer token (SERVICE_TOKEN = RA_TOKEN)
-   │ pipe/deep_research.py │──────────────────────────────┐
-   │ (OWUI function, manifold) │  clarify · plan · edit · approve · poll   │
-   └──────────────────┘                                    ▼
-          ▲                              ┌───────────────────────────────┐
-          │ POST /api/v1/chats/{chat}/   │ service/  (FastAPI, this image)    │
-          │ messages/{msg} (admin key)   │  /clarify /plans /jobs /healthz    │
-          │ report delivery              │  job queue · night window ·        │
-          └──────────────────────────────│  daytime rule · workers            │
-                                         │  research_agent/ (engine)          │
-                                         └───┬───────────┬───────────┬───────┘
-                                             │           │           │
-                                 Postgres ◄──┘     vLLM (OpenAI API)  Serper · Firecrawl · MCP servers
-                              (drafts, jobs,       think / fast / embed   (opencaselaw, data.bs.ch,
-                               events, reports)    roles                   Grosser Rat, statistik)
+```mermaid
+flowchart LR
+    user([User]) --> owui["Open WebUI v0.11.4<br/>model: Deep Research · preset"]
+    owui --> pipe["pipe/deep_research.py<br/>OWUI function (manifold)"]
+    pipe -- "clarify · plan · edit · approve · poll<br/>HTTP + bearer token" --> svc
+    svc -- "report, sources, Word file<br/>POST /api/v1/chats/{chat}/messages/{msg}<br/>(admin key)" --> owui
+
+    subgraph svc_box ["bebbi-deep-research image"]
+        svc["service/ (FastAPI)<br/>/clarify /plans /jobs /healthz<br/>job queue · night window · daytime rule"]
+        engine["research_agent/<br/>focus engine · pipeline engine"]
+        svc --> engine
+    end
+
+    svc --> pg[("Postgres<br/>drafts, jobs, events, reports")]
+    engine --> llm["vLLM (OpenAI API)<br/>Gemma: think / fast · embeddings"]
+    engine --> web["Serper search · Firecrawl"]
+    engine --> mcp["MCP servers<br/>opencaselaw · data.bs.ch · Grosser Rat · statistik"]
+    engine -- "knowledge_search (approved collections)" --> owui
 ```
 
 * **pipe** (`pipe/deep_research.py`): Open WebUI manifold function, one model per preset. Depends only on `httpx` and
@@ -37,7 +36,7 @@ tuning history) lives in the evaluation repository, see [docs/evaluation.md](doc
   adds the Word file to a report delivered later.
 * **service** (`service/`): FastAPI job service. Chat-turn endpoints, a job queue in Postgres (SQLite for development),
   the night window, report delivery into the chat, structured sources and the Word export (`GET /jobs/{id}/report.docx`). Stateless apart from the database, so restarts re-queue running jobs.
-* **engine** (`research_agent/`): the evaluated version v5. Focus engine (tool-calling loop with code-resolved citations)
+* **engine** (`research_agent/`): the evaluated version (v6). Focus engine (tool-calling loop with code-resolved citations)
   for administrative presets, pipeline engine (plan, research rounds, section-wise writing) for broad web surveys.
 * **config** (`config/presets.yaml`): presets, MCP servers, budgets. Mounted as ConfigMap in Kubernetes.
 
