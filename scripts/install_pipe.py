@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Install (or update) the Deep Research pipe and the Word download action in a running Open WebUI and set its valves. Idempotent.
+"""Install (or update) the Deep Research pipe and the Word download action in a running Open WebUI and set its valves.
+
+Idempotent.
 
   OWUI_URL=http://localhost:3000 OWUI_API_KEY=sk-... RA_TOKEN=... uv run python scripts/install_pipe.py
 
@@ -35,7 +37,10 @@ def main() -> int:
 
     key = os.environ.get("OWUI_API_KEY")
     if not key:
-        r = http.post("/api/v1/auths/signin", json={"email": os.environ["OWUI_ADMIN_EMAIL"], "password": os.environ["OWUI_ADMIN_PASSWORD"]})
+        r = http.post(
+            "/api/v1/auths/signin",
+            json={"email": os.environ["OWUI_ADMIN_EMAIL"], "password": os.environ["OWUI_ADMIN_PASSWORD"]},
+        )
         r.raise_for_status()
         key = r.json()["token"]
     http.headers["Authorization"] = f"Bearer {key}"
@@ -44,13 +49,22 @@ def main() -> int:
         r.raise_for_status()
         print("OWUI_API_KEY=" + r.json()["api_key"])
 
-    for function_id, name, file in ((FUNCTION_ID, "Deep Research (Bebbi Bot)", "deep_research.py"),
-                                    (ACTION_ID, "Word-Datei (Deep Research)", "deep_research_download.py")):
-        form = {"id": function_id, "name": name, "content": (ROOT / "pipe" / file).read_text(),
-                "meta": {"description": "Deep research with clarifying questions, plan approval and night queue."
-                         if function_id == FUNCTION_ID else "Attaches the research report as a Word file to the answer."}}
+    for function_id, name, file in (
+        (FUNCTION_ID, "Deep Research (Bebbi Bot)", "deep_research.py"),
+        (ACTION_ID, "Word-Datei (Deep Research)", "deep_research_download.py"),
+    ):
+        form = {
+            "id": function_id,
+            "name": name,
+            "content": (ROOT / "pipe" / file).read_text(),
+            "meta": {
+                "description": "Deep research with clarifying questions, plan approval and night queue."
+                if function_id == FUNCTION_ID
+                else "Attaches the research report as a Word file to the answer."
+            },
+        }
         existing = http.get(f"/api/v1/functions/id/{function_id}")
-        if existing.status_code == 200 and existing.json():       # already installed: update the code
+        if existing.status_code == 200 and existing.json():  # already installed: update the code
             r = http.post(f"/api/v1/functions/id/{function_id}/update", json=form)
         else:
             r = http.post("/api/v1/functions/create", json=form)
@@ -60,7 +74,14 @@ def main() -> int:
             http.post(f"/api/v1/functions/id/{function_id}/toggle").raise_for_status()
         if not fn["is_global"]:
             http.post(f"/api/v1/functions/id/{function_id}/toggle/global").raise_for_status()
-        r = http.post(f"/api/v1/functions/id/{function_id}/valves/update", json={"SERVICE_URL": args.service_url, "SERVICE_TOKEN": token})
+        cur = http.get(
+            f"/api/v1/functions/id/{function_id}/valves"
+        )  # Open WebUI stores only the fields sent: merge, keep the operator's other valves
+        current = cur.json() if cur.status_code == 200 and isinstance(cur.json(), dict) else {}
+        r = http.post(
+            f"/api/v1/functions/id/{function_id}/valves/update",
+            json={**current, "SERVICE_URL": args.service_url, "SERVICE_TOKEN": token},
+        )
         r.raise_for_status()
         print(f"{function_id} installed and active; valves set:", json.dumps({**r.json(), "SERVICE_TOKEN": "***"}))
 

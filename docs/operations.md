@@ -2,18 +2,24 @@
 
 ## Configuration reference
 
-All settings are environment variables (Helm: `env:` plain values, `secrets.keys:` Secret references).
-Defaults are those of the evaluated setup. Variables marked **S** are secrets.
+All settings are environment variables (Helm: `env:` plain values, `secrets.keys:` Secret references). The schema is
+`.env.schema` (varlock): the image validates the environment with it before the service starts (`APP_MODE=prod`), and
+`mise run dev` loads local secrets from Proton Pass (`.env.dev.schema`, placeholder vault paths to be filled in).
+Defaults are those of the evaluated setup. Variables marked **S** are secrets. A missing required variable or an invalid
+value (window syntax, time zone, worker counts, presets file) stops the start with a clear error.
 
 ### Service
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RA_TOKEN` **S** | required | bearer token of the API; same value as the pipe valve `SERVICE_TOKEN` |
-| `RA_DATABASE_URL` **S** | `sqlite+aiosqlite:////tmp/research-agent.db` | `postgresql://user:pw@host:5432/db` (mapped to asyncpg). `RA_DB=/path/file.db` is accepted as SQLite shortcut |
+| `HMAC_SECRET` **S** | required | pseudonymises user ids in usage events (`openssl rand 32 \| base64`) |
+| `RA_TOKEN` **S** | required | bearer token of the API; same value as the pipe valve `SERVICE_TOKEN`. Full trust: the holder can read all jobs and reports and submit for any user. Separate tokens per caller are not supported yet |
+| `RA_DATABASE_URL` **S** | `sqlite+aiosqlite:////tmp/research-agent.db` | `postgresql://user:pw@host:5432/db` (mapped to asyncpg). Special characters in the password must be URL-encoded (`@` -> `%40`, `/` -> `%2F`, `:` -> `%3A`, `#` -> `%23`); the same goes for `POSTGRES_PASSWORD` in compose, which is placed into this URL. `RA_DB=/path/file.db` is accepted as SQLite shortcut |
 | `RA_PRESETS` | `config/presets.yaml` (`/app/config/presets.yaml` in the image, `/config/presets.yaml` in the chart) | presets, MCP servers, budgets |
-| `RA_HOST`, `RA_PORT` | `0.0.0.0`, `8088` | listen address |
-| `RA_LOG_LEVEL` | `INFO` | JSON logs on stdout |
+| `PORT` | `8088` | listen port of the image (`RA_HOST`/`RA_PORT` for `uv run bebbi-deep-research`) |
+| `LOG_LEVEL` | `INFO` | backend-common logger level (usage events are always logged) |
+| `IS_PROD` | `true` in the image | JSON log lines; `false` = coloured console output |
+| `PYDANTIC_AI_NO_BANNER` | `true` | suppresses pydantic-ai's start banner |
 
 ### LLM roles
 
@@ -25,7 +31,11 @@ The engine uses three roles: `think` (planning, research, writing), `fast` (deci
 | `RA_LLM_BASE_URL` | required | e.g. `http://vllm.llm.svc:8000/v1` |
 | `RA_LLM_API_KEY` **S** | empty | `{job}` is replaced by the job id (per-job metering at the evaluation gateway) |
 | `RA_LLM_MODEL_THINK` / `_FAST` / `_EMBED` | `gemma-think` / `gemma-fast` / `qwen-embed` | real model names. Production: `RedHatAI/gemma-4-31B-it-NVFP4` for think and fast, `Qwen/Qwen3-Embedding-4B` for embed |
-| `RA_LLM_EXTRA_BODY_THINK` / `_FAST` | empty | JSON merged into every chat request of that role. vLLM thinking switch: `{"chat_template_kwargs": {"enable_thinking": true}}` for think, `false` for fast. Empty = nothing added (the evaluation selected thinking by model alias). Verify the key name against the model's chat template |
+| `RA_LLM_EXTRA_BODY_THINK` / `_FAST` | empty | JSON merged into every chat request of that role, over backend-common's thinking switch (`chat_template_kwargs.enable_thinking`: `true` for think, `false` for fast, always sent). Verify the key name against the model's chat template |
+
+The LLM layer is backend-common's pydantic-ai `BaseAgent` (one per role): retries of transient errors with backoff
+(not of refused connections), `max_completion_tokens` per role (think 16000, fast 4000; an empty answer is retried once
+with twice the budget), one `llm_call` usage event per call, `ß` replaced by `ss` in every answer.
 
 The embed role needs `/v1/embeddings` on the same endpoint.
 
@@ -84,7 +94,7 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 
 ## Night window and daytime rule
 
-* `when=night` jobs (the default of the API; the pipe sends it for "heute Nacht" and for depth `deep`) start only inside the window.
+* `when=night` jobs (the default of the API; for now the pipe sends it for every approved plan) start only inside the window.
 * `when=now` jobs start at once inside the window. Outside it, **only `quick` runs of a focus-engine preset** start
   immediately; every other combination is changed to `night` by the service (the response says `"when": "night"`).
   Focus presets: all except `web_survey`.
@@ -98,7 +108,7 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
   semaphore of 3 per job). Raise `RA_WORKERS` only after watching vLLM queue time (`vllm:num_requests_waiting`)
   during the night.
 * More replicas multiply the worker counts. Jobs are claimed with an atomic `update ... where status='queued'`, so replicas
-  do not run the same job twice. One replica is the recommended setup.
+  do not run the same job twice. One replica is the recommended setup; run more only after job claims carry an owner token (until then a stale re-queue can let two replicas work on the same job). The chart uses the `Recreate` strategy so that a rollout never runs two pods at once.
 * Token budgets per run are set by depth in `presets.yaml` (`quick` 200k, `standard` 450k, `deep` 900k tokens, hard stop).
 * Measure before allowing more daytime runs: `RA_DAY_WORKERS` is the only knob that moves load into office hours.
 
@@ -107,19 +117,21 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 `queued` to `starting` to `running` to `done` or `error`. Events (status lines) are stored with the job (last 50).
 
 * **Graceful shutdown (SIGTERM):** running jobs are cancelled and put back to `queued`; they restart from the beginning on
-  the next start (no partial resume). Set `terminationGracePeriodSeconds` >= 30.
+  the next start (no partial resume). uvicorn waits up to 20 s (`--timeout-graceful-shutdown` in the Dockerfile entrypoint); the chart sets `terminationGracePeriodSeconds: 45`, keep it above that plus the re-queue.
 * **Crash / OOM kill:** the heartbeat (every worker tick) stops; after `RA_STALE_SECONDS` any replica re-queues the job.
 * **Failure:** the job becomes `error` with the message; the message is also written into the chat.
 * Drafts older than 14 days are deleted; jobs and reports are kept (add a retention job if needed).
 
 ## API
 
-Bearer token on all except probes. Compatible with the pipe and usable from n8n.
+Bearer token on all except probes and metrics. Errors use backend-common's format
+`{"errorId", "status", "debugMessage"}`; `debugMessage` is German text the pipe shows as it is (request validation errors
+keep FastAPI's `detail`).
 
 | Method, path | Purpose |
 |---|---|
-| `GET /healthz` | liveness (process up) |
-| `GET /readyz` | readiness: 200 if the database answers and the configuration is complete, else 503 with `problems` |
+| `GET /health/liveness`, `/health/startup` | process up / started (backend-common probes) |
+| `GET /health/readiness` | 200 if the LLM endpoint (`/models`) and Open WebUI (`/health`, if `OWUI_URL` is set) answer, else 503 with `checks` |
 | `GET /metrics` | Prometheus text: `research_jobs{status}`, `research_in_night_window` (unauthenticated, no content) |
 | `GET /presets` | preset names, descriptions, engine |
 | `POST /clarify` `{task, preset?, own_sources?}` | clarifying questions and assumptions (knows the attached sources) |
@@ -131,26 +143,54 @@ Bearer token on all except probes. Compatible with the pipe and usable from n8n.
 | `GET /jobs/lookup?chat_id&message_id&user_id` | job that delivers into a chat message (used by the download action) |
 | `GET /jobs/{id}/evidence` | evidence trail: sources, queries, pages, quotes |
 
+## NetworkPolicy
+
+`networkPolicy.enabled: true` creates an ingress rule for port 8088 from the Open WebUI pods plus `extraIngressFrom`, and the egress list from
+`values.yaml`. Caveats:
+
+* Open WebUI normally runs in another namespace: set `networkPolicy.openWebUINamespaceLabels` (e.g. `{kubernetes.io/metadata.name: open-webui}`);
+  without it only pods of the service's own namespace match.
+* Prometheus scraping `/metrics` and n8n need an entry in `extraIngressFrom` (see the comments in `values.yaml`).
+* Egress rules match ports only. Adapt them to the cluster (DNS, proxy port, Postgres, vLLM, Firecrawl, Open WebUI, 443 for MCP servers/Serper
+  without proxy); a port that is missing shows up as timeouts. The 8080 rule opens that port to all destinations, tighten it with `to:` selectors.
+* Check the result: `helm template . --set networkPolicy.enabled=true`.
+
+## Tests and packaging
+
+CI (`.github/workflows/main.yml`, DCC-BS ci-workflows) runs `mise run ci-check` (lockfile, ruff format and lint, ty,
+varlock scan) and `mise run test:unit`. `tests/unit/test_packaging.py` fails if
+`deploy/helm/bebbi-deep-research/files/presets.yaml` differs from `config/presets.yaml`. The image is built and pushed
+to GHCR by `.github/workflows/docker-publish.yml` (manual trigger).
+
+Postgres: `mise run integration` with `RA_TEST_DATABASE_URL=postgresql://user:pw@localhost:5432/test` runs
+`tests/integration` (concurrent schema init, upgrade of a first-release database). The same variable runs the unit suite
+on Postgres instead of SQLite (`tests/unit/conftest.py` drops `jobs` and `drafts` before each test: use a throwaway
+database).
+
 ## Logs and metrics
 
-One JSON object per line on stdout: `ts`, `level`, `logger`, `msg` plus fields. Job events: `job queued`, `job started`,
-`job done` (with `runtime_s`, `calls`, `prompt_tokens`, `completion_tokens`), `job failed`, `job re-queued on shutdown`,
-`delivery ok` / `delivery failed...`, `re-queued stale jobs`. Token usage per run is also in `GET /jobs/{id}` under
-`stats.usage`. OTel is not built in; use the `/metrics` endpoint and log shipping.
+backend-common logger (structlog): one JSON object per line on stdout with `timestamp`, `level`, `logger`, `app`,
+`event` (closed vocabulary: `request_finished`, `request_failed`, `llm_call`, `app_event`, `health check failed` /
+`recovered`) or `message` (free text) plus fields. Every request carries a `request_id`. Job messages: `job queued`,
+`job started`, `job done` (with `runtime_s`, `calls`, `prompt_tokens`, `completion_tokens`), `job failed`,
+`job re-queued on shutdown`, `delivery ok` / `delivery failed`, `re-queued stale jobs`. Usage events (`app_event`)
+`research.plan` and `research.submit` carry a pseudonymised user id (HMAC), never the raw id. Token usage per run is
+also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and log shipping.
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---|---|
-| Pod not ready | `curl /readyz`: `problems` lists missing variables, wrong window syntax, unknown time zone or an unreachable database |
+| Pod does not start | the log names the missing or invalid variable (varlock before the start, then the service's own check) |
+| Pod not ready | `curl /health/readiness`: `checks` shows whether the LLM endpoint or Open WebUI is unreachable |
 | Pipe says "Deep Research ist nicht verfügbar: invalid token" | `SERVICE_TOKEN` valve differs from `RA_TOKEN` |
 | Job stays `queued` | outside the window and not a quick focus run: it waits for 20:00. `GET /metrics` shows `research_in_night_window`. Check `RA_TIMEZONE` |
 | Job `queued` forever inside the window | all workers busy (`RA_WORKERS`), or no replica running |
 | Report not in the chat | `delivery` field of the job: `failed: HTTP 401` = API key / `ENABLE_API_KEYS` / endpoint restrictions; `HTTP 404/401` on chat = wrong chat; `skipped` = no `OWUI_URL`/`OWUI_API_KEY`. The user gets the report by writing again in that chat |
 | Many `503` from the MCP servers | the shared front proxy of the `*.bs.ch` hosts returns bursts of 503 (all hosts at once, minutes long). The MCP client retries each request up to 6 times over about 45 s, re-opens the session after a 404 and falls back to web search for 2 minutes after three failed connects. Nothing to do on our side except monitoring `/healthz` of the hosts (see [mcp-servers.md](mcp-servers.md)); runs complete anyway, with fewer MCP sources |
 | Reports without MCP sources | the MCP host is unreachable from the pod (proxy / NO_PROXY, NetworkPolicy), or `enabled: false` |
-| Empty answers / "length" finishes from the LLM | thinking tokens count against `max_tokens`; the engine retries once with double the budget. Check `RA_LLM_EXTRA_BODY_*` switches thinking off for the fast role |
-| Timeouts | LLM client timeout is 1800 s with 3 retries; Firecrawl read timeout 150 s |
+| Empty answers from the LLM | thinking tokens count against `max_completion_tokens`; the engine retries once with double the budget. Check that `RA_LLM_EXTRA_BODY_FAST` keeps thinking off for the fast role |
+| Timeouts | LLM request timeout is 1800 s with 3 retries (backend-common transport); Firecrawl read timeout 150 s |
 | Own sources: plan says "nicht lesbar" for a file or knowledge base the user can read in Open WebUI | the pipe checks with the chat user's rights inside Open WebUI; check the share settings of the knowledge base (read grant for the user or group) or whether the file belongs to the user or to a knowledge base they can read |
 | Own sources: "wird noch verarbeitet" / "keinen lesbaren Text" | Open WebUI (Docling) has not finished extracting the file, or extraction failed for it: check the Docling service and the file's processing status in Open WebUI |
 | Own sources: no upload button, or Open WebUI rewrites the question | the model entries need `capabilities.file_upload: true` and `file_context: false` (`deploy/openwebui/models.json`, re-import after upgrading the repo) |

@@ -1,0 +1,105 @@
+[tools]
+"github:dmno-dev/varlock" = "1.16.0"
+pass-cli = "latest"
+usage = "6.9.1"
+uv = "0.12.16"
+
+[plugins]
+pass-cli = "https://github.com/DCC-BS/mise-proton-pass-cli"
+
+[hooks]
+postinstall = { task = "install" }
+enter = { task = "enter-checks" }
+
+# ── Setup ───────────────────────────────────────────────────────────────────
+
+[tasks.install]
+description = "🚀 Creating virtual environment using uv"
+alias = "i"
+sources = ["pyproject.toml", "uv.lock"]
+outputs = [".venv", ".git/hooks/pre-commit"]
+run = '''
+if [ "${DOCKER_BUILD:-}" = "1" ]; then
+    # In Docker: locked, no dev deps. The Dockerfile sets DOCKER_BUILD=1.
+    uv sync --locked --no-dev
+else
+    # Locally: dev deps + pre-commit hooks.
+    uv sync
+    uv run pre-commit install
+fi
+'''
+
+[tasks.env-check]
+description = "🔑 Load secrets into the environment via varlock"
+alias = "env"
+depends = ['pass-login']
+run = "varlock load"
+
+# ── Run ─────────────────────────────────────────────────────────────────────
+
+[tasks.dev]
+description = "🛠️  Run the FastAPI dev server with auto-reload"
+alias = "d"
+depends = ['env-check']
+run = "varlock run -- uv run uvicorn bebbi_deep_research.app:create_app --factory --reload --port 8088"
+
+[tasks.run]
+description = "🚀 Run the production ASGI server (uvicorn)"
+alias = "r"
+depends = ['env-check']
+run = "varlock run -- uv run uvicorn bebbi_deep_research.app:create_app --factory --port 8088 --no-access-log"
+
+# ── Quality ─────────────────────────────────────────────────────────────────
+
+[tasks.check]
+description = "🧪 Verify lockfile, format code, lint, and type-check"
+alias = "c"
+run = [
+    "uv lock --locked",
+    "uv run ruff format",
+    "uv run ruff check --fix",
+    "uv run ty check ./src/bebbi_deep_research",
+    "varlock scan",
+]
+
+[tasks."test:unit"]
+description = "🧪 Run the unit tests"
+alias = "t"
+env = { APP_MODE = 'ci' }
+run = "uv run python -m pytest tests/unit"
+
+[tasks.integration]
+description = "🧪 Run the integration tests (need a Postgres: RA_TEST_DATABASE_URL)"
+run = "uv run python -m pytest tests/integration"
+
+[tasks.ci-check]
+description = "🧪 Verify lockfile, format code, lint, and type-check without any file modification"
+run = [
+    "uv lock --locked",
+    "uv run ruff format --check",
+    "uv run ruff check",
+    "uv run ty check ./src/bebbi_deep_research",
+    "varlock scan",
+]
+
+[tasks.ci]
+description = "🤖 Run all CI checks (lock, format, lint, types, tests)"
+depends = ['ci-check', 'test:unit']
+
+# ── Docker ──────────────────────────────────────────────────────────────────
+
+[tasks."docker:up"]
+description = "🐳 Start docker compose services in the background"
+alias = "up"
+depends = ['pass-login']
+run = "varlock run -- docker compose -f docker-compose.dev.yml up -d --build"
+
+[tasks."docker:down"]
+description = "🐳 Stop and remove docker compose containers"
+alias = "down"
+run = "docker compose -f docker-compose.dev.yml down"
+
+[tasks."docker:logs"]
+description = "🐳 Tail docker compose logs (follow mode)"
+alias = "logs"
+run = "docker compose -f docker-compose.dev.yml logs -f"

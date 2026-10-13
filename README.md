@@ -14,12 +14,12 @@ tuning history) lives in the evaluation repository, see [docs/evaluation.md](doc
 flowchart LR
     user([User]) --> owui["Open WebUI v0.11.4<br/>model: Deep Research · preset"]
     owui --> pipe["pipe/deep_research.py<br/>OWUI function (manifold)"]
-    pipe -- "clarify · plan · edit · approve · poll<br/>HTTP + bearer token" --> svc
+    pipe -- "clarify · plan · edit · approve (ask-user card) · status<br/>HTTP + bearer token" --> svc
     svc -- "report, sources, Word file<br/>POST /api/v1/chats/{chat}/messages/{msg}<br/>(admin key)" --> owui
 
     subgraph svc_box ["bebbi-deep-research image"]
-        svc["service/ (FastAPI)<br/>/clarify /plans /jobs /healthz<br/>job queue · night window · daytime rule"]
-        engine["research_agent/<br/>focus engine · pipeline engine"]
+        svc["bebbi_deep_research (FastAPI, backend-common)<br/>/clarify /plans /jobs /health/*<br/>job queue · night window · daytime rule"]
+        engine["bebbi_deep_research.engine (pydantic-ai)<br/>focus engine · pipeline engine"]
         svc --> engine
     end
 
@@ -31,13 +31,18 @@ flowchart LR
 ```
 
 * **pipe** (`pipe/deep_research.py`): Open WebUI manifold function, one model per preset. Depends only on `httpx` and
-  `pydantic`. Keeps the conversation state in a hidden marker of the assistant message, emits the sources as native
+  `pydantic`. The user approves, changes or discards the plan in Open WebUI's ask-user card; approved researches run in
+  the night window. Keeps the job state in a hidden marker of the assistant message, emits the sources as native
   citations (`[n]` badges, source list) and attaches the Word file. `pipe/deep_research_download.py` is the action that
   adds the Word file to a report delivered later.
-* **service** (`service/`): FastAPI job service. Chat-turn endpoints, a job queue in Postgres (SQLite for development),
-  the night window, report delivery into the chat, structured sources and the Word export (`GET /jobs/{id}/report.docx`). Stateless apart from the database, so restarts re-queue running jobs.
-* **engine** (`research_agent/`): the evaluated version (v6). Focus engine (tool-calling loop with code-resolved citations)
-  for administrative presets, pipeline engine (plan, research rounds, section-wise writing) for broad web surveys.
+* **service** (`src/bebbi_deep_research/`): FastAPI job service on `dcc-backend-common` (config, structlog logging,
+  health probes, error format, request logging) with a Dependency Injector container. Chat-turn endpoints, a job queue
+  in Postgres (SQLite for development), the night window, report delivery into the chat, structured sources and the
+  Word export (`GET /jobs/{id}/report.docx`). Stateless apart from the database, so restarts re-queue running jobs.
+* **engine** (`src/bebbi_deep_research/engine/`): focus engine (tool-calling loop with code-resolved citations) for
+  administrative presets, pipeline engine (plan, research rounds, section-wise writing) for broad web surveys. Prompts,
+  presets and the citation layer are the evaluated version (v7); the LLM layer runs on backend-common's pydantic-ai
+  agents since 2026-10-13 and needs a re-run of the evaluation sets (docs/evaluation.md).
 * **config** (`config/presets.yaml`): presets, MCP servers, budgets. Mounted as ConfigMap in Kubernetes.
 
 ## Own sources (files and knowledge bases)
@@ -49,41 +54,49 @@ the engine reads uploads with `read_upload` (small ones directly) and searches t
 retrieval endpoint, one approved id at a time. Citations show the file name ("Hochgeladene Datei") or document and knowledge base
 ("Wissensbasis ..."), with a link the user can open when Open WebUI allows it. Preset field `own_sources: prefer | only | off`; the model
 "Deep Research · Eigene Dokumente" works on the user's documents alone. Limits: 10 files, 2,000,000 characters per file, 5 knowledge bases per
-research (`RA_OWN_MAX_*`); text only (no OCR unless Open WebUI does it). Details, access rules and what was verified:
+research (`RA_OWN_MAX_*`); text only: Open WebUI extracts it (Docling with OCR in the Bebbi Bot deployment, so scans arrive as text). Details, access rules and what was verified:
 [docs/integration.md](docs/integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4) and section 7 there.
 
 ## Quickstart (local)
 
-```bash
-uv sync                                  # Python 3.12+, uv
-uv run pytest && uv run ruff check .
+Tooling: [mise](https://dcc-bs.github.io/documentation/dev-setup/mise.html) (uv, varlock, pass-cli pinned in
+`mise.toml`), configuration via [varlock](https://dcc-bs.github.io/documentation/dev-setup/varlock.html) (`.env.schema`,
+secrets from Proton Pass in `.env.dev.schema`).
 
-cp .env.example .env                     # fill in LLM, search, Firecrawl endpoints and secrets
-docker compose up -d --build             # service + Postgres + Open WebUI v0.11.4
-curl localhost:8088/readyz               # {"status":"ok","problems":[]}
-uv run python scripts/install_pipe.py --models    # installs the pipe and sets the valves (docs/integration.md)
+```bash
+mise trust && mise install               # toolchain; the postinstall hook runs `uv sync` and installs pre-commit
+mise run check                           # lockfile, ruff format + lint, ty, varlock scan
+mise run test:unit                       # unit tests (CI runs `mise run ci`)
+mise run dev                             # service with auto-reload on :8088 (secrets via varlock / Proton Pass)
+
+mise run docker:up                       # service + Postgres + Open WebUI v0.11.4 (docker-compose.dev.yml)
+curl localhost:8088/health/liveness      # {"status":"up",...}; /health/readiness checks the LLM and Open WebUI
+uv run python scripts/install_pipe.py --service-url http://service:8088 --models   # pipe + valves (docs/integration.md)
 ```
 
 Open <http://localhost:3000>, pick "Deep Research · Grosser Rat" and ask a question. Without Open WebUI:
 
 ```bash
-RA_TOKEN=... uv run python scripts/test_pipe.py "Welche Vorstösse zum Stadtklima gab es? Bitte schnell." grossrat
-scripts/smoke_local.sh                   # starts the service on SQLite against the local evaluation stack
+RA_TOKEN=... uv run python scripts/test_pipe.py "Welche Vorstösse zum Stadtklima gab es? Bitte schnell." grossrat   # service window must cover now
+EVAL_ENV=/path/to/deep-research-evaluation/.env scripts/smoke_local.sh   # needs the evaluation stack (LLM gateway, Firecrawl); service on SQLite
 ```
 
 ## Layout
 
 | Path | Content |
 |---|---|
-| `research_agent/` | engine (copied from the evaluation, v5; `llm.py` got the per-role extra body, `own.py` and small hooks in `agent.py`/`focus.py` add the user's own sources) |
-| `service/` | job service: settings, DB layer, job runner, FastAPI app, JSON logging |
+| `src/bebbi_deep_research/` | `app.py` (FastAPI factory), `container.py` (dependency injection), `routers/`, `models/` (requests), `services/` (research service, job runner, DB, own sources, report, Word export), `utils/` (config, API errors) |
+| `src/bebbi_deep_research/engine/` | research engine: `llm.py` (pydantic-ai roles, tool loops, embeddings), `focus.py`, `agent.py` (pipeline), `own.py`, `sources.py`, `prompts.py` |
 | `pipe/` | Open WebUI functions: pipe and Word download action |
 | `config/presets.yaml` | presets, MCP servers, budgets |
-| `Dockerfile`, `compose.yaml` | image (multi-stage, uv, uid 10001, read-only root) and local stack |
+| `Dockerfile` | image on the shared mise base image (python + varlock runtime, uid 1000, read-only root) |
+| `docker-compose.yml`, `docker-compose.dev.yml`, `docker/` | integration and development stacks (extend `docker/services.compose.yml`) |
+| `mise.toml`, `.mise-tasks/`, `.env.schema`, `.env.dev.schema` | toolchain and tasks; configuration schema and dev secrets |
 | `deploy/helm/bebbi-deep-research/` | Helm chart |
 | `deploy/openwebui/` | `function.json` and `models.json` for the seeder |
 | `docs/` | integration, operations, presets, evaluation, MCP servers |
-| `tests/`, `scripts/` | unit and service tests; pipe simulator, installer, smoke test, `e2e_owui.py` (drives a local Open WebUI like the browser) |
+| `tests/unit/`, `tests/integration/` | unit tests (CI); Postgres integration tests (`RA_TEST_DATABASE_URL`, `mise run integration`) |
+| `scripts/` | pipe simulator, installer, smoke test, `e2e_owui.py` (drives a local Open WebUI like the browser) |
 
 ## Documentation
 

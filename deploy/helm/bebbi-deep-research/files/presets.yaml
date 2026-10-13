@@ -73,6 +73,7 @@ defaults: &defaults
   avoid_domains: [facebook.com, instagram.com, tiktok.com, x.com, twitter.com, pinterest.com, linkedin.com,
                   apps.apple.com, play.google.com, quora.com, reddit.com, medium.com, scribd.com, coursehero.com]
   verify_entailment: true
+  house_style: true     # German reports follow the Hausstil Kanton Basel-Stadt (engine/house_style.py)
   own_sources: prefer
 
 presets:

@@ -10,7 +10,11 @@ spec:
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
-        - podSelector:
+        - {{- with .Values.networkPolicy.openWebUINamespaceLabels }}
+          namespaceSelector:
+            matchLabels: {{- toYaml . | nindent 14 }}
+          {{- end }}
+          podSelector:
             matchLabels: {{- toYaml .Values.networkPolicy.openWebUIPodLabels | nindent 14 }}
         {{- range .Values.networkPolicy.extraIngressFrom }}
         - {{- toYaml . | nindent 10 }}

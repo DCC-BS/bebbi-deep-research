@@ -8,7 +8,7 @@
 
 | Engine | Presets | How it works |
 |---|---|---|
-| `focus` | rechtsrecherche, grossrat, statistik, verwaltung_web | Plan (checklist), then a bounded tool-calling loop over web search, page fetch and the preset's MCP tools. Every source becomes a record with URL, title, Stand and a verbatim quote; the report cites `[S<n>]` and code resolves them to a numbered source list. Numbers and identifiers are checked against the evidence. About 60k tokens and 3 minutes per report. |
+| `focus` | rechtsrecherche, grossrat, statistik, verwaltung_web, dokumente | Plan (checklist), then a bounded tool-calling loop over web search, page fetch and the preset's MCP tools. Every source becomes a record with URL, title, Stand and a verbatim quote; the report cites `[S<n>]` and code resolves them to a numbered source list. Numbers and identifiers are checked against the evidence. About 60k tokens and 3 minutes per report. |
 | `pipeline` | web_survey | Plan, research rounds per sub-question (queries, fetch, extraction into evidence cards), section-wise writing, verification (quote and entailment checks), summary. About 190k tokens and 5 minutes per report. |
 
 Daytime rule: only `quick` runs of a `focus` preset may start outside the night window.
@@ -32,6 +32,7 @@ focus engine), `focus_words` (typical report length). A preset may override sing
 | `query_rules` | text added to query generation and to the focus engine's instructions |
 | `report` | `parts_hint`, `words_per_part`, `analysis_part`, `closing_part`, `writer_rules`, `length_rule`, `format_rule` |
 | `verify_entailment` | check that cited quotes support the sentence |
+| `house_style` | `true` (default): German reports follow the Hausstil Kanton Basel-Stadt (`engine/house_style.py`, copied from text-mate-backend `utils/house_style.py`: tone, short sentences, Swiss spelling and typography, numbers, dates, `Fr. 20.–`, gender-neutral wording, anglicisms). Letter rules (Sie/wir) are switched off for reports and citations `[S12]` stay untouched. Not applied to English reports. `false` turns it off |
 | `own_sources` | what happens with files uploaded in the chat and knowledge bases (own sources, [integration.md](integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4)): `prefer` (default) the model uses them first and web search and data tools for the rest; `only` removes web search, page fetch and all MCP tools (and the planner's web discovery), the report rests on the user's documents alone and the service refuses a question without any readable own source; `off` ignores attachments and says so in the plan |
 
 Own sources work in both engines. Focus engine: tools `read_upload` and `knowledge_search`, small uploads are read directly. Pipeline

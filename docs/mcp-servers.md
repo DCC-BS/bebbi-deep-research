@@ -8,7 +8,7 @@ still cannot reach the portal.
 ## What the agent needs
 
 1. **A public URL, a title and a date per result item.** The agent cites that URL, never the MCP endpoint
-   or a tool name ([research_agent/sources.py](../research_agent/sources.py) reads `citation_url`,
+   or a tool name ([engine/sources.py](../src/bebbi_deep_research/engine/sources.py) reads `citation_url`,
    `pdf_url`, `url_ges`, `url`, `portal_url` from JSON results, and Markdown links from text results).
 2. **Errors the model can act on.** With the MCP Python SDK only a `ToolError` reaches the model with its
    message. Any other exception arrives as "Error executing tool <name>", and the model cannot fix its call.

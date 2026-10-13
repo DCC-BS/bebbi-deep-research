@@ -5,6 +5,7 @@ metadata:
   labels: {{- include "bdr.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy: {{- toYaml .Values.strategy | nindent 4 }}
   selector:
     matchLabels: {{- include "bdr.selector" . | nindent 6 }}
   template:
@@ -21,9 +22,9 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
-        fsGroup: 10001
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
         seccompProfile: {type: RuntimeDefault}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
@@ -40,6 +41,7 @@ spec:
           ports:
             - {name: http, containerPort: 8088}
           env:
+            - {name: APP_MODE, value: prod}
             - {name: RA_PRESETS, value: /config/presets.yaml}
             {{- range $k, $v := .Values.env }}
             - {name: {{ $k }}, value: {{ $v | toString | quote }}}
@@ -68,17 +70,17 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           startupProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /health/startup, port: http}
             periodSeconds: 3
             failureThreshold: 40
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /health/liveness, port: http}
             periodSeconds: 20
             timeoutSeconds: 3
-          readinessProbe:
-            httpGet: {path: /readyz, port: http}
+          readinessProbe:      # checks the LLM endpoint and Open WebUI (backend-common health probes)
+            httpGet: {path: /health/readiness, port: http}
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 8
           resources: {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
