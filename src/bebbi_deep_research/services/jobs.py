@@ -385,71 +385,48 @@ class JobRunner:
         except Exception as e:
             logger.error("delivery error", job=job["id"], error=repr(e)[:300])
 
-    async def _chat(self, chat_id: str) -> dict | None:
-        """The Open WebUI chat (admin key) or None; carries `user_id` of the owner and the messages."""
-        try:
-            async with self.http_factory() as http:
-                r = await http.get(
-                    f"{self.settings.owui_url}/api/v1/chats/{chat_id}",
-                    headers={"Authorization": f"Bearer {self.settings.owui_api_key}"},
-                )
-            return r.json() if r.status_code == 200 else None
-        except (httpx.HTTPError, ValueError):
-            return None
-
-    @staticmethod
-    def _has_sources(chat: dict | None, message_id: str) -> bool:
-        """Return whether the Open WebUI message already carries sources (the pipe returned the report itself)."""
-        if chat is None:
-            return False
-        try:
-            return bool(chat["chat"]["history"]["messages"][message_id].get("sources"))
-        except (KeyError, TypeError):
-            return False
-
     async def deliver(self, job: dict, content: str, sources: list[dict] | None = None) -> None:
         """Write the finished report into the Open WebUI assistant message of the job.
 
-        Only if Open WebUI is configured and the job came from a chat. Two kinds of calls, both with the admin key: one
-        `source` event per cited source (Open WebUI stores them in the `sources` of the message and shows the citation
-        badges and the source list), then the message text. Sources go first so that the badges exist when the text
-        appears. Retried 3 times, each step only once it succeeded; the outcome is stored in jobs.delivery (a failed
-        delivery is tried again later, see _sweep_deliveries). The chat must belong to the user of the job: the admin
-        key could write anywhere. The pipe returns the report on the next message anyway.
+        Only if the delivery endpoint is configured and the job came from a chat. One call to the endpoint that the
+        Open WebUI image adds (`POST /api/v1/dcc/deep-research/deliver`, shared secret, not an API key): it stores one
+        `source` event per cited source (Open WebUI shows the citation badges and the source list), then the message
+        text, and checks itself that the chat belongs to `user_id` and that the message was queued by the pipe for this
+        job (no admin key is involved: since Open WebUI 0.12 an admin cannot write into other users' chats). Retried 3
+        times; the outcome is stored in jobs.delivery (a failed delivery is tried again later, see _sweep_deliveries).
+        The pipe returns the report on the next message anyway.
         """
         s = self.settings
-        if not (s.owui_url and s.owui_api_key and job.get("chat_id") and job.get("message_id")):
+        if not (
+            s.owui_delivery_url
+            and s.owui_delivery_secret
+            and job.get("chat_id")
+            and job.get("message_id")
+            and job.get("user_id")
+        ):
             await self.db.execute("update jobs set delivery='skipped' where id=:i", i=job["id"])
-            logger.info("delivery skipped", job=job["id"], reason="no OWUI_URL/OWUI_API_KEY or job without chat")
+            logger.info("delivery skipped", job=job["id"], reason="no delivery endpoint/secret or job without chat")
             return
-        chat = await self._chat(job["chat_id"])
-        chat_user = (chat or {}).get("user_id")
-        if chat_user and job.get("user_id") and chat_user != job["user_id"]:
-            await self.db.execute(
-                "update jobs set delivery='skipped: chat belongs to another user' where id=:i", i=job["id"]
-            )
-            logger.warning("delivery skipped", job=job["id"], reason="chat belongs to another user")
-            return
-        base = f"{s.owui_url}/api/v1/chats/{job['chat_id']}/messages/{job['message_id']}"
-        events = owui_source_events(sources or [])
-        if events and self._has_sources(
-            chat, job["message_id"]
-        ):  # the pipe was faster: stored twice they would double the list
-            events = []
-        steps = [(f"{base}/event", ev) for ev in events] + [(base, {"content": content})]
+        body = {
+            "chat_id": job["chat_id"],
+            "message_id": job["message_id"],
+            "job_id": job["id"],
+            "user_id": job.get("user_id") or "",
+            "content": content,
+            "sources": [e["data"] for e in owui_source_events(sources or [])],
+        }
         outcome = "failed"
         for attempt in range(3):
             try:
                 async with self.http_factory() as http:
-                    while steps:
-                        url, payload = steps[0]
-                        r = await http.post(url, json=payload, headers={"Authorization": f"Bearer {s.owui_api_key}"})
-                        if r.status_code >= 300 or (url.endswith("/event") and r.text.strip() != "true"):
-                            outcome = f"failed: HTTP {r.status_code} {r.text[:200]}"
-                            break
-                        steps.pop(0)
-                if not steps:
+                    r = await http.post(
+                        s.owui_delivery_url, json=body, headers={"Authorization": f"Bearer {s.owui_delivery_secret}"}
+                    )
+                if r.status_code == 200:
                     outcome = "ok"
+                    break
+                outcome = f"failed: HTTP {r.status_code} {r.text[:200]}"
+                if r.status_code in (400, 401, 403, 404, 413):  # not going to change by waiting
                     break
             except httpx.HTTPError as e:
                 outcome = f"failed: {type(e).__name__}: {e}"[:300]

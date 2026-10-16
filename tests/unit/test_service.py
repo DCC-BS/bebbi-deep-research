@@ -11,7 +11,7 @@ from bebbi_deep_research.services.db import DB
 from bebbi_deep_research.services.jobs import in_window
 from bebbi_deep_research.utils.app_config import AppConfig, normalize_db_url
 
-from .conftest import PLAN, FakeAgent, running, submit, utc_window, wait_status
+from .conftest import DELIVERY, PLAN, FakeAgent, running, submit, utc_window, wait_status
 
 
 # ------------------------------------------------------------------ probes, auth
@@ -63,11 +63,16 @@ async def test_job_lifecycle_and_delivery(tmp_path):
 
     def handler(request: httpx.Request):
         posted.append((str(request.url), request.headers["authorization"], json.loads(request.content)))
-        return httpx.Response(200, json=request.url.path.endswith("/event"))
+        return httpx.Response(200, json={"ok": True})
 
     factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
     async with running(
-        tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k"
+        tmp_path,
+        http_factory=factory,
+        night_window=utc_window(True),
+        owui_url="http://owui",
+        owui_api_key="admin-key",
+        **DELIVERY,
     ) as (c, _):
         job = await submit(c, chat_id="chat1", message_id="msg1")
         assert job["when"] == "now"
@@ -80,21 +85,59 @@ async def test_job_lifecycle_and_delivery(tmp_path):
                 break
             await asyncio.sleep(0.05)
         assert j["delivery"] == "ok"
-        # one source event per source (in the order of the numbers), then the message text
-        base = "http://owui/api/v1/chats/chat1/messages/msg1"
-        assert [(u, a) for u, a, _ in posted] == [(base + "/event", "Bearer k")] * 2 + [(base, "Bearer k")]
-        events = [b for _, _, b in posted[:2]]
-        assert [e["type"] for e in events] == ["source", "source"]
-        assert [e["data"]["metadata"][0]["source"] for e in events] == [s["url"] for s in j["sources"]]
-        assert posted[2][2] == {"content": j["ui_report"]} and "\n1. Vorstoss 23.5001" in j["ui_report"]
-        assert j["owui_events"] == events
+        # one call to the delivery endpoint with the shared secret (not the admin key): chat, message, job, user,
+        # the text and one source event payload per source, in the order of the numbers
+        assert len(posted) == 1
+        url, auth, body = posted[0]
+        assert (url, auth) == ("http://owui/api/v1/dcc/deep-research/deliver", "Bearer shared")
+        assert (body["chat_id"], body["message_id"], body["job_id"], body["user_id"]) == (
+            "chat1",
+            "msg1",
+            job["job_id"],
+            "u1",
+        )
+        assert body["content"] == j["ui_report"] and "\n1. Vorstoss 23.5001" in j["ui_report"]
+        assert body["sources"] == [e["data"] for e in j["owui_events"]]
+        assert [m["metadata"][0]["source"] for m in body["sources"]] == [s["url"] for s in j["sources"]]
         assert "cards" in (await c.get(f"/jobs/{job['job_id']}/evidence")).json()
         assert 'research_jobs{status="done"} 1' in (await c.get("/metrics")).text
 
 
+async def test_delivery_never_uses_the_admin_key_or_the_chat_api(tmp_path):
+    seen = []
+
+    def handler(request: httpx.Request):
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    async with running(
+        tmp_path,
+        http_factory=factory,
+        night_window=utc_window(True),
+        owui_url="http://owui",
+        owui_api_key="admin-key",
+        **DELIVERY,
+    ) as (c, _):
+        job = await submit(c, chat_id="chat1", message_id="msg1")
+        await wait_status(c, job["job_id"], {"done"})
+        for _ in range(40):
+            if (await c.get(f"/jobs/{job['job_id']}")).json()["delivery"]:
+                break
+            await asyncio.sleep(0.05)
+    assert seen and all("/api/v1/chats" not in str(r.url) for r in seen)
+    assert all("admin-key" not in r.headers.get("authorization", "") for r in seen)
+
+
 async def test_delivery_failure_is_recorded_and_report_stays(tmp_path):
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500, text="boom")))  # noqa: E731
-    app_kw = dict(http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k")
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(500, text="boom")
+
+    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    app_kw = dict(http_factory=factory, night_window=utc_window(True), **DELIVERY)
     async with running(tmp_path, **app_kw) as (c, app):
         app.state.container.job_runner().retry_delay = 0
         job = await submit(c, chat_id="chat1", message_id="msg1")
@@ -104,10 +147,65 @@ async def test_delivery_failure_is_recorded_and_report_stays(tmp_path):
                 break
             await asyncio.sleep(0.05)
         assert j["status"] == "done" and j["report"] and j["delivery"].startswith("failed: HTTP 500")
+        assert len(calls) == 3  # server errors are retried
+
+
+async def test_refusal_by_the_endpoint_is_not_retried(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(403, json={"detail": "message is not queued for this job"})
+
+    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    async with running(tmp_path, http_factory=factory, night_window=utc_window(True), **DELIVERY) as (c, app):
+        app.state.container.job_runner().retry_delay = 0
+        job = await submit(c, chat_id="chat1", message_id="msg1")
+        for _ in range(60):
+            j = (await c.get(f"/jobs/{job['job_id']}")).json()
+            if j["delivery"]:
+                break
+            await asyncio.sleep(0.05)
+        assert j["delivery"].startswith("failed: HTTP 403") and "not queued" in j["delivery"]
+        assert len(calls) == 1
+
+
+async def test_no_delivery_without_secret(tmp_path):
+    calls = []
+    factory = lambda: httpx.AsyncClient(  # noqa: E731
+        transport=httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(200))
+    )
+    async with running(
+        tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k"
+    ) as (c, _):
+        job = await submit(c, chat_id="chat1", message_id="msg1")  # admin key set, delivery secret not
+        await wait_status(c, job["job_id"], {"done"})
+        for _ in range(40):
+            if (await c.get(f"/jobs/{job['job_id']}")).json()["delivery"]:
+                break
+            await asyncio.sleep(0.05)
+        assert (await c.get(f"/jobs/{job['job_id']}")).json()["delivery"] == "skipped"
+    assert calls == []
+
+
+def test_delivery_url_defaults_to_the_route_of_the_image():
+    env = {
+        "RA_TOKEN": "t",
+        "HMAC_SECRET": "h",
+        "RA_LLM_BASE_URL": "u",
+        "RA_SEARCH_URL": "u",
+        "RA_FIRECRAWL_URL": "u",
+        "OWUI_URL": "http://open-webui:8080/",
+        "OWUI_DELIVERY_SECRET": "s",
+    }
+    s = AppConfig.from_env(env)
+    assert s.owui_delivery_url == "http://open-webui:8080/api/v1/dcc/deep-research/deliver"
+    assert AppConfig.from_env({**env, "OWUI_DELIVERY_URL": "http://x/y/"}).owui_delivery_url == "http://x/y"
+    assert AppConfig.from_env({k: v for k, v in env.items() if k != "OWUI_URL"}).owui_delivery_url == ""
 
 
 async def test_no_delivery_without_chat(tmp_path):
-    async with running(tmp_path, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k") as (c, _):
+    async with running(tmp_path, night_window=utc_window(True), **DELIVERY) as (c, _):
         job = await submit(c)  # no chat_id / message_id (API client such as n8n)
         await wait_status(c, job["job_id"], {"done"})
         for _ in range(40):
@@ -341,54 +439,3 @@ async def test_docx_only_for_finished_jobs(tmp_path):
         await wait_status(c, job["job_id"], {"running"})
         assert (await c.get(f"/jobs/{job['job_id']}/report.docx")).status_code == 409
         assert (await c.get(f"/jobs/{job['job_id']}")).json()["sources"] == []
-
-
-async def test_source_delivery_is_not_repeated_on_retry(tmp_path):
-    """A failing text step is retried without sending the source events again (Open WebUI would store them twice)."""
-    calls = []
-
-    def handler(request: httpx.Request):
-        if request.method == "GET":
-            return httpx.Response(404)
-        calls.append("event" if request.url.path.endswith("/event") else "text")
-        if calls[-1] == "text" and calls.count("text") == 1:
-            return httpx.Response(500, text="boom")
-        return httpx.Response(200, json=True)
-
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
-    async with running(
-        tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k"
-    ) as (c, app):
-        app.state.container.job_runner().retry_delay = 0
-        job = await submit(c, chat_id="chat1", message_id="msg1")
-        for _ in range(60):
-            j = (await c.get(f"/jobs/{job['job_id']}")).json()
-            if j["delivery"]:
-                break
-            await asyncio.sleep(0.05)
-        assert j["delivery"] == "ok" and calls == ["event", "event", "text", "text"]
-
-
-async def test_sources_already_on_the_message_are_not_delivered_again(tmp_path):
-    """ "jetzt" jobs: the pipe returns the report itself and emits the sources; the service must not store them a second time."""
-    posted = []
-
-    def handler(request: httpx.Request):
-        if request.method == "GET":
-            return httpx.Response(
-                200, json={"chat": {"history": {"messages": {"msg1": {"sources": [{"source": {"name": "x"}}]}}}}}
-            )
-        posted.append(request.url.path)
-        return httpx.Response(200, json=True)
-
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
-    async with running(
-        tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k"
-    ) as (c, _):
-        job = await submit(c, chat_id="chat1", message_id="msg1")
-        for _ in range(60):
-            j = (await c.get(f"/jobs/{job['job_id']}")).json()
-            if j["delivery"]:
-                break
-            await asyncio.sleep(0.05)
-        assert j["delivery"] == "ok" and posted == ["/api/v1/chats/chat1/messages/msg1"]

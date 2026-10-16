@@ -8,7 +8,7 @@ import httpx
 from bebbi_deep_research.services.jobs import MAX_ATTEMPTS, describe_error
 from bebbi_deep_research.utils.app_config import AppConfig
 
-from .conftest import FakeAgent, running, submit, utc_window, wait_status
+from .conftest import DELIVERY, FakeAgent, running, submit, utc_window, wait_status
 
 
 async def row(app, job_id):
@@ -51,9 +51,7 @@ async def test_cancel_during_delivery_no_requeue(tmp_path):
         await asyncio.sleep(3600)
 
     factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(slow))  # noqa: E731
-    async with running(
-        tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k"
-    ) as (c, app):
+    async with running(tmp_path, http_factory=factory, night_window=utc_window(True), **DELIVERY) as (c, app):
         job = await submit(c, chat_id="chat1", message_id="msg1")
         await asyncio.wait_for(started.wait(), 5)
         await app.state.container.job_runner().stop()
@@ -65,19 +63,11 @@ async def test_failed_delivery_is_sweeped_later(tmp_path):
     calls = {"n": 0}
 
     def handler(request: httpx.Request):
-        if request.method == "GET":
-            return httpx.Response(404)
         calls["n"] += 1
-        return (
-            httpx.Response(500, text="x")
-            if calls["n"] <= 3
-            else httpx.Response(200, json=request.url.path.endswith("/event"))
-        )
+        return httpx.Response(500, text="x") if calls["n"] <= 3 else httpx.Response(200, json={"ok": True})
 
     factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
-    async with running(
-        tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k"
-    ) as (c, app):
+    async with running(tmp_path, http_factory=factory, night_window=utc_window(True), **DELIVERY) as (c, app):
         runner = app.state.container.job_runner()
         runner.retry_delay, runner.sweep_after = 0, 0
         job = await submit(c, chat_id="chat1", message_id="msg1")
@@ -274,26 +264,6 @@ async def test_owner_checks(tmp_path):
             assert (await c.get(path, params={"user_id": "u1"})).status_code == 200
             assert (await c.get(path)).status_code == 200  # without the parameter: unchanged (n8n)
         assert "user_id" not in (await c.get(f"/jobs/{jid}")).json()
-
-
-# ------------------------------------------------------------ L14: delivery only into the chat of the job's user
-async def test_delivery_skipped_when_chat_belongs_to_someone_else(tmp_path):
-    posted = []
-
-    def handler(request: httpx.Request):
-        if request.method == "GET":
-            return httpx.Response(200, json={"user_id": "other", "chat": {"history": {"messages": {}}}})
-        posted.append(request.url.path)
-        return httpx.Response(200, json=True)
-
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
-    async with running(
-        tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k"
-    ) as (c, app):
-        job = await submit(c, chat_id="chat1", message_id="msg1")
-        await wait_status(c, job["job_id"], {"done"})
-        await until(lambda: _delivery(app, job["job_id"]))
-        assert (await _delivery(app, job["job_id"])).startswith("skipped") and not posted
 
 
 # ------------------------------------------------------------ H1 (engine): the real factory with default settings

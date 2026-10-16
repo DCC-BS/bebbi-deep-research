@@ -13,6 +13,7 @@ from pydantic import Field, model_validator
 
 ROOT = Path(__file__).resolve().parents[3]  # repository root (config/presets.yaml); RA_PRESETS overrides it
 DEFAULT_PRESETS = ROOT / "config" / "presets.yaml"
+DELIVERY_PATH = "/api/v1/dcc/deep-research/deliver"  # route added by the Open WebUI image (kdkp dr_delivery hook)
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:////tmp/research-agent.db"
 
 
@@ -96,6 +97,8 @@ class AppConfig(AbstractAppConfig):
     stale_seconds: float = Field(default=120.0, gt=0)
     owui_url: str = ""
     owui_api_key: str = ""
+    owui_delivery_url: str = ""
+    owui_delivery_secret: str = ""
     own_max_files: int = Field(default=10, ge=0, description="Uploaded files per research")
     own_max_file_chars: int = Field(default=2_000_000, ge=1, description="Extracted text per file; longer is cut")
     own_max_collections: int = Field(default=5, ge=0, description="Knowledge bases per research")
@@ -172,6 +175,11 @@ class AppConfig(AbstractAppConfig):
                 "firecrawl_key": env.get("RA_FIRECRAWL_KEY", ""),
                 "owui_url": env.get("OWUI_URL", "").rstrip("/"),
                 "owui_api_key": env.get("OWUI_API_KEY", ""),
+                "owui_delivery_url": (
+                    env.get("OWUI_DELIVERY_URL", "").rstrip("/")
+                    or (f"{env.get('OWUI_URL', '').rstrip('/')}{DELIVERY_PATH}" if env.get("OWUI_URL") else "")
+                ),
+                "owui_delivery_secret": env.get("OWUI_DELIVERY_SECRET", ""),
                 **{k: v for k, v in optional.items() if v},
             }
         )
@@ -186,5 +194,6 @@ class AppConfig(AbstractAppConfig):
             f"database={self.database_url.split('://')[0]}, night_window={self.night_window}, "
             f"timezone={self.timezone}, "
             f"workers={self.workers}, day_workers={self.day_workers}, quota_per_day={self.quota_per_day}, "
-            f"owui_url={self.owui_url}, owui_api_key={log_secret(self.owui_api_key)})"
+            f"owui_url={self.owui_url}, owui_api_key={log_secret(self.owui_api_key)}, "
+            f"owui_delivery_url={self.owui_delivery_url}, owui_delivery_secret={log_secret(self.owui_delivery_secret)})"
         )
