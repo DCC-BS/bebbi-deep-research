@@ -46,7 +46,8 @@ secrets:
     RA_LLM_API_KEY: {required: false}
     RA_SEARCH_KEY: {required: true}      # Serper key
     RA_FIRECRAWL_KEY: {required: false}
-    OWUI_API_KEY: {required: false}      # API key of the Open WebUI admin service account (report delivery)
+    OWUI_API_KEY: {required: false}      # API key of the Open WebUI admin service account (knowledge base retrieval, file dates)
+    OWUI_DELIVERY_SECRET: {required: false}  # shared secret of the report delivery endpoint in the Open WebUI image (DCC_DEEP_RESEARCH_DELIVERY_SECRET there); unset = no delivery
     # Per variable another Secret / key name is possible: RA_SEARCH_KEY: {secretName: serper, key: api-key, required: true}
 
 # Egress goes through the HTTP proxy. The LLM, Firecrawl, Open WebUI and Postgres are cluster-internal and MUST be in
