@@ -145,8 +145,8 @@ class Client:
     def open_session(self, choice: int = 0):
         """Websocket session like the browser's: joins the user's room and answers the ask-user card of the pipe.
 
-        `choice` is the index of the option to click (0 = Freigeben). Returns the socket; its `session_id` is the `session_id`
-        of the completion request, which is how the pipe's event call finds the browser.
+        `choice` is the index of the option to click (0 = Freigeben). Returns the socket; its `session_id` goes into the
+        completion request, which is how the pipe's event call finds the browser.
         """
         import socketio  # dev dependency (python-socketio[client])
 

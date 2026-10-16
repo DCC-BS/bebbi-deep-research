@@ -85,7 +85,7 @@ def _jpath(path: str, user_id: str) -> str:
 # ---------------------------------------------------------------------------------------------- own sources (A4)
 # The chat's files and knowledge bases. Everything that needs Open WebUI internals is in the helpers below (imports
 # inside the functions, so the module also loads outside Open WebUI and the tests can put fakes in their place).
-# Pinned to v0.11.4:
+# Checked against v0.12.3 (scripts/check_owui_internals.py):
 #   open_webui.models.users.Users.get_user_by_id           open_webui.models.files.Files.get_file_by_id
 #   open_webui.utils.access_control.files.has_access_to_file
 #   open_webui.retrieval.utils.filter_accessible_collections   (Open WebUI's own rule for knowledge bases)
@@ -693,7 +693,7 @@ class Pipe:
         Returns the report text. Sources and file are best effort; the text is always returned."""
         text = job.get("ui_report") or job["report"]
         if emitter:
-            # The service delivers the report into the same message with the admin key. If it did,
+            # The service delivers the report into the same message through the image's delivery route. If it did,
             # the sources are there already; stored twice they would double the list and shift nothing but confuse.
             for _ in range(10):
                 if job.get("delivery") or not job.get("id"):

@@ -78,7 +78,9 @@ Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded
 | Variable | Meaning |
 |---|---|
 | `OWUI_URL` | Open WebUI base URL (cluster-internal) |
-| `OWUI_API_KEY` **S** | API key of the admin service account. Without both, delivery is `skipped` and the report is only available via the pipe fallback and the API |
+| `OWUI_API_KEY` **S** | API key of the admin service account: knowledge bases and file dates of own sources (no chat access). Without it a knowledge base cannot be used |
+| `OWUI_DELIVERY_SECRET` **S** | shared secret of the delivery route in the Open WebUI image (`DCC_DEEP_RESEARCH_DELIVERY_SECRET` there). Without it delivery is `skipped` and the report is only available via the pipe fallback and the API |
+| `OWUI_DELIVERY_URL` | full URL of the route; default `OWUI_URL` + `/api/v1/dcc/deep-research/deliver` |
 
 ### Proxy
 
@@ -186,7 +188,7 @@ also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and lo
 | Pipe says "Deep Research ist nicht verfügbar: invalid token" | `SERVICE_TOKEN` valve differs from `RA_TOKEN` |
 | Job stays `queued` | outside the window and not a quick focus run: it waits for 20:00. `GET /metrics` shows `research_in_night_window`. Check `RA_TIMEZONE` |
 | Job `queued` forever inside the window | all workers busy (`RA_WORKERS`), or no replica running |
-| Report not in the chat | `delivery` field of the job: `failed: HTTP 401` = API key / `ENABLE_API_KEYS` / endpoint restrictions; `HTTP 404/401` on chat = wrong chat; `skipped` = no `OWUI_URL`/`OWUI_API_KEY`. The user gets the report by writing again in that chat |
+| Report not in the chat | `delivery` field of the job: `failed: HTTP 401` = wrong `OWUI_DELIVERY_SECRET`; `HTTP 404` = route missing (image without the `dr_delivery` hook or `DCC_DEEP_RESEARCH_DELIVERY_SECRET` unset) or chat/message not found; `HTTP 403` = the message is not the one the pipe queued for this job (marker gone, other user, other model prefix); `skipped` = no `OWUI_URL`/`OWUI_DELIVERY_SECRET`. The user gets the report by writing again in that chat |
 | Many `503` from the MCP servers | the shared front proxy of the `*.bs.ch` hosts returns bursts of 503 (all hosts at once, minutes long). The MCP client retries each request up to 6 times over about 45 s, re-opens the session after a 404 and falls back to web search for 2 minutes after three failed connects. Nothing to do on our side except monitoring `/healthz` of the hosts (see [mcp-servers.md](mcp-servers.md)); runs complete anyway, with fewer MCP sources |
 | Reports without MCP sources | the MCP host is unreachable from the pod (proxy / NO_PROXY, NetworkPolicy), or `enabled: false` |
 | Empty answers from the LLM | thinking tokens count against `max_completion_tokens`; the engine retries once with double the budget. Check that `RA_LLM_EXTRA_BODY_FAST` keeps thinking off for the fast role |
