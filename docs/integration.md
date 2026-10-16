@@ -85,12 +85,14 @@ Authorization: Bearer <OWUI_DELIVERY_SECRET>
 
 What the route does and refuses (the checks are on the Open WebUI side, not trusted from the service):
 
-* No route at all unless `DCC_DEEP_RESEARCH_DELIVERY_SECRET` is set in Open WebUI; the secret is compared in constant time.
-  It is its own secret (not an API key), so the service's admin key has no write access to chats.
+* No route at all (a POST answers 405) unless `DCC_DEEP_RESEARCH_DELIVERY_SECRET` is set in Open WebUI, at least 32 characters, no
+  surrounding whitespace. Exactly `Authorization: Bearer <secret>`, checked before the body is read, constant-time compare, body capped
+  at 4 MB. It is its own secret (not an API key), so the service's admin key has no write access to chats. Block `/api/v1/dcc/` for
+  external clients at the gateway: only the job service needs it.
 * The chat must belong to `user_id`; the target must be an assistant message of a `bebbi_deep_research.*` model (prefix
   configurable with `DCC_DEEP_RESEARCH_MODEL_PREFIX`) whose text still carries the pipe's state marker `{"state": "job",
-  "job": <job_id>}`. The pipe writes that marker when it queues the job, so only a message the pipe queued for exactly this
-  job can be written, once: after the delivery the marker is gone and a different text is refused (403); the same text
+  "job": <job_id>}`. The pipe writes that marker when it queues the job; it proves intent, not origin (a user can fake it in their own chat), so at most a
+  message that looks queued for exactly this job can be written, once: after the delivery the marker is gone and a different text is refused (403); the same text
   again is accepted without writing (a retry after a lost answer).
 * It stores one `source` event per source (not if the message has sources already: pipe was faster, or a retry after a
   failed text write), then the text, and emits `chat:message`, through Open WebUI's own `Chats` model and event emitter

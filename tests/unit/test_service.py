@@ -176,9 +176,13 @@ async def test_no_delivery_without_secret(tmp_path):
         transport=httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(200))
     )
     async with running(
-        tmp_path, http_factory=factory, night_window=utc_window(True), owui_url="http://owui", owui_api_key="k"
+        tmp_path,
+        http_factory=factory,
+        night_window=utc_window(True),
+        owui_api_key="k",
+        owui_delivery_url=DELIVERY["owui_delivery_url"],
     ) as (c, _):
-        job = await submit(c, chat_id="chat1", message_id="msg1")  # admin key set, delivery secret not
+        job = await submit(c, chat_id="chat1", message_id="msg1")  # URL and admin key set, delivery secret not
         await wait_status(c, job["job_id"], {"done"})
         for _ in range(40):
             if (await c.get(f"/jobs/{job['job_id']}")).json()["delivery"]:
@@ -439,3 +443,21 @@ async def test_docx_only_for_finished_jobs(tmp_path):
         await wait_status(c, job["job_id"], {"running"})
         assert (await c.get(f"/jobs/{job['job_id']}/report.docx")).status_code == 409
         assert (await c.get(f"/jobs/{job['job_id']}")).json()["sources"] == []
+
+
+async def test_no_delivery_without_url(tmp_path):
+    calls = []
+    factory = lambda: httpx.AsyncClient(  # noqa: E731
+        transport=httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(200))
+    )
+    async with running(
+        tmp_path, http_factory=factory, night_window=utc_window(True), owui_delivery_secret="shared"
+    ) as (c, _):
+        job = await submit(c, chat_id="chat1", message_id="msg1")  # secret set, endpoint URL not
+        await wait_status(c, job["job_id"], {"done"})
+        for _ in range(40):
+            if (await c.get(f"/jobs/{job['job_id']}")).json()["delivery"]:
+                break
+            await asyncio.sleep(0.05)
+        assert (await c.get(f"/jobs/{job['job_id']}")).json()["delivery"] == "skipped"
+    assert calls == []
