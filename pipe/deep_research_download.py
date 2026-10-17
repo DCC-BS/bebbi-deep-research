@@ -7,7 +7,7 @@ icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAw
 """
 
 # Open WebUI action function, companion of pipe/deep_research.py. A report that the job service delivers later (night
-# run) is written into the chat with the admin key; a file uploaded with that key would belong to the admin and give
+# run) is written into the chat by the service; a file uploaded with the service's admin key would belong to the admin and give
 # the user a 404. This action runs inside Open WebUI as the user: it fetches the Word file of the job from the
 # service and stores it as a file of the user, attached to the message. The pipe does the same right away when it
 # returns the report itself.

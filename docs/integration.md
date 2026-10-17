@@ -1,13 +1,13 @@
 # Integration into Open WebUI
 
-Target: `ghcr.io/fd-itbs/open-webui` v0.11.4 (fork of Open WebUI v0.11.4), Kubernetes, GitOps. The integration uses
-only extension points: two functions (the pipe and the Word download action), model entries, one API key. No fork patch.
+Target: `ghcr.io/fd-itbs/open-webui` v0.12.3 (fork of Open WebUI v0.12.3; verified on v0.11.4 before), Kubernetes, GitOps. The integration uses
+only extension points: two functions (the pipe and the Word download action), model entries, one API key, and one delivery route that the image adds (section 3).
 
 ```mermaid
 flowchart LR
     owui["Open WebUI"] -- "pipe, valves" --> svc["bebbi-deep-research service"]
     svc --> deps["Postgres · vLLM · Serper · Firecrawl · MCP"]
-    svc -- "POST /api/v1/chats/{chat}/messages/{message}[/event]<br/>admin API key: report and sources delivery" --> owui
+    svc -- "POST /api/v1/dcc/deep-research/deliver<br/>shared secret: report and sources delivery" --> owui
 ```
 
 ## 1. Deploy the service
@@ -69,16 +69,49 @@ Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py` (and `p
 | `PUBLIC_URL` | empty | public base URL of Open WebUI for the links to uploaded files; empty = Open WebUI's `WEBUI_URL` setting, else the request URL. Set `WEBUI_URL` in production |
 | `OWN_MAX_FILES`, `OWN_MAX_FILE_CHARS` | `10`, `2000000` | files per research and extracted characters per file the pipe sends (the service applies its own limits too, [operations.md](operations.md)) |
 
-## 3. Admin service account for report delivery
+## 3. Report delivery (night run) and the admin service account
 
-The service writes the finished report into the assistant message with
-`POST /api/v1/chats/{chat_id}/messages/{message_id}` (text) and `POST .../messages/{message_id}/event` (one `source`
-event per source, section 5a). In v0.11.4 both endpoints accept the chat owner or an admin (decision: admin service key).
+The night run finishes without any user session, so the service must write the report into the user's chat by itself. Since Open
+WebUI v0.12.0 that is no longer possible with an admin API key: with `ENABLE_ADMIN_CHAT_ACCESS=False` (our setting)
+`POST /api/v1/chats/{id}/messages/{message_id}` and `.../event` answer 401 for the chat of another user (`routers/chats.py`),
+and so does `GET /api/v1/chats/{id}`. The service therefore uses one narrow route that the **Open WebUI image** adds
+(post-import hook `dr_delivery` in the kdkp-open-web-ui repository):
 
-1. Create a user "deep-research-service" with role admin (Entra group sync can map it, or create it locally).
-2. Enable API keys (`ENABLE_API_KEYS=true`); if `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` is on, allow `/api/v1/chats`, `/api/v1/retrieval` (knowledge bases) and `/api/v1/files` (own sources, Word file).
-3. Settings, Account, API keys: create a key, store it as `OWUI_API_KEY` in the service Secret.
-4. Set `OWUI_URL` (chart value `env.OWUI_URL`) to the in-cluster Open WebUI service.
+```
+POST {OWUI_URL}/api/v1/dcc/deep-research/deliver
+Authorization: Bearer <OWUI_DELIVERY_SECRET>
+{"chat_id", "message_id", "job_id", "user_id", "content", "sources": [<data of one `source` event>, ...]}
+```
+
+What the route does and refuses (the checks are on the Open WebUI side, not trusted from the service):
+
+* No route at all (a POST answers 405) unless `DCC_DEEP_RESEARCH_DELIVERY_SECRET` is set in Open WebUI, at least 32 characters, no
+  surrounding whitespace. Exactly `Authorization: Bearer <secret>`, checked before the body is read, constant-time compare, body capped
+  at 4 MB. It is its own secret (not an API key), so the service's admin key has no write access to chats. Block `/api/v1/dcc/` for
+  external clients at the gateway: only the job service needs it.
+* The chat must belong to `user_id`; the target must be an assistant message of a `bebbi_deep_research.*` model (prefix
+  configurable with `DCC_DEEP_RESEARCH_MODEL_PREFIX`) whose text still carries the pipe's state marker `{"state": "job",
+  "job": <job_id>}`. The pipe writes that marker when it queues the job; it proves intent, not origin (a user can fake it in their own chat), so at most a
+  message that looks queued for exactly this job can be written, once: after the delivery the marker is gone and a different text is refused (403); the same text
+  again is accepted without writing (a retry after a lost answer).
+* It stores one `source` event per source (not if the message has sources already: pipe was faster, or a retry after a
+  failed text write), then the text, and emits `chat:message`, through Open WebUI's own `Chats` model and event emitter
+  (so an open chat updates live). It cannot send other event types or change other fields of a message.
+
+Setup:
+
+1. Open WebUI (image): set `DCC_DEEP_RESEARCH_DELIVERY_SECRET` (random string).
+2. Service Secret: the same value as `OWUI_DELIVERY_SECRET`. `OWUI_URL` points to the in-cluster Open WebUI service; the route is
+   `OWUI_URL` + `/api/v1/dcc/deep-research/deliver` unless `OWUI_DELIVERY_URL` says otherwise.
+3. Without the secret in the service the job ends with `delivery: skipped`; without the route in Open WebUI with
+   `failed: HTTP 404`. Either way the user gets the report by writing again in that chat.
+
+The **admin API key** (`OWUI_API_KEY`) is still used, read-only, for own sources: `POST /api/v1/retrieval/query/collection`
+(knowledge bases of the user, only ids the pipe approved for the job) and `GET /api/v1/files/{id}` (date of a document).
+Both still accept an admin key at v0.12.3 (`BYPASS_ADMIN_ACCESS_CONTROL` default true, section 7). Create a user
+"deep-research-service" with role admin, enable API keys (`ENABLE_API_KEYS=true`; with `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` allow
+`/api/v1/retrieval` and `/api/v1/files`), create the key in Settings, Account, API keys, store it as `OWUI_API_KEY`. The key no longer
+needs `/api/v1/chats`.
 
 The pipe sends the chat user's id (`user_id`) on `POST /plans`, `POST /plans/{id}/edit`, `POST /jobs` and as `?user_id=` on `GET /jobs/{id}`
 (and the other job reads). When both the stored draft/job and the request carry a user id and they differ, the service answers 404. Calls
@@ -87,9 +120,10 @@ without `user_id` (n8n, scripts) are not checked.
 `RA_TOKEN` is full trust: whoever holds it can read every job and report and submit for any user id; the admin key paths run through the
 service. There are no separate tokens per caller yet; keep the token in the Secret and restrict ingress with the NetworkPolicy.
 
-The key can read and write every chat. Keep it in the Secret only, and restrict ingress to the service with the
-NetworkPolicy (`networkPolicy.enabled`). Delivery is retried 3 times; the result is stored per job (`delivery`
-in `GET /jobs/{id}`: `ok`, `skipped` when the job has no chat, or `failed: ...`).
+Delivery is retried 3 times (not for 400, 401, 403, 404, which do not change by waiting); the result is stored per job
+(`delivery` in `GET /jobs/{id}`: `ok`, `skipped` when the job has no chat or no secret, or `failed: ...`). The admin key can read every
+knowledge base and file; keep it in the Secret only, and restrict ingress to the service with the NetworkPolicy
+(`networkPolicy.enabled`).
 
 ## 4. Models (optional entries)
 
@@ -122,12 +156,12 @@ users should use a normal model for that. Making the delivered message carry a "
 pipe answer the next message with the same report again, so we left it out. The same holds for a report that the pipe
 returns itself (later message, fallback above): it carries no marker either.
 
-### How the pipe and the delivery fit Open WebUI v0.11.4 (found in the end-to-end test)
+### How the pipe and the delivery fit Open WebUI v0.11.4 and v0.12.3 (found in the end-to-end test)
 
 * **State marker**: a markdown link reference definition `[//]: # (research-agent:<base64>)`. It is valid markdown and
   never rendered. The first version used an HTML comment, which Open WebUI shows as text.
 * **`output` wins over `content`**: v0.11 stores the pipe answer as `output` items and the UI renders `output` in
-  preference to `content`. `POST /chats/{id}/messages/{mid}` (and the `chat:message` event) change only `content`, so
+  preference to `content`. the delivery route (like the `POST /chats/{id}/messages/{mid}` it replaced, and the `chat:message` event) changes only `content`, so
   a delivery into a normal pipe answer is stored but never shown. The pipe therefore sends the text of every message
   that the service will replace later ("queued for the night", "runs in the background") as a `replace` event and
   returns an empty string; the stored message then has `content` and an empty `output`, and the delivery is
@@ -141,7 +175,7 @@ returns itself (later message, fallback above): it carries no marker either.
 * **Model list cache**: after installing a function or model, open Open WebUI once (`GET /api/models`) before sending
   completions with the new model id; the first completion otherwise answers "Model not found".
 
-## 5a. Citations and Word download (how Open WebUI v0.11.4 does it)
+## 5a. Citations and Word download (how Open WebUI v0.11.4 and v0.12.3 do it)
 
 **What Open WebUI expects** (read in the image: backend `/app/backend/open_webui`, frontend from the source maps of
 `/app/build/_app/immutable`):
@@ -177,7 +211,7 @@ returns itself (later message, fallback above): it carries no marker either.
 * **Pipe path** (report returned in the chat): the pipe emits the `source` events in the order of the numbers, returns
   `ui_report`, and stores the Word file as a file of the user *inside Open WebUI* (`store_user_file`, the upload handler
   of Open WebUI called in-process with the chat user) and emits a `files` event.
-* **Delivery path** (night run): the service posts the `source` events, then the text, with the admin key; after a reload the
+* **Delivery path** (night run): the service posts text and sources to the delivery route (section 3), which stores the `source` events, then the text; after a reload the
   message carries `sources`, badges and list work. The Word file cannot be attached by the service (ownership, see above).
   The action function `bebbi_deep_research_download` adds a button ("Word-Datei") under every Deep Research answer; it runs as
   the user inside Open WebUI, looks up the job by chat and message id (`GET /jobs/lookup`, checks the user), fetches the
@@ -311,6 +345,17 @@ processing, `files` in the completion request, test user "tester" without admin 
 | 12 | `own_sources: only` (preset Eigene Dokumente), file + knowledge base (job `3fddd112aef9`, 15 s) | passed. Tool trail: one `knowledge_search`, nothing else (no `web_search`, no MCP tool; `tools_used` and the trail of `GET /jobs/{id}/evidence`); sources `upload` + `knowledge`. Without attachments the model answers "Dieses Modell arbeitet nur mit eigenen Quellen. Bitte laden Sie eine Datei hoch ..." |
 | 13 | Large file, many files, scans, pipeline engine | not run live (job budget of the test round). Covered by unit tests with fakes: limits and cut notes, `read_upload` on a long text (passage selection, embeddings once), the pipeline's evidence cards and the `only` mode of the pipeline engine. A first live run of web_survey with attachments is still due |
 
+**Re-run on Open WebUI v0.12.3** (2026-10-16, `ENABLE_ADMIN_CHAT_ACCESS=false`, image `open-webui:v0.12.3-kdkp-local` plus the `dr_delivery` hook, compose project `owui-dr`, Gemma 4 31B through the evaluation gateway; the UI part in the browser pane as the test user):
+
+| # | Scenario | Result |
+|---|---|---|
+| 14 | The old delivery with the admin key | fails as announced: `POST /chats/{id}/messages/{mid}`, `.../event` and `GET /chats/{id}` of the tester's chat answer 401 |
+| 15 | Night run through the delivery route (grossrat, chat `be82c220…`, job `4d31e9d5eb6e`): plan card answered by a websocket client (`e2e_owui.py say --approve`), job queued, window opened by restart, chat page open in the browser | passed. `delivery ok`; the open page showed the report and badges **without reload**; stored message 6624 characters, 14 `sources` (14 unique), `output` empty, no marker in the text, 14 "Sources" and clickable badges after reload (popup with title, Stand, excerpt) |
+| 16 | Word file (action `bebbi_deep_research_download` as the tester, twice) | passed. One file attached, the second call attached nothing; `GET /files/{id}/content` as the tester 200 (42 kB, python-docx: 51 paragraphs, 1 table) |
+| 17 | Scope of the route | passed. Wrong secret 401; delivered message with other text 403; other `user_id` 403; user message or non-Deep-Research message 403; same text again 200 `already`. Nothing was written in the refused cases |
+| 18 | Own sources: file `.txt` and a knowledge base of the tester, preset dokumente (job `4aa5e24ccb6b`) | passed. Both sources cited with the right figures (28 days, CHF 135; CHF 15 000), kinds `upload` and `knowledge:Test KB 5`, links 200 for the tester. The admin key still reads the foreign knowledge base (`/retrieval/query/collection`, same response shape) and `GET /files/{id}` (`created_at`) |
+| 19 | Job queued, user writes again before it ran; then the job runs and the user writes again (chat `b260441c…`, job `b40ade3da0a1`) | passed. The state marker came back in the status answer (so the second message is a new message, marker intact); the delivery went into the **first** message (19 sources, no marker) and left the status message alone; the next user message returned the report with the Word file attached by the pipe. (That message carries no `source` events, because the service delivered them already: its `[n]` are plain text; unchanged from v0.11.4) |
+
 Known limitations:
 
 * The rendered chat (badges, source popup, file chip, action button) was **not** looked at in the browser pane in this
@@ -326,9 +371,9 @@ Known limitations:
   installed, the file is still available from the service (`/jobs/{id}/report.docx`).
 * The native source list shows URLs only; the Markdown list under the report keeps title, Stand and retrieval date, so the
   list is visible twice (one collapsed).
-* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (pinned to v0.11.4); re-test it on upgrades (checklist in section 9).
+* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (checked on v0.12.3); re-test it on upgrades (checklist in section 9).
 * Own sources were exercised through the API the way the browser sends them; the attach menu and the `#` picker were not clicked in the browser pane.
-* The delivery key can write every chat (admin); keep NetworkPolicy and secret handling as described.
+* The delivery secret can write the text of any message that the pipe queued and that is still waiting (and nothing else); keep it in the Secret and restrict ingress with the NetworkPolicy. The admin key can read every knowledge base and file.
 * A message that carries a status text (job still running when the user writes again) is a new assistant message; the
   report is delivered into the original one.
 
@@ -339,22 +384,32 @@ mise run docker:up       # varlock loads the variables (.env.schema; secrets fro
 OWUI_ADMIN_EMAIL=... OWUI_ADMIN_PASSWORD=... RA_TOKEN=... \
   uv run python scripts/install_pipe.py --service-url http://service:8088 --create-api-key --models
 # store the printed OWUI_API_KEY in Proton Pass (or export it), then recreate the service: mise run docker:up
-# (without the key the delivery is `skipped`)
+# (without OWUI_API_KEY a knowledge base cannot be used)
 ```
 
 Every approved research is queued for the night window: set `RA_NIGHT_WINDOW=00:00-23:59` to let jobs run at once
-while testing. With the evaluation stack on the same host add `-f docker/eval-net.compose.yml` (see the comment in that
+while testing. The plan card needs a browser session: `scripts/e2e_owui.py say CHAT "..." --approve` holds a websocket session and
+clicks "Freigeben".
+
+Delivery needs the route of the kdkp image (the upstream `ghcr.io/open-webui/open-webui` image has none; the jobs then end with
+`delivery: failed: HTTP 404`, the pipe still returns the report on the next message). With the image: set the same random
+`OWUI_DELIVERY_SECRET` in `.env` (the compose files pass it to the service and to Open WebUI as `DCC_DEEP_RESEARCH_DELIVERY_SECRET`) and
+point `open-webui` at the image, e.g. with an override file that sets `image:` and the `HTTP(S)_PROXY` variables that the image bakes in (empty
+for a local stack). `scripts/check_owui_internals.py` checks the Open WebUI internals the pipe imports. With the evaluation stack on the same host add `-f docker/eval-net.compose.yml` (see the comment in that
 file).
 
 ## 9. Upgrade checklist: Open WebUI internals we depend on
 
-Re-test these when the Open WebUI version changes (pinned: v0.11.4). Unit tests fake them (`tests/unit/test_pipe_own.py:
+Re-test these when the Open WebUI version changes (checked: v0.12.3). Unit tests fake them (`tests/unit/test_pipe_own.py:
 test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not if Open WebUI changes); the end-to-end check is
-`scripts/e2e_owui.py` (section 7).
+`scripts/e2e_owui.py` (section 7); `scripts/check_owui_internals.py` runs the helpers of the pipe against the real modules inside the container.
 
 | Dependency | Used for | Look at |
 |---|---|---|
-| `POST /api/v1/chats/{id}/messages/{mid}` and `.../event`, `output` vs `content` of a message | report delivery, queued-message `replace` event | sections 3 and 5 |
+| `ENABLE_ADMIN_CHAT_ACCESS` and the checks of `POST /api/v1/chats/{id}/messages/{mid}`, `.../event`, `GET /api/v1/chats/{id}` (401 for an admin since 0.12.0) | why the service cannot write with an admin key | section 3, `routers/chats.py` |
+| `open_webui.models.chats.Chats`: `get_chat_by_id`, `get_message_by_id_and_message_id`, `upsert_message_to_chat_by_id_and_message_id`, `get_message_metadata`; `open_webui.socket.main.get_event_emitter(info, update_db)` and what it stores for `source`, `files`, `replace` | the delivery route of the image (`dr_delivery` hook), the Word action | section 3; kdkp-open-web-ui README |
+| `output` vs `content` of a message (UI renders `output` first), `replace` event stores `content` | queued-message `replace` event, delivery shown live | sections 3 and 5 |
+| `__task__` values of background requests (`title_generation`, `tags_generation`, `follow_up_generation`, and since 0.12 `memory_review`, `context_compaction`) | the pipe answers every task locally | `functions.py`, `utils/memory.py`, `utils/context_compaction.py` |
 | `source` events, `metadata.source` / `metadata.name` unique per source | citation badges | section 5a |
 | `open_webui.routers.files.upload_file_handler`, `open_webui.models.users.Users` | Word file as the user's file | section 5a |
 | `__files__` / `__metadata__["files"]` and `["user_message"]` of a pipe; item types `file`, `collection` | which attachments the chat has (own sources) | `functions.py`, `utils/middleware.py` |

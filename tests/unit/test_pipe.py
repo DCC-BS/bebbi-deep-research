@@ -39,6 +39,9 @@ def test_background_tasks_do_not_start_a_research():
         json.loads(asyncio.run(pipe.pipe({"messages": []}, {"id": "u"}, __task__="title_generation")))["title"]
         == "Deep Research"
     )
+    # task types added in Open WebUI 0.12 (memory review, context compaction), and any future one: no research starts
+    for task in ("memory_review", "context_compaction", "something_new"):
+        assert asyncio.run(pipe.pipe(body, {"id": "u"}, __task__=task)) == ""
 
 
 def _pipe_with_service(mod, jobs: dict):

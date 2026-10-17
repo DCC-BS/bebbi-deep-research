@@ -4,6 +4,8 @@
   scripts/e2e_owui.py new  [--model bebbi_deep_research.grossrat]      -> prints the chat id
   scripts/e2e_owui.py say  CHAT_ID "text"  [--model ...] -> sends a user turn, prints the assistant answer
   scripts/e2e_owui.py show CHAT_ID [--raw]                              -> prints the stored messages
+  scripts/e2e_owui.py say CHAT_ID "text" --approve   -> also holds a websocket session like the browser and answers the
+      plan card (Freigeben) so that the job is queued; without it the pipe sees no answer and starts nothing
   scripts/e2e_owui.py say CHAT_ID "text" --file doc.pdf --kb KNOWLEDGE_ID
       -> the turn carries an uploaded file / knowledge base
   scripts/e2e_owui.py kb-create NAME doc1.txt doc2.txt [--admin]
@@ -140,8 +142,40 @@ class Client:
             a.raise_for_status()
         return {"type": "collection", **{k: kb[k] for k in ("id", "name", "description")}, "status": "processed"}
 
+    def open_session(self, choice: int = 0):
+        """Websocket session like the browser's: joins the user's room and answers the ask-user card of the pipe.
+
+        `choice` is the index of the option to click (0 = Freigeben). Returns the socket; its `session_id` goes into the
+        completion request, which is how the pipe's event call finds the browser.
+        """
+        import socketio  # dev dependency (python-socketio[client])
+
+        sio = socketio.Client(reconnection=False)
+        token = self.http.headers["Authorization"].removeprefix("Bearer ")
+
+        @sio.on("events")
+        def on_events(data):
+            event = data.get("data") or {}
+            print("[event] " + str(event.get("type")), file=sys.stderr)
+            if event.get("type") == "request:user_input":
+                print("[card] " + event["data"]["questions"][0]["question"], file=sys.stderr)
+                return {"status": "answered", "answers": {"plan": {"type": "option", "option_index": choice}}}
+            return None
+
+        sio.connect(str(self.http.base_url), socketio_path="/ws/socket.io", transports=["websocket"])
+        sio.emit("user-join", {"auth": {"token": token}})
+        time.sleep(1)
+        sio.session_id = sio.namespaces["/"]  # the Socket.IO id, which the browser sends (not the Engine.IO sid)
+        return sio
+
     def say(
-        self, chat_id: str, text: str, model: str, timeout: float = 900, files: list[dict] | None = None
+        self,
+        chat_id: str,
+        text: str,
+        model: str,
+        timeout: float = 900,
+        files: list[dict] | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, str]:
         """One user turn exactly as the UI does it. Returns (assistant message id, answer text)."""
         chat = self.get_chat(chat_id)
@@ -167,7 +201,7 @@ class Client:
             "stream": True,
             "chat_id": chat_id,
             "id": aid,
-            "session_id": uuid.uuid4().hex[:20],
+            "session_id": session_id or uuid.uuid4().hex[:20],
             "parent_id": parent,
             "user_message": user,
             "background_tasks": {"title_generation": True, "tags_generation": True, "follow_up_generation": True},
@@ -206,6 +240,7 @@ def main() -> int:
     ap.add_argument("--admin", action="store_true", help="act as the admin (kb-create)")
     ap.add_argument("--model", default="bebbi_deep_research.grossrat")
     ap.add_argument("--raw", action="store_true")
+    ap.add_argument("--approve", action="store_true", help="answer the plan card with Freigeben (needs a websocket)")
     a = ap.parse_args()
     cl = Client(admin=a.admin)
     if a.cmd == "new":
@@ -227,7 +262,14 @@ def main() -> int:
                     "status": "processed",
                 }
             )
-        aid, ans = cl.say(a.chat_id, " ".join(a.text), a.model, files=files or None)
+        sio = cl.open_session() if a.approve else None
+        try:
+            aid, ans = cl.say(
+                a.chat_id, " ".join(a.text), a.model, files=files or None, session_id=sio.session_id if sio else None
+            )
+        finally:
+            if sio:
+                sio.disconnect()
         print(f"[assistant message {aid}]\n{ans}")
     else:
         for m in cl.path(cl.get_chat(a.chat_id)):

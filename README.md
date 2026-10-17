@@ -12,10 +12,10 @@ tuning history) lives in the evaluation repository, see [docs/evaluation.md](doc
 
 ```mermaid
 flowchart LR
-    user([User]) --> owui["Open WebUI v0.11.4<br/>model: Deep Research · preset"]
+    user([User]) --> owui["Open WebUI v0.12.3<br/>model: Deep Research · preset"]
     owui --> pipe["pipe/deep_research.py<br/>OWUI function (manifold)"]
     pipe -- "clarify · plan · edit · approve (ask-user card) · status<br/>HTTP + bearer token" --> svc
-    svc -- "report, sources, Word file<br/>POST /api/v1/chats/{chat}/messages/{msg}<br/>(admin key)" --> owui
+    svc -- "report and sources<br/>POST /api/v1/dcc/deep-research/deliver<br/>(shared secret)" --> owui
 
     subgraph svc_box ["bebbi-deep-research image"]
         svc["bebbi_deep_research (FastAPI, backend-common)<br/>/clarify /plans /jobs /health/*<br/>job queue · night window · daytime rule"]
@@ -69,7 +69,7 @@ mise run check                           # lockfile, ruff format + lint, ty, var
 mise run test:unit                       # unit tests (CI runs `mise run ci`)
 mise run dev                             # service with auto-reload on :8088 (secrets via varlock / Proton Pass)
 
-mise run docker:up                       # service + Postgres + Open WebUI v0.11.4 (docker-compose.dev.yml)
+mise run docker:up                       # service + Postgres + Open WebUI v0.12.3 (docker-compose.dev.yml)
 curl localhost:8088/health/liveness      # {"status":"up",...}; /health/readiness checks the LLM and Open WebUI
 uv run python scripts/install_pipe.py --service-url http://service:8088 --models   # pipe + valves (docs/integration.md)
 ```

@@ -44,6 +44,7 @@ services:
       RA_OWN_MAX_COLLECTIONS: ${RA_OWN_MAX_COLLECTIONS:-5}
       OWUI_URL: ${OWUI_URL:-http://open-webui:8080}
       OWUI_API_KEY: ${OWUI_API_KEY:-}
+      OWUI_DELIVERY_SECRET: ${OWUI_DELIVERY_SECRET:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -60,11 +61,15 @@ services:
       timeout: 3s
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.11.4
+    image: ghcr.io/open-webui/open-webui:v0.12.3
     environment:
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?set WEBUI_SECRET_KEY}
       ENABLE_SIGNUP: "false"
       ENABLE_API_KEYS: "true"
+      # as in production: an admin cannot read or write other users' chats (Open WebUI 0.12 enforces it)
+      ENABLE_ADMIN_CHAT_ACCESS: "false"
+      # read by the delivery hook of the kdkp image (not in upstream images: see docs/integration.md section 3)
+      DCC_DEEP_RESEARCH_DELIVERY_SECRET: ${OWUI_DELIVERY_SECRET:-}
       WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
       WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
       OPENAI_API_BASE_URL: ${RA_LLM_BASE_URL}

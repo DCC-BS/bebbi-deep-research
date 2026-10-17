@@ -134,6 +134,9 @@ def make_settings(tmp_path, **kw) -> AppConfig:
     return s
 
 
+DELIVERY = {"owui_delivery_url": "http://owui/api/v1/dcc/deep-research/deliver", "owui_delivery_secret": "shared"}
+
+
 def utc_window(inside: bool) -> str:
     now = datetime.now(ZoneInfo("UTC"))
     a, b = (
