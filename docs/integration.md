@@ -21,7 +21,7 @@ Helm chart `deploy/helm/bebbi-deep-research` (see [operations.md](operations.md)
 | `HMAC_SECRET` | random string (`openssl rand 32 \| base64`), pseudonymises user ids in usage events |
 | `RA_DATABASE_URL` | `postgresql://user:password@host:5432/db` (tables are created on start, `create table if not exists`) |
 | `RA_SEARCH_KEY` | Serper API key |
-| `RA_FIRECRAWL_KEY`, `RA_LLM_API_KEY` | only if the endpoints need keys |
+| `RA_FIRECRAWL_KEY`, `RA_LLM_API_KEY`, `RA_LLM_EMBED_API_KEY` | only if the endpoints need keys |
 | `OWUI_API_KEY` | API key of the Open WebUI service account (step 3) |
 
 Check: `kubectl port-forward svc/bebbi-deep-research 8088` then `curl localhost:8088/health/readiness` returns

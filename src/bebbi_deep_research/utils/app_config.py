@@ -77,6 +77,8 @@ class AppConfig(AbstractAppConfig):
     hmac_secret: str = Field(description="Secret for pseudonymised user ids in usage events (HMAC_SECRET)")
     llm_base_url: str = Field(description="OpenAI-compatible LLM endpoint (RA_LLM_BASE_URL)")
     llm_api_key: str = Field(default="", description="LLM API key; empty for endpoints without auth")
+    llm_embed_base_url: str = Field(default="", description="Embeddings endpoint if not RA_LLM_BASE_URL")
+    llm_embed_api_key: str = Field(default="", description="API key of the embeddings endpoint")
     model_think: str = "gemma-think"
     model_fast: str = "gemma-fast"
     model_embed: str = "qwen-embed"
@@ -167,6 +169,8 @@ class AppConfig(AbstractAppConfig):
                 "hmac_secret": _required(env, "HMAC_SECRET"),
                 "llm_base_url": _required(env, "RA_LLM_BASE_URL"),
                 "llm_api_key": env.get("RA_LLM_API_KEY", ""),
+                "llm_embed_base_url": env.get("RA_LLM_EMBED_BASE_URL", ""),
+                "llm_embed_api_key": env.get("RA_LLM_EMBED_API_KEY", ""),
                 "extra_body_think": _json_object(env, "RA_LLM_EXTRA_BODY_THINK"),
                 "extra_body_fast": _json_object(env, "RA_LLM_EXTRA_BODY_FAST"),
                 "search_url": _required(env, "RA_SEARCH_URL"),
@@ -189,6 +193,7 @@ class AppConfig(AbstractAppConfig):
         return (
             f"AppConfig(token={log_secret(self.token)}, hmac_secret={log_secret(self.hmac_secret)}, "
             f"llm_base_url={self.llm_base_url}, llm_api_key={log_secret(self.llm_api_key)}, "
+            f"llm_embed_base_url={self.llm_embed_base_url}, llm_embed_api_key={log_secret(self.llm_embed_api_key)}, "
             f"models={self.model_think}/{self.model_fast}/{self.model_embed}, search_url={self.search_url}, "
             f"firecrawl_url={self.firecrawl_url}, presets_path={self.presets_path}, "
             f"database={self.database_url.split('://')[0]}, night_window={self.night_window}, "

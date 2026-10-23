@@ -131,3 +131,13 @@ def test_parse_json_prefers_the_object_when_a_dict_is_wanted():
     assert parse_json("[1, 2]", want=dict) is None
     assert parse_json("[1, 2]") == [1, 2]
     assert parse_json('{"a": 1,}', want=dict) == {"a": 1}
+
+
+async def test_embeddings_use_their_own_endpoint_when_set():
+    """A gateway serves chat and embeddings under different paths (KDKP: /kis/gemma4/v1 and /kis/embeddings/v1)."""
+    same = LLM(LlmSettings(base_url="http://llm/v1", api_key="k"))
+    assert str(same._embed_client.base_url) == "http://llm/v1/" and same._embed_client.api_key == "k"
+    own = LLM(LlmSettings(base_url="http://llm/v1", api_key="k", embed_base_url="http://emb/v1", embed_api_key="e"))
+    assert str(own._embed_client.base_url) == "http://emb/v1/" and own._embed_client.api_key == "e"
+    await same.aclose()
+    await own.aclose()

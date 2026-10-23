@@ -274,3 +274,19 @@ def test_real_agent_factory_with_empty_api_key():
     s = AppConfig(token="t", hmac_secret="h", llm_base_url="http://llm/v1", search_url="u", firecrawl_url="u")
     agent = make_agent_factory(load_config(s.presets_path), s)("job1")
     assert agent is not None
+
+
+def test_agent_factory_passes_the_embedding_endpoint():
+    from bebbi_deep_research.engine import load_config
+    from bebbi_deep_research.services.jobs import make_agent_factory
+
+    env = {"RA_TOKEN": "t", "HMAC_SECRET": "h", "RA_LLM_BASE_URL": "http://llm/v1", "RA_LLM_API_KEY": "k-{job}"}
+    env |= {"RA_SEARCH_URL": "u", "RA_FIRECRAWL_URL": "u"}
+    s = AppConfig.from_env(env)
+    assert s.llm_embed_base_url == "" and s.llm_embed_api_key == ""
+    agent = make_agent_factory(load_config(s.presets_path), s)("job1")
+    assert str(agent.llm._embed_client.base_url) == "http://llm/v1/" and agent.llm._embed_client.api_key == "k-job1"
+    s = AppConfig.from_env(env | {"RA_LLM_EMBED_BASE_URL": "http://emb/v1", "RA_LLM_EMBED_API_KEY": "e-{job}"})
+    assert "e-{job}" not in str(s)  # masked in the log line like the other keys
+    agent = make_agent_factory(load_config(s.presets_path), s)("job2")
+    assert str(agent.llm._embed_client.base_url) == "http://emb/v1/" and agent.llm._embed_client.api_key == "e-job2"
