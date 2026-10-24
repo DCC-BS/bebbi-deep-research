@@ -46,7 +46,9 @@ dev = [
 [tool.uv]
 # dependency cooldown: ignore releases newer than one week (internal packages: one day)
 exclude-newer = "1 week"
-exclude-newer-package = { dcc-backend-common = "P1D" }
+# certifi/uv: exempt from the exclude-newer cooldown so CA-store security fixes (GHSA-6q48-6c7w-9gw2,
+# GHSA-hq85-5cpj-mr62) land right away.
+exclude-newer-package = { dcc-backend-common = "P1D", certifi = "P0D", uv = "P0D" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
