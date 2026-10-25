@@ -19,12 +19,37 @@ async def test_probes_and_auth(tmp_path):
     async with running(tmp_path) as (c, _):
         assert (await c.get("/health/liveness")).json()["status"] == "up"
         assert (await c.get("/health/startup")).status_code == 200
-        ready = await c.get("/health/readiness")  # the test LLM endpoint does not exist
-        assert ready.status_code == 503 and ready.json()["checks"]["llm"] != "healthy"
+        ready = await c.get("/health/readiness")  # the database only: the test LLM endpoint does not exist
+        assert ready.status_code == 200 and ready.json()["checks"] == {"database": "healthy"}
+        deps = await c.get("/health/dependencies")  # reported, but never a reason to take the pod out
+        assert deps.status_code == 200 and deps.json()["status"] == "degraded"
+        assert deps.json()["checks"]["llm"] != "healthy" and "open-webui" not in deps.json()["checks"]
         anonymous = httpx.AsyncClient(transport=c._transport, base_url="http://t")
         r = await anonymous.post("/clarify", json={"task": "x"})
         assert r.status_code == 401 and r.json()["errorId"] == "authentication_failed"
         assert (await c.get("/metrics")).text.count("research_jobs{") == 5
+
+
+async def test_readiness_fails_without_the_database(tmp_path):
+    async with running(tmp_path) as (c, app):
+
+        async def down():
+            raise ConnectionRefusedError("db down")
+
+        app.state.container.db().ping = down
+        r = await c.get("/health/readiness")
+        assert r.status_code == 503 and r.json()["checks"] == {"database": "ConnectionRefusedError"}
+
+
+async def test_dependencies_report_each_service(tmp_path, monkeypatch):
+    def handler(request):
+        return httpx.Response(200 if request.url.path == "/v1/models" else 503)
+
+    real = httpx.AsyncClient
+    async with running(tmp_path, owui_url="http://owui") as (c, _):
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+        r = await c.get("/health/dependencies")
+        assert r.json() == {"status": "degraded", "checks": {"llm": "healthy", "open-webui": "status 503"}}
 
 
 def test_describe_error_names_the_cause_without_internal_hosts():

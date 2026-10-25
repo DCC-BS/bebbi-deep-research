@@ -25,7 +25,8 @@ Helm chart `deploy/helm/bebbi-deep-research` (see [operations.md](operations.md)
 | `OWUI_API_KEY` | API key of the Open WebUI service account (step 3) |
 
 Check: `kubectl port-forward svc/bebbi-deep-research 8088` then `curl localhost:8088/health/readiness` returns
-`{"status":"ready",...}`; `checks` names an unreachable LLM endpoint or Open WebUI. Missing or invalid configuration stops
+`{"status":"ready",...}` (database reachable) and `curl localhost:8088/health/dependencies` names an unreachable LLM
+endpoint or Open WebUI. Missing or invalid configuration stops
 the pod at start with the variable named in the log (varlock and the service's own check).
 
 ## 2. Install the pipe and set the valves

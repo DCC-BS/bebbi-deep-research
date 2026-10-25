@@ -77,7 +77,7 @@ spec:
             httpGet: {path: /health/liveness, port: http}
             periodSeconds: 20
             timeoutSeconds: 3
-          readinessProbe:      # checks the LLM endpoint and Open WebUI (backend-common health probes)
+          readinessProbe:      # checks the database only (LLM and Open WebUI: /health/dependencies)
             httpGet: {path: /health/readiness, port: http}
             periodSeconds: 10
             timeoutSeconds: 8

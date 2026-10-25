@@ -72,7 +72,7 @@ mise run test:unit                       # unit tests (CI runs `mise run ci`)
 mise run dev                             # service with auto-reload on :8088 (secrets via varlock / Proton Pass)
 
 mise run docker:up                       # service + Postgres + Open WebUI v0.12.3 (docker-compose.dev.yml)
-curl localhost:8088/health/liveness      # {"status":"up",...}; /health/readiness checks the LLM and Open WebUI
+curl localhost:8088/health/liveness      # {"status":"up",...}; /health/readiness checks the database, /health/dependencies the LLM and Open WebUI
 uv run python scripts/install_pipe.py --service-url http://service:8088 --models   # pipe + valves (docs/integration.md)
 ```
 

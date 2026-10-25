@@ -148,8 +148,9 @@ response changes in a way the other side cannot handle; additive response fields
 
 | Method, path | Purpose |
 |---|---|
-| `GET /health/liveness`, `/health/startup` | process up / started (backend-common probes) |
-| `GET /health/readiness` | 200 if the LLM endpoint (`/models`) and Open WebUI (`/health`, if `OWUI_URL` is set) answer, else 503 with `checks` |
+| `GET /health/liveness`, `/health/startup` | process up / started |
+| `GET /health/readiness` | 200 if the database answers within 3 s, else 503 with `checks`. Nothing else: job status and reports need only the database, so an LLM or Open WebUI outage does not take the pod out of the Service |
+| `GET /health/dependencies` | status of the LLM endpoint (`/models`) and Open WebUI (`/health`, if `OWUI_URL` is set): `{"status": "ok" \| "degraded", "checks"}`, always 200 (unauthenticated, no content) |
 | `GET /metrics` | Prometheus text: `research_jobs{status}`, `research_in_night_window` (unauthenticated, no content) |
 | `GET /presets` | preset names, descriptions, engine |
 | `POST /clarify` `{task, preset?, own_sources?}` | clarifying questions and assumptions (knows the attached sources) |
@@ -206,7 +207,8 @@ also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and lo
 | Symptom | Check |
 |---|---|
 | Pod does not start | the log names the missing or invalid variable (varlock before the start, then the service's own check) |
-| Pod not ready | `curl /health/readiness`: `checks` shows whether the LLM endpoint or Open WebUI is unreachable |
+| Pod not ready | `curl /health/readiness`: the database is unreachable (`RA_DATABASE_URL`, NetworkPolicy egress to 5432) |
+| Jobs fail with "Das Sprachmodell ist nicht erreichbar" | `curl /health/dependencies`: `checks` shows whether the LLM endpoint or Open WebUI answers |
 | Pipe says "Deep Research ist nicht verfügbar: invalid token" | `SERVICE_TOKEN` valve differs from `RA_TOKEN` |
 | Job stays `queued` | outside the window and not a quick focus run: it waits for 20:00. `GET /metrics` shows `research_in_night_window`. Check `RA_TIMEZONE` |
 | Job `queued` forever inside the window | all workers busy (`RA_WORKERS`), or no replica running |
