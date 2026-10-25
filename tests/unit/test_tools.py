@@ -154,6 +154,24 @@ async def test_fetch_meta_survives_missing_data_and_non_json():
         "http://localhost./",
         "",
         "https:///x",
+        # D5: names that are not public (verified to pass the old guard)
+        "http://intranet.bs.ch/",
+        "http://localtest.me/",
+        "http://open-webui.tenant-kdkp-kiw-openweb-ui/api/v1/files",
+        "http://kubernetes.default/",
+        "http://kubernetes.default.svc/",
+        "http://minio.minio.svc.cluster/",
+        "http://research-agent.tenant-kdkp-kiw-bebbi-deep-research:8088/jobs",
+        "http://10.0.0.1.nip.io/",
+        "http://127-0-0-1.sslip.io/",
+        "http://app.localhost.ch/",
+        "http://localhost.localdomain/",
+        "http://printer.home/",
+        "http://wiki.corp/",
+        "http://a..ch/",
+        "http://[fd00::1]/",
+        "http://[fe80::1]/",
+        "http://198.18.0.1/",
     ],
 )
 async def test_fetch_meta_refuses_internal_targets_without_a_request(url):
@@ -165,7 +183,21 @@ async def test_fetch_meta_refuses_internal_targets_without_a_request(url):
 
 
 @pytest.mark.parametrize(
-    "url", ["https://www.bs.ch/x?a=1#f", "http://example.com", "https://8.8.8.8/", "https://sub.example.co.uk:8443/a"]
+    "url",
+    [
+        "https://www.bs.ch/x?a=1#f",
+        "http://example.com",
+        "https://8.8.8.8/",
+        "https://sub.example.co.uk:8443/a",
+        "https://www.gesetzessammlung.bs.ch/app/de/texts_of_law/153.100",
+        "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
+        "https://local.ch/de",
+        "https://www.internal-audit.swiss/",
+        "https://grosserrat.bs.ch.",
+        "https://bücher.ch/",
+        "https://example.xn--p1ai/",
+        "https://mcp.opencaselaw.ch/mcp",
+    ],
 )
 def test_public_urls_are_fetchable(url):
     assert fetchable(url)

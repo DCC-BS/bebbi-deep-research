@@ -13,6 +13,7 @@ import httpx
 from dcc_backend_common.logger import get_logger
 
 from . import metrics
+from .tlds import TLDS
 from .vectors import scores
 
 logger = get_logger(__name__)
@@ -31,14 +32,31 @@ def domain_match(url: str, domains: list[str]) -> bool:
 
 
 _BAD_SUFFIX = (".local", ".localhost", ".svc", ".cluster.local", ".internal", ".lan", ".home.arpa")
+# public names that resolve to loopback or to an IP written into the name (DNS rebinding helpers)
+_LOOPBACK_DOMAINS = (
+    "localtest.me",
+    "lvh.me",
+    "vcap.me",
+    "localhost.direct",
+    "nip.io",
+    "sslip.io",
+    "xip.io",
+    "traefik.me",
+)
+_INTERNAL_FIRST_LABEL = ("intranet", "intra")  # intranet.bs.ch: an internal host under a public domain
 _NUMERIC_HOST = re.compile(r"(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+))*", re.I)
 
 
 def fetchable(url: str) -> bool:
     """Return whether a URL may be fetched: public http(s) pages only.
 
-    Rejected: other schemes, localhost and cluster-internal names, and private, loopback, link-local or reserved
-    IP literals (the scraper runs inside the cluster).
+    Rejected: other schemes; IP literals that are private, loopback, link-local or reserved; and host names that are
+    not public: single labels (``intranet``, ``open-webui``), names whose last label is not a public top-level
+    domain (Kubernetes ``svc.namespace`` and ``kubernetes.default``, ``.svc``, ``.cluster.local``, ``.internal``),
+    localhost-style names (``localhost``, ``localtest.me``, ``nip.io``) and ``intranet.*`` hosts. The scraper runs
+    inside the cluster and may reach internal hosts directly, so only names of the public DNS pass.
+
+    Not covered: a public name that resolves to an internal address, and redirects followed by the scraper.
     """
     try:
         u = urlparse(url.strip())
@@ -47,14 +65,23 @@ def fetchable(url: str) -> bool:
         return False
     if u.scheme not in ("http", "https") or not host:
         return False
-    if host == "localhost" or "." not in host and ":" not in host or host.endswith(_BAD_SUFFIX):
-        return False
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return not _NUMERIC_HOST.fullmatch(host)  # 2130706433 / 0x7f.1: inet_aton forms of an IP
+        return _public_name(host)
     ip = getattr(ip, "ipv4_mapped", None) or ip
     return ip.is_global and not ip.is_multicast
+
+
+def _public_name(host: str) -> bool:
+    labels = host.split(".")
+    if len(labels) < 2 or not all(labels) or _NUMERIC_HOST.fullmatch(host):  # 2130706433 / 0x7f.1: forms of an IP
+        return False
+    if host.endswith(_BAD_SUFFIX) or "localhost" in labels or labels[0] in _INTERNAL_FIRST_LABEL:
+        return False
+    if any(host == d or host.endswith("." + d) for d in _LOOPBACK_DOMAINS):
+        return False
+    return labels[-1] in TLDS
 
 
 class Tools:

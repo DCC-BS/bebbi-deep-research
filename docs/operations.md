@@ -52,6 +52,12 @@ The embed role needs `/v1/embeddings` on the same endpoint, or its own endpoint 
 | `RA_FIRECRAWL_URL`, `RA_FIRECRAWL_KEY` **S** | required / empty | Firecrawl v2 `/v2/scrape` |
 | MCP servers | in `presets.yaml` | URL per server, `enabled: false` keeps one configured but unused (statistik is off) |
 
+Pages are fetched only from public names: the engine refuses IP literals outside the public ranges, single-label
+names, names whose last label is not a public top-level domain (Kubernetes `svc.namespace`, `kubernetes.default`,
+`.svc`, `.cluster.local`, `.internal`), localhost-style names (`localtest.me`, `nip.io`, `sslip.io`) and `intranet.*`
+hosts, before Firecrawl is called. It does not resolve names, so a public name that points to an internal address and
+redirects followed by Firecrawl are not covered: keep Firecrawl's egress (proxy, `NO_PROXY`, NetworkPolicy) narrow.
+
 ### Own sources (uploaded files, knowledge bases)
 
 | Variable | Default | Meaning |
