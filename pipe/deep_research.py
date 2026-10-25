@@ -349,6 +349,34 @@ def _state(messages: list[dict]) -> dict:
     return {}
 
 
+async def _stored_parent(chat_id: str | None, metadata: dict | None) -> dict | None:
+    """The assistant message that the current user message answers, read from the chat in Open WebUI's database.
+
+    Since Open WebUI 0.12.4 context compaction also runs in short chats (user, assistant, user) that are over the token
+    threshold, and it summarizes the assistant message away, together with our state marker. The chat in the database
+    still has it."""
+    parent = ((metadata or {}).get("user_message") or {}).get("parentId")
+    if not (chat_id and isinstance(parent, str) and parent):
+        return None
+    from open_webui.models.chats import Chats
+
+    stored = await Chats.get_message_by_id_and_message_id(chat_id, parent)
+    return stored if isinstance(stored, dict) and stored.get("role", "assistant") == "assistant" else None
+
+
+async def _state_of_chat(messages: list[dict], chat_id: str | None, metadata: dict | None) -> dict:
+    """The chat state: from the assistant messages of the request, else (compaction removed them) from the database."""
+    if st := _state(messages):
+        return st
+    if any(m.get("role") == "assistant" for m in messages[:-1]):  # an answer without a marker: no state
+        return {}
+    try:
+        stored = await _stored_parent(chat_id, metadata)
+    except Exception:  # no Open WebUI around (script), or the lookup failed: as before, no state
+        return {}
+    return _state([{"role": "assistant", "content": stored.get("content") or ""}, {}]) if stored else {}
+
+
 _MD_SPECIAL = re.compile(r"([\\`*_\[\]<>!|~#])")
 
 
@@ -742,7 +770,7 @@ class Pipe:
                 plan, own_info = await change(st, instruction)
 
         try:
-            st = _state(messages)
+            st = await _state_of_chat(messages, __chat_id__, __metadata__)
             # --- running / finished job: report status or result
             if st.get("state") == "job":
                 if text.strip().strip(".!").lower() in CANCEL_WORDS:

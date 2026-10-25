@@ -679,3 +679,104 @@ def test_clarifying_questions_from_the_llm_are_plain_text():
     )
     html = _html(out)
     assert "<img" not in html and "<a " not in html and "<strong>" not in html.split("Antworten Sie kurz")[0]
+
+
+def _compacted_history(text: str = "Ist der Bericht schon fertig?"):
+    """What Open WebUI 0.12.4 hands the pipe after context compaction in a short chat (user, assistant, user): the
+    assistant message with our state marker is summarized away, only the summary and the new user message are left."""
+    return {
+        "model": "bebbi_deep_research.grossrat",
+        "messages": [
+            {"role": "system", "content": "[CONVERSATION SUMMARY]\n- user: Frage\n- assistant: Eingereicht"},
+            {"role": "user", "content": text},
+        ],
+    }
+
+
+def test_state_survives_context_compaction_by_reading_the_stored_parent_message(monkeypatch):
+    """Open WebUI 0.12.4 compacts the chat user, assistant, user once it is over the threshold (a per-chat or per-model
+    `compact_token_threshold`, or a very long task): the assistant message with the state marker disappears from the
+    request. The pipe must still report the queued job, not start a new research (found on the local 0.12.4 stack)."""
+    mod = load_pipe()
+    pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [{"text": "suche"}], "report": None}})
+    asked = []
+
+    async def stored(chat_id, metadata):
+        asked.append((chat_id, metadata["user_message"]["parentId"]))
+        return {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
+
+    monkeypatch.setattr(mod, "_stored_parent", stored)
+    meta = {"user_message": {"id": "u2", "parentId": "a1", "content": "fertig?"}}
+    out = asyncio.run(pipe.pipe(_compacted_history(), {"id": "u"}, __chat_id__="c1", __metadata__=meta))
+    assert asked == [("c1", "a1")]
+    assert "läuft noch" in out and [c[:2] for c in calls] == [("GET", "/jobs/j1?user_id=u")]
+
+
+def test_stored_parent_is_not_read_when_the_request_has_the_answer_or_no_parent(monkeypatch):
+    mod = load_pipe()
+
+    async def boom(chat_id, metadata):
+        raise AssertionError("the database must not be read")
+
+    monkeypatch.setattr(mod, "_stored_parent", boom)
+    meta = {"user_message": {"id": "u2", "parentId": "a1"}}
+    # the assistant message is in the request (no compaction): its marker counts, a missing marker is no state
+    with_marker = _job_history(mod)["messages"]
+    assert asyncio.run(mod._state_of_chat(with_marker, "c1", meta)) == {"state": "job", "job": "j1"}
+    no_marker = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "Bericht"},
+        {"role": "user", "content": "b"},
+    ]
+    assert asyncio.run(mod._state_of_chat(no_marker, "c1", meta)) == {}
+    # first message of a chat: no parent
+    first = [{"role": "user", "content": "Frage"}]
+    assert asyncio.run(mod._state_of_chat(first, "c1", {"user_message": {"id": "u1", "parentId": None}})) == {}
+    assert asyncio.run(mod._state_of_chat(first, "c1", None)) == {}
+
+
+def test_a_failing_or_foreign_lookup_gives_no_state(monkeypatch):
+    mod = load_pipe()
+    meta = {"user_message": {"id": "u2", "parentId": "a1"}}
+
+    async def fails(chat_id, metadata):
+        raise ImportError("no Open WebUI here")
+
+    monkeypatch.setattr(mod, "_stored_parent", fails)
+    assert asyncio.run(mod._state_of_chat(_compacted_history()["messages"], "c1", meta)) == {}
+
+    async def forged(chat_id, metadata):  # a marker with an id that would change the service path
+        return {"role": "assistant", "content": "x" + mod._marker({"state": "job", "job": "j1/../x"})}
+
+    monkeypatch.setattr(mod, "_stored_parent", forged)
+    assert asyncio.run(mod._state_of_chat(_compacted_history()["messages"], "c1", meta)) == {}
+
+
+def test_stored_parent_reads_the_chat_through_open_webui(monkeypatch):
+    """`_stored_parent` uses Chats.get_message_by_id_and_message_id(chat_id, message_id) (scripts/check_owui_internals.py
+    runs it against the real module)."""
+    import sys
+    import types
+
+    mod = load_pipe()
+    seen = []
+
+    class Chats:
+        @staticmethod
+        async def get_message_by_id_and_message_id(chat_id, message_id):
+            seen.append((chat_id, message_id))
+            return {"role": "assistant", "content": "x"} if message_id == "a1" else {"role": "user", "content": "y"}
+
+    pkg = types.ModuleType("open_webui")
+    models = types.ModuleType("open_webui.models")
+    chats = types.ModuleType("open_webui.models.chats")
+    chats.Chats = Chats
+    for name, module in (("open_webui", pkg), ("open_webui.models", models), ("open_webui.models.chats", chats)):
+        monkeypatch.setitem(sys.modules, name, module)
+    meta = lambda parent: {"user_message": {"parentId": parent}}  # noqa: E731
+    assert asyncio.run(mod._stored_parent("c1", meta("a1"))) == {"role": "assistant", "content": "x"}
+    assert asyncio.run(mod._stored_parent("c1", meta("u0"))) is None  # not an assistant message
+    assert (
+        asyncio.run(mod._stored_parent(None, meta("a1"))) is None and asyncio.run(mod._stored_parent("c1", {})) is None
+    )
+    assert seen == [("c1", "a1"), ("c1", "u0")]
