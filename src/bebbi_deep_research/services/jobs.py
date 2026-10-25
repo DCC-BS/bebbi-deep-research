@@ -78,6 +78,8 @@ def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]
             LlmSettings(
                 base_url=settings.llm_base_url,
                 api_key=settings.llm_api_key.replace("{job}", job_id),
+                embed_base_url=settings.llm_embed_base_url,
+                embed_api_key=settings.llm_embed_api_key.replace("{job}", job_id),
                 models={"think": settings.model_think, "fast": settings.model_fast, "embed": settings.model_embed},
                 extra_body={
                     r: b for r, b in (("think", settings.extra_body_think), ("fast", settings.extra_body_fast)) if b

@@ -44,6 +44,7 @@ secrets:
     RA_TOKEN: {required: true}           # bearer token, same value as the SERVICE_TOKEN valve of the pipe. Full trust: its holder can read all jobs
     RA_DATABASE_URL: {required: true}    # postgresql://user:password@host:5432/db; URL-encode special characters in the password (@ -> %40, / -> %2F, : -> %3A, # -> %23)
     RA_LLM_API_KEY: {required: false}
+    RA_LLM_EMBED_API_KEY: {required: false}   # only with env.RA_LLM_EMBED_BASE_URL (embeddings under another path)
     RA_SEARCH_KEY: {required: true}      # Serper key
     RA_FIRECRAWL_KEY: {required: false}
     OWUI_API_KEY: {required: false}      # API key of the Open WebUI admin service account (knowledge base retrieval, file dates)
