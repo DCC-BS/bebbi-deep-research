@@ -21,8 +21,8 @@ from bebbi_deep_research.models.research import (
 )
 from bebbi_deep_research.services.db import DB
 from bebbi_deep_research.services.docx_export import docx_filename, render_docx
-from bebbi_deep_research.services.jobs import in_window, new_id, runs_by_day
 from bebbi_deep_research.services.own_sources import describe, prepare, to_engine
+from bebbi_deep_research.services.policy import in_window, new_id, runs_by_day
 from bebbi_deep_research.services.report import build_sources, owui_source_events, ui_markdown
 from bebbi_deep_research.utils.app_config import AppConfig
 from bebbi_deep_research.utils.errors import conflict, invalid_request, not_found, rate_limited, user_error

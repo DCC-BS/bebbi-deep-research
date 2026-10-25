@@ -2,71 +2,24 @@
 
 import asyncio
 import json
-import re
 import time
 import uuid
 from collections.abc import Callable
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import httpx
-import openai
 from dcc_backend_common.logger import get_logger
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 
 from bebbi_deep_research.engine import LLM, ResearchAgent, Tools
 from bebbi_deep_research.engine.llm import LlmSettings
 from bebbi_deep_research.services.db import DB
 from bebbi_deep_research.services.own_sources import to_engine
+from bebbi_deep_research.services.policy import describe_error, in_window, runs_by_day
 from bebbi_deep_research.services.report import build_sources, owui_source_events, ui_markdown
 from bebbi_deep_research.utils.app_config import AppConfig
 
 logger = get_logger(__name__)
 LIVE = ("starting", "running")
 MAX_ATTEMPTS = 3  # a job that was interrupted (pod killed, stalled) this often is given up with an error
-_HOSTS = re.compile(
-    r"https?://\S+|\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b|\b(?:[\w-]+\.)+[A-Za-z]{2,}(?::\d+)?\b|\blocalhost(?::\d+)?\b"
-)
-
-
-def describe_error(e: BaseException) -> str:
-    """Return a German, user-facing reason for a failure (shown in the chat), followed by a short technical detail.
-
-    URLs, IP addresses and host names are removed from the detail.
-    """
-    detail = _HOSTS.sub("<host>", " ".join(str(getattr(e, "message", None) or e).split()))[:200]
-    rejected = isinstance(e, ModelHTTPError) and 400 <= e.status_code < 500 and e.status_code not in (408, 429)
-    if rejected or isinstance(
-        e, (openai.NotFoundError, openai.BadRequestError, openai.AuthenticationError, openai.PermissionDeniedError)
-    ):
-        reason = "Das Sprachmodell lehnt die Anfrage ab (Modellname oder Zugang falsch konfiguriert)."
-    elif isinstance(e, (ModelAPIError, openai.APIConnectionError, openai.APITimeoutError)):
-        reason = "Das Sprachmodell ist nicht erreichbar."
-    elif isinstance(e, UnexpectedModelBehavior):
-        reason = "Das Sprachmodell hat keine verwertbare Antwort geliefert."
-    elif isinstance(e, TimeoutError):
-        reason = "Die Recherche hat das Zeitlimit überschritten."
-    elif isinstance(e, httpx.HTTPError):
-        reason = "Ein Dienst der Recherche (Suche oder Seitenabruf) ist nicht erreichbar."
-    else:
-        reason = "Unerwarteter Fehler."
-    return (
-        f"{reason} Bitte versuchen Sie es später erneut oder wenden Sie sich an den Betrieb. "
-        f"(Technisch: {type(e).__name__}: {detail})"
-    )
-
-
-def in_window(settings: AppConfig, now: datetime | None = None) -> bool:
-    """Return whether `now` (default: the current time in the configured zone) is inside the night window."""
-    start, end = settings.window()
-    t = (now or datetime.now(ZoneInfo(settings.timezone))).time()
-    return (t >= start or t < end) if start > end else start <= t < end
-
-
-def runs_by_day(cfg, preset: str, depth: str) -> bool:
-    """Office hours: only quick runs of the focus engine (about 20-50k tokens, 2-3 min) start right away."""
-    p = cfg.presets.get(preset)
-    return depth == "quick" and p is not None and p.engine == "focus"
 
 
 def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]:
@@ -446,8 +399,3 @@ class JobRunner:
         else:
             logger.error("delivery failed", job=job["id"], chat=job["chat_id"], outcome=outcome)
         await self.db.execute("update jobs set delivery=:d where id=:i", d=outcome[:300], i=job["id"])
-
-
-def new_id() -> str:
-    """Return a new 12-character job or draft id."""
-    return uuid.uuid4().hex[:12]

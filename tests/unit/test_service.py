@@ -8,7 +8,7 @@ import pytest
 from dcc_backend_common.config import AppConfigError
 
 from bebbi_deep_research.services.db import DB
-from bebbi_deep_research.services.jobs import in_window
+from bebbi_deep_research.services.policy import in_window
 from bebbi_deep_research.utils.app_config import AppConfig, normalize_db_url
 
 from .conftest import DELIVERY, PLAN, FakeAgent, running, submit, utc_window, wait_status
@@ -30,7 +30,7 @@ async def test_probes_and_auth(tmp_path):
 def test_describe_error_names_the_cause_without_internal_hosts():
     from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
 
-    from bebbi_deep_research.services.jobs import describe_error
+    from bebbi_deep_research.services.policy import describe_error
 
     assert describe_error(ModelAPIError("gemma", "Connection error to http://vllm.ai.svc:8000")).startswith(
         "Das Sprachmodell ist nicht erreichbar"

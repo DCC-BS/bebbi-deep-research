@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from bebbi_deep_research.container import Container
 from bebbi_deep_research.routers import jobs, monitoring, research
-from bebbi_deep_research.services.jobs import describe_error
+from bebbi_deep_research.services.policy import describe_error
 from bebbi_deep_research.utils.app_config import AppConfig
 
 logger = get_logger(__name__)
