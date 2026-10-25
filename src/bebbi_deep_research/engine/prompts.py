@@ -168,6 +168,16 @@ Rules:
 - "assumptions": what you will assume if the user does not answer.
 - Write in the language of the task."""
 
+# Appended to CLARIFY when the pipe lets the service suggest the research profile (one Deep Research model in Open
+# WebUI; the user confirms or changes the suggestion before planning).
+CLARIFY_PRESET = """
+
+Also choose the research profile that fits the task best:
+{presets}
+Add "preset": "<name>" with exactly one of these names to the JSON. Prefer a specific profile over the broad web
+profile when the task names its subject (law, parliament, statistics, administration). Choose the profile for own
+documents only when the user has attached sources and asks about them."""
+
 EDIT_PLAN = """Update a research plan according to the user's instruction. Keep everything the user did not ask to change.
 
 CURRENT PLAN (JSON):

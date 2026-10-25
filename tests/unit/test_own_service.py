@@ -335,3 +335,16 @@ def test_source_events_and_word_file_use_the_labels():
     )
     assert "Hochgeladene Datei" in text and "Wissensbasis Personal" in text and "mcp" not in text.lower()
     assert re.search(r"Eigene Dokumente", text)
+
+
+async def test_clarify_suggests_a_preset_and_sees_sources_without_a_preset_rule(tmp_path):
+    async with running(tmp_path) as (c, app):
+        # Before a preset is chosen the model sees the attached sources (no preset's own-sources rule applies).
+        r = await c.post(
+            "/clarify",
+            json={"task": "Frage", "suggest_preset": True, "preset": "web_survey", "own_sources": own_payload()},
+        )
+        assert r.status_code == 200 and r.json()["preset"] == "grossrat"
+        kind, own = FakeAgent.own_seen[-1]
+        assert kind == "clarify" and own.files[0].name == "merkblatt.pdf"
+        assert "preset" not in (await c.post("/clarify", json={"task": "Frage"})).json()

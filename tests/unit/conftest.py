@@ -82,9 +82,10 @@ class FakeAgent:
     def __init__(self, job_id, on_event=None):
         self.job_id, self.on_event = job_id, on_event
 
-    async def clarify(self, task, own=None):
+    async def clarify(self, task, own=None, presets=None):
         FakeAgent.own_seen.append(("clarify", own))
-        return {"questions": ["Welcher Zeitraum?"], "assumptions": ["letzte 5 Jahre"]}
+        out = {"questions": ["Welcher Zeitraum?"], "assumptions": ["letzte 5 Jahre"]}
+        return {**out, "preset": "grossrat"} if presets and "grossrat" in presets else out
 
     async def plan(self, task, preset, budget, own=None):
         FakeAgent.own_seen.append(("plan", own))

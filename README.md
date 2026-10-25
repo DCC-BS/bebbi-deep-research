@@ -1,7 +1,8 @@
 # bebbi-deep-research
 
-Deep-research agent for **Bebbi Bot** (Open WebUI of the canton of Basel-Stadt). The user picks a model such as
-"Deep Research · Recht" in the chat, answers at most two clarifying questions, approves or edits a research plan, and
+Deep-research agent for **Bebbi Bot** (Open WebUI of the canton of Basel-Stadt). The user picks the model "Deep
+Research" in the chat, confirms where to research (the service suggests a preset such as Recht or Grosser Rat), answers
+at most two clarifying questions, approves or edits a research plan, and
 gets a cited German report back in the same chat. Heavy runs happen at night; quick runs of the focus engine may start
 during office hours.
 
@@ -12,7 +13,7 @@ tuning history) lives in the evaluation repository, see [docs/evaluation.md](doc
 
 ```mermaid
 flowchart LR
-    user([User]) --> owui["Open WebUI v0.12.3<br/>model: Deep Research · preset"]
+    user([User]) --> owui["Open WebUI v0.12.3<br/>model: Deep Research"]
     owui --> pipe["pipe/deep_research.py<br/>OWUI function (manifold)"]
     pipe -- "clarify · plan · edit · approve (ask-user card) · status<br/>HTTP + bearer token" --> svc
     svc -- "report and sources<br/>POST /api/v1/dcc/deep-research/deliver<br/>(shared secret)" --> owui
@@ -30,7 +31,8 @@ flowchart LR
     engine -- "knowledge_search (approved collections)" --> owui
 ```
 
-* **pipe** (`pipe/deep_research.py`): Open WebUI manifold function, one model per preset. Depends only on `httpx` and
+* **pipe** (`pipe/deep_research.py`): Open WebUI manifold function with one model, "Deep Research"; the user confirms
+  the suggested preset per task in an ask-user card (valve `PRESET_MODELS` lists one model per preset as before). Depends only on `httpx` and
   `pydantic`. The user approves, changes or discards the plan in Open WebUI's ask-user card; approved researches run in
   the night window. Keeps the job state in a hidden marker of the assistant message, emits the sources as native
   citations (`[n]` badges, source list) and attaches the Word file. `pipe/deep_research_download.py` is the action that
@@ -74,7 +76,7 @@ curl localhost:8088/health/liveness      # {"status":"up",...}; /health/readines
 uv run python scripts/install_pipe.py --service-url http://service:8088 --models   # pipe + valves (docs/integration.md)
 ```
 
-Open <http://localhost:3000>, pick "Deep Research · Grosser Rat" and ask a question. Without Open WebUI:
+Open <http://localhost:3000>, pick "Deep Research", ask a question and choose "Grosser Rat" in the card. Without Open WebUI:
 
 ```bash
 RA_TOKEN=... uv run python scripts/test_pipe.py "Welche Vorstösse zum Stadtklima gab es? Bitte schnell." grossrat   # service window must cover now

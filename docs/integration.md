@@ -64,7 +64,9 @@ Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py` (and `p
 | `DEFAULT_DEPTH` | `standard` | `quick`, `standard`, `deep`; the user can say "schnell" or "gründlich" in the question |
 | `DECISION_MINUTES` | `30` | how long the approve/change/discard card waits; no answer counts as no |
 | `POLL_SECONDS` | `10` | wait between checks whether the service has delivered a finished report (max 2 s per check) |
-| `PRESETS` | `rechtsrecherche:Recht,grossrat:Grosser Rat,statistik:Statistik,verwaltung_web:Verwaltung,web_survey:Web,dokumente:Eigene Dokumente` | `preset:label` pairs, one model per entry; preset names must exist in `presets.yaml` |
+| `PRESETS` | `rechtsrecherche:Recht,grossrat:Grosser Rat,statistik:Statistik,verwaltung_web:Verwaltung,web_survey:Web,dokumente:Eigene Dokumente` | `preset:label` pairs offered in the preset card, in this order; preset names must exist in `presets.yaml` |
+| `PRESET_MODELS` | `false` | also list one model per preset ("Deep Research · Recht", ...), which skip the preset card |
+| `DEFAULT_PRESET` | `verwaltung_web` | preset when the service suggests none and no card can be shown (no browser session) |
 | `OWN_SOURCES` | `true` | use the chat's uploaded files and knowledge bases as sources (section 5b); `false` ignores them |
 | `PUBLIC_URL` | empty | public base URL of Open WebUI for the links to uploaded files; empty = Open WebUI's `WEBUI_URL` setting, else the request URL. Set `WEBUI_URL` in production |
 | `OWN_MAX_FILES`, `OWN_MAX_FILE_CHARS` | `10`, `2000000` | files per research and extracted characters per file the pipe sends (the service applies its own limits too, [operations.md](operations.md)) |
@@ -127,14 +129,19 @@ knowledge base and file; keep it in the Secret only, and restrict ingress to the
 
 ## 4. Models (optional entries)
 
-The manifold creates the models automatically. `deploy/openwebui/models.json` adds names, descriptions and
-suggestion prompts per preset ("Deep Research · Recht", ...) in the format of `POST /api/v1/models/import`; set
+The manifold creates the model "Deep Research" (`bebbi_deep_research.auto`) automatically.
+`deploy/openwebui/models.json` adds its description and one suggestion prompt per preset in the format of
+`POST /api/v1/models/import`; set
 `access_grants` there. The entries set `capabilities.file_upload: true` (the chat offers file upload and knowledge bases, section 5b) and
 `file_context: false` (Open WebUI must not run its own retrieval on the message that the pipe interprets). In v0.11.4 a model without grants is visible to admins only (the old `access_control: null` no longer means public); the file grants read to everyone (`principal_type: user, principal_id: "*"`). Replace it with `principal_type: group` entries for Entra groups (G1 is optional).
 
 ## 5. Chat flow and the fallback
 
-1. First message: the pipe asks up to two clarifying questions (answer, or "weiter").
+1. First message: with the model "Deep Research", `POST /clarify` with `suggest_preset: true` returns the clarifying
+   questions and the preset that fits the task; the pipe shows an ask-user card "Wo soll recherchiert werden?" with that
+   preset first ("empfohlen") and the others below (descriptions from `GET /presets`). No answer: no research. The
+   chosen preset is kept in the state marker through the questions. Then the pipe asks up to two clarifying questions
+   (answer, or "weiter").
 2. Plan shown, then Open WebUI's ask-user card above the input field (`__event_call__` with `request:user_input`, the
    dialog Open WebUI v0.11 uses for its `ask_user` tool), in the same turn: **Freigeben** queues the job for the night
    window, **Ändern** opens an input dialog for the change, the plan is edited and the card shown again (max 3 changes,

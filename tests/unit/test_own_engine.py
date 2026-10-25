@@ -372,3 +372,29 @@ async def test_evidence_items_rank_uploads_and_cap_them():
     files = [OwnFile(f"f{i}", f"doc{i}.txt", ("Reise " if i == 3 else "Nichts ") * 2000) for i in range(6)]
     items = await evidence_items(make_own(files=files, collections=[]), FakeLLM(), ["Reise"], max_files=2)
     assert len(items) == 2 and items[0]["title"] == "doc3.txt" and items[0]["kind"] == "upload"
+
+
+# ----------------------------------------------------------------------------------- preset suggestion
+PRESETS = {"grossrat": "Grosser Rat", "web_survey": "Web"}
+
+
+async def test_clarify_suggests_one_of_the_presets():
+    llm = FakeLLM(json_out={"clarify": {"questions": ["Zeitraum?"], "assumptions": [], "preset": "grossrat"}})
+    agent = make_agent(llm)
+    out = await agent.clarify("Vorstösse zum Wohnschutz", presets=PRESETS)
+    assert out["preset"] == "grossrat" and out["questions"] == ["Zeitraum?"]
+    assert "- grossrat: Grosser Rat" in llm.prompts[0] and '"preset"' in llm.prompts[0]
+
+
+async def test_a_suggestion_outside_the_presets_is_none():
+    llm = FakeLLM(json_out={"clarify": {"questions": [], "assumptions": [], "preset": "erfunden"}})
+    assert (await make_agent(llm).clarify("Frage", presets=PRESETS))["preset"] is None
+
+
+async def test_a_detailed_task_gets_a_suggestion_but_no_questions():
+    llm = FakeLLM(json_out={"clarify": {"questions": ["Zeitraum?"], "assumptions": ["a"], "preset": "web_survey"}})
+    out = await make_agent(llm).clarify("x" * 700, presets=PRESETS)
+    assert out == {"questions": [], "assumptions": [], "preset": "web_survey"}
+    # Without presets a detailed task needs no model call at all.
+    llm2 = FakeLLM()
+    assert await make_agent(llm2).clarify("x" * 700) == {"questions": [], "assumptions": []} and not llm2.prompts

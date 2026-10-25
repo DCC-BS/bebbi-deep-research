@@ -80,9 +80,16 @@ class ResearchAgent:
                 await r
 
     # ------------------------------------------------------- chat turns
-    async def clarify(self, task: str, own: "O.OwnSources | None" = None) -> dict:
-        """At most 2 clarifying questions; none for detailed tasks (they already state their scope)."""
-        if len(task) > 600:
+    async def clarify(
+        self, task: str, own: "O.OwnSources | None" = None, presets: dict[str, str] | None = None
+    ) -> dict:
+        """At most 2 clarifying questions; none for detailed tasks (they already state their scope).
+
+        With `presets` (name -> description) the answer also has "preset": the profile that fits the task best, or
+        None if the model named none of them. Detailed tasks then still get a suggestion, but no questions.
+        """
+        detailed = len(task) > 600
+        if detailed and not presets:
             return {"questions": [], "assumptions": []}
         if own and (own.files or own.collections):
             task += (
@@ -93,11 +100,14 @@ class ResearchAgent:
                 + ". Phrases like 'my document' or 'the attached file' mean them. Never ask the user to upload or "
                 "provide them again.)"
             )
+        prompt = P.CLARIFY.format(task=task)
+        if presets:
+            prompt += P.CLARIFY_PRESET.format(presets="\n".join(f"- {n}: {d}" for n, d in presets.items()))
         data = (
             await self.llm.json(
                 "fast",
                 "You decide whether a research task needs clarification. Output JSON only.",
-                P.CLARIFY.format(task=task),
+                prompt,
                 step="clarify",
                 default={},
             )
@@ -105,10 +115,13 @@ class ResearchAgent:
         )
         if not isinstance(data, dict):
             data = {}
-        return {
-            "questions": [str(q) for q in data.get("questions") or []][:2],
-            "assumptions": [str(a) for a in data.get("assumptions") or []][:5],
+        out = {
+            "questions": [] if detailed else [str(q) for q in data.get("questions") or []][:2],
+            "assumptions": [] if detailed else [str(a) for a in data.get("assumptions") or []][:5],
         }
+        if presets:
+            out["preset"] = data.get("preset") if data.get("preset") in presets else None
+        return out
 
     async def edit_plan(self, plan: dict, instruction: str, task: str, preset: Preset, budget: Budget) -> dict:
         """Change a plan as the user asked; keep the old plan if the answer is not a valid plan."""

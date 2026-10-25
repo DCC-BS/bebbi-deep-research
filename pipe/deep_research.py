@@ -5,8 +5,11 @@ version: 1.0.0
 requirements: httpx
 """
 
-# Open WebUI pipe function (manifold): one model per research preset, e.g. "Deep Research · Recht".
+# Open WebUI pipe function (manifold): one model "Deep Research" (id auto); the research preset (Recht, Grosser Rat,
+# ...) is chosen per task. The valve PRESET_MODELS also lists one model per preset, which skips the choice.
 # Conversation flow, tracked with a hidden state marker in the assistant message:
+#   0. model "Deep Research": the service suggests a preset for the task, the user confirms or picks another in
+#      Open WebUI's ask-user card (no answer: no research)
 #   1. user task -> clarifying questions (if needed)          state=clarify
 #   2. answers / task -> research plan for approval            state=plan
 #   3. the user decides in Open WebUI's ask-user card, in the same turn: Freigeben -> job queued for the night window
@@ -35,6 +38,7 @@ ATTACHED = re.compile(
 # The plan is approved, changed or discarded in Open WebUI's ask-user card only (buttons, see Pipe._decide). No answer
 # (card closed or timed out, browser gone, no browser session) counts as "no": nothing runs, a new message starts over.
 APPROVE, CHANGE, DISCARD = "Freigeben", "Ändern", "Verwerfen"
+AUTO = "auto"  # id of the one model that lets the user choose the preset per task
 DEPTH_WORDS = {
     "quick": re.compile(r"\b(schnell|kurz|quick)\b", re.I),
     "deep": re.compile(r"\b(gründlich|gruendlich|tief|deep)\b", re.I),
@@ -342,6 +346,11 @@ def _render_plan(plan: dict, depth: str, own: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def _with_preset(shown: str, label: str) -> str:
+    """The plan with the chosen preset named in its last line (model "Deep Research" only)."""
+    return shown[: -len(".")] + f", Recherche: **{label}**." if label else shown
+
+
 class Pipe:
     class Valves(BaseModel):
         SERVICE_URL: str = Field(
@@ -360,7 +369,15 @@ class Pipe:
                 "rechtsrecherche:Recht,grossrat:Grosser Rat,statistik:Statistik,verwaltung_web:Verwaltung,"
                 "web_survey:Web,dokumente:Eigene Dokumente"
             ),
-            description="preset:label pairs shown as models",
+            description="preset:label pairs offered in the preset choice (order of the card)",
+        )
+        PRESET_MODELS: bool = Field(
+            default=False,
+            description="also list one model per preset (Deep Research · Label), which skip the preset choice",
+        )
+        DEFAULT_PRESET: str = Field(
+            default="verwaltung_web",
+            description="preset when the service suggests none and no choice is possible (no browser session)",
         )
         OWN_SOURCES: bool = Field(
             default=True, description="use the chat's uploaded files and knowledge bases as sources"
@@ -378,11 +395,19 @@ class Pipe:
         self.type = "manifold"
         self.valves = self.Valves()
 
-    def pipes(self) -> list[dict]:
-        out = []
+    def _labels(self) -> dict[str, str]:
+        """preset name -> label from the PRESETS valve, in its order."""
+        out = {}
         for pair in self.valves.PRESETS.split(","):
             name, _, label = pair.partition(":")
-            out.append({"id": name.strip(), "name": f"Deep Research · {label.strip() or name.strip()}"})
+            if name.strip():
+                out[name.strip()] = label.strip() or name.strip()
+        return out
+
+    def pipes(self) -> list[dict]:
+        out = [{"id": AUTO, "name": "Deep Research"}]
+        if self.valves.PRESET_MODELS:
+            out += [{"id": name, "name": f"Deep Research · {label}"} for name, label in self._labels().items()]
         return out
 
     async def _api(self, method: str, path: str, body: dict | None = None) -> dict:
@@ -457,6 +482,56 @@ class Pipe:
             self.valves.OWN_MAX_FILES,
             self.valves.OWN_MAX_FILE_CHARS,
         )
+
+    async def _choose_preset(self, call, suggested: str | None) -> str | None:
+        """Let the user confirm the suggested preset or pick another in Open WebUI's ask-user card.
+
+        Returns the preset name, None when there is no answer (card closed or timed out, browser gone). Without a
+        browser session (no card possible) the suggestion, else DEFAULT_PRESET, is taken."""
+        labels = self._labels()
+        if suggested not in labels:
+            suggested = None
+        if call is None:
+            return suggested or self.valves.DEFAULT_PRESET
+        try:
+            descriptions = {p["name"]: p.get("description", "") for p in await self._api("GET", "/presets")}
+        except Exception:
+            descriptions = {}
+        names = ([suggested] if suggested else []) + [n for n in labels if n != suggested]
+        options = [
+            {
+                "label": labels[n] + (" (empfohlen)" if n == suggested else ""),
+                "description": descriptions.get(n, ""),
+            }
+            for n in names
+        ]
+        seconds = 60 * max(1, self.valves.DECISION_MINUTES)
+        question = {
+            "id": "preset",
+            "header": "Recherche",
+            "question": "Wo soll recherchiert werden?",
+            "options": options,
+            "allow_other": False,
+        }
+        try:
+            res = await asyncio.wait_for(
+                call(
+                    {
+                        "type": "request:user_input",
+                        "data": {"questions": [question], "allow_other": False, "timeout_ms": seconds * 1000},
+                    }
+                ),
+                timeout=seconds + 30,
+            )
+        except Exception:
+            return None
+        answer = (
+            ((res or {}).get("answers") or {}).get("preset")
+            if isinstance(res, dict) and res.get("status") == "answered"
+            else None
+        )
+        index = answer.get("option_index") if isinstance(answer, dict) and answer.get("type") == "option" else None
+        return names[index] if isinstance(index, int) and 0 <= index < len(names) else None
 
     async def _decide(self, call, can_change: bool) -> tuple[str, str]:
         """Ask the user what happens with the plan.
@@ -564,6 +639,7 @@ class Pipe:
         text = ATTACHED.sub("", typed if isinstance(typed, str) and typed.strip() else text)
         chat_files = list(__files__ or (__metadata__ or {}).get("files") or body.get("files") or [])
         preset = body.get("model", "").split(".")[-1]
+        choose = preset not in self._labels()  # model "Deep Research": the preset is chosen per task
         st: dict = {}
         uid = (__user__ or {}).get("id") or "?"
 
@@ -602,7 +678,7 @@ class Pipe:
         async def review(plan: dict, own_info: dict | None, st: dict) -> str:
             """Show the plan and let the user decide in the card: start, change (plan shown again) or discard."""
             while True:
-                shown = _render_plan(plan, st["depth"], own_info)
+                shown = _with_preset(_render_plan(plan, st["depth"], own_info), st.get("label", ""))
                 if __event_call__ is not None and __event_emitter__:
                     await __event_emitter__(
                         {"type": "replace", "data": {"content": shown}}
@@ -641,14 +717,30 @@ class Pipe:
             )  # previews: enough to clarify and plan
             if st.get("state") == "clarify":
                 task, depth = st["task"] + "\n\nPräzisierungen: " + text, st.get("depth", depth)
+                if choose:  # the preset chosen before the questions (a forged one falls back to the default)
+                    preset = st.get("preset") if st.get("preset") in self._labels() else self.valves.DEFAULT_PRESET
             else:
                 task = text
                 await status("Prüfe, ob Rückfragen nötig sind")
                 c = await self._api(
                     "POST",
                     "/clarify",
-                    {"task": task, "preset": preset, "depth": depth, **({"own_sources": own} if own else {})},
+                    {
+                        "task": task,
+                        **({"suggest_preset": True} if choose else {"preset": preset}),
+                        "depth": depth,
+                        **({"own_sources": own} if own else {}),
+                    },
                 )
+                if choose:
+                    await status("Wählen Sie, wo recherchiert wird", done=True)
+                    picked = await self._choose_preset(__event_call__, c.get("preset"))
+                    if picked is None:
+                        return (
+                            "*Keine Auswahl erhalten, es wurde keine Recherche gestartet. "
+                            "Stellen Sie die Frage erneut, um neu zu beginnen.*"
+                        )
+                    preset = picked
                 if c["questions"]:
                     await status("Rückfragen", done=True)
                     qs = "\n".join(f"{i}. {q}" for i, q in enumerate(c["questions"], 1))
@@ -660,7 +752,9 @@ class Pipe:
                     return (
                         f"Bevor ich den Rechercheplan erstelle:\n\n{qs}{assume}\n\nAntworten Sie kurz "
                         "(oder mit **weiter**, um mit diesen Annahmen fortzufahren)."
-                    ) + _marker({"state": "clarify", "task": task, "depth": depth})
+                    ) + _marker(
+                        {"state": "clarify", "task": task, "depth": depth, **({"preset": preset} if choose else {})}
+                    )
             await status("Erstelle Rechercheplan")
             res = await self._api(
                 "POST",
@@ -675,6 +769,8 @@ class Pipe:
             )
             await status("Plan erstellt", done=True)
             st = {"state": "plan", "draft": res["draft_id"], "depth": depth}
+            if choose:
+                st["label"] = self._labels().get(preset, preset)
             return await review(res["plan"], res.get("own_sources"), st)
         except Exception as e:
             if isinstance(e, NotFound):

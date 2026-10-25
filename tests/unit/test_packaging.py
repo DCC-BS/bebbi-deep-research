@@ -42,4 +42,7 @@ def test_pipe_valve_presets_exist():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     cfg = yaml.safe_load((ROOT / "config/presets.yaml").read_text())
-    assert {m["id"] for m in mod.Pipe().pipes()} <= set(cfg["presets"])
+    pipe = mod.Pipe()
+    assert set(pipe._labels()) == set(cfg["presets"])
+    pipe.valves.PRESET_MODELS = True
+    assert {m["id"] for m in pipe.pipes()} <= set(cfg["presets"]) | {mod.AUTO}
