@@ -46,6 +46,58 @@ async def test_search_returns_nothing_on_errors_and_bad_json():
     assert await make_tools(boom).search("q") == []
 
 
+class LogRecorder:
+    """Stands in for a structlog logger: records (level, event, fields)."""
+
+    def __init__(self):
+        self.lines = []
+
+    def __getattr__(self, level):
+        return lambda event, **fields: self.lines.append((level, event, fields))
+
+
+@pytest.fixture
+def logs(monkeypatch):
+    rec = LogRecorder()
+    monkeypatch.setattr(T, "logger", rec)
+    return rec
+
+
+@pytest.mark.parametrize(("status", "level"), [(401, "error"), (403, "error"), (429, "warning"), (503, "warning")])
+async def test_search_http_errors_are_counted_and_logged_with_the_host_only(logs, status, level):
+    t = make_tools(lambda r: httpx.Response(status, json={"message": "quota"}))
+    assert await t.search("geheime frage") == []
+    assert t.errors == {f"search:{status}": 1}
+    assert logs.lines == [(level, "search failed", {"tool": "search", "reason": str(status), "host": "s"})]
+    assert "geheime" not in repr(logs.lines)
+
+
+async def test_search_transport_errors_and_bad_json_are_counted(logs):
+    def boom(req):
+        raise httpx.ReadTimeout("slow")
+
+    t = make_tools(boom)
+    await t.search("q")
+    t.http = make_tools(lambda r: httpx.Response(200, text="<html>")).http
+    await t.search("q")
+    assert t.errors == {"search:ReadTimeout": 1, "search:bad_json": 1}
+    assert [line[0] for line in logs.lines] == ["warning", "warning"]
+
+
+async def test_fetch_errors_are_counted_and_logged_with_the_page_host_only(logs):
+    t = make_tools(lambda r: httpx.Response(500, json={"success": False}))
+    assert await t.fetch_meta("https://www.bs.ch/private/path?x=1") == ("", "", "")
+    assert t.errors == {"fetch:500": 1}
+    assert logs.lines == [("warning", "fetch failed", {"tool": "fetch", "reason": "500", "host": "www.bs.ch"})]
+
+
+async def test_successful_calls_count_no_errors(logs):
+    t = make_tools(lambda r: httpx.Response(200, json={"organic": [], "data": {"markdown": "x"}}))
+    await t.search("q")
+    await t.fetch_meta("https://a.ch/")
+    assert t.errors == {} and logs.lines == []
+
+
 async def test_fetch_meta_maps_firecrawl_title_text_and_date():
     seen = []
 

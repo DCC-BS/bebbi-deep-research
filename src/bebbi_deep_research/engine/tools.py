@@ -6,11 +6,15 @@ import json
 import re
 import threading
 import time
+from collections import Counter
 from urllib.parse import urlparse
 
 import httpx
+from dcc_backend_common.logger import get_logger
 
 from .vectors import scores
+
+logger = get_logger(__name__)
 
 
 def domain(url: str) -> str:
@@ -53,31 +57,59 @@ def fetchable(url: str) -> bool:
 
 
 class Tools:
-    """Web search (Serper) and page fetching (Firecrawl) for one research."""
+    """Web search (Serper) and page fetching (Firecrawl) for one research.
+
+    Attributes:
+        errors: Failed calls of this research by ``"<tool>:<reason>"`` (reason: HTTP status, exception name or
+            ``bad_json``), e.g. ``{"search:429": 2}``.
+    """
 
     def __init__(self, search_url: str, search_key: str, firecrawl_url: str, firecrawl_key: str = ""):
         """Create the HTTP client for search and fetch."""
         self.search_url, self.search_key = search_url, search_key
         self.firecrawl_url, self.firecrawl_key = firecrawl_url, firecrawl_key
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=150, write=30, pool=60))
+        self.errors: Counter[str] = Counter()
+
+    def _failed(self, tool: str, reason: str, url: str) -> None:
+        """Count and log a failed search or fetch; the log names the host only (queries and paths may be personal).
+
+        401 and 403 mean a wrong key or a blocked account and are logged as errors; the rest as warnings.
+        """
+        self.errors[f"{tool}:{reason}"] += 1
+        log = logger.error if reason in ("401", "403") else logger.warning
+        log(f"{tool} failed", tool=tool, reason=reason, host=urlparse(url).hostname or "")
 
     async def search(self, q: str, lang: str = "de", num: int = 8) -> list[dict]:
-        """Search the web (Swiss results); return title, URL, snippet and date per hit, [] on errors."""
+        """Search the web (Swiss results); return title, URL, snippet and date per hit.
+
+        A failure (HTTP status other than 200, transport error, unreadable body) returns [] and is counted in
+        `errors` and logged, so a wrong key or an exhausted quota shows up instead of looking like "no results".
+        """
         body = {"q": q, "num": num, "gl": "ch", "hl": lang if lang in ("de", "fr", "it", "en") else "de"}
         try:
             r = await self.http.post(self.search_url, json=body, headers={"X-API-KEY": self.search_key})
-            return [
-                {
-                    "title": o.get("title", ""),
-                    "url": o.get("link", ""),
-                    "snippet": o.get("snippet", ""),
-                    "date": o.get("date", ""),
-                }
-                for o in (r.json().get("organic") or [])
-                if o.get("link")
-            ]
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError as e:
+            self._failed("search", type(e).__name__, self.search_url)
             return []
+        if r.status_code != 200:
+            self._failed("search", str(r.status_code), self.search_url)
+            return []
+        try:
+            organic = r.json().get("organic") or []
+        except (ValueError, AttributeError):
+            self._failed("search", "bad_json", self.search_url)
+            return []
+        return [
+            {
+                "title": o.get("title", ""),
+                "url": o.get("link", ""),
+                "snippet": o.get("snippet", ""),
+                "date": o.get("date", ""),
+            }
+            for o in organic
+            if isinstance(o, dict) and o.get("link")
+        ]
 
     async def fetch(self, url: str) -> tuple[str, str]:
         """Returns (title, markdown); empty markdown if the page could not be fetched."""
@@ -85,7 +117,11 @@ class Tools:
         return title, text
 
     async def fetch_meta(self, url: str) -> tuple[str, str, str]:
-        """Returns (title, markdown, date): the date is the page's published/modified date if it states one."""
+        """Returns (title, markdown, date): the date is the page's published/modified date if it states one.
+
+        A failed scrape (HTTP status other than 200, transport error, unreadable body) returns empty strings and is
+        counted in `errors` and logged with the page's host.
+        """
         if not fetchable(url):
             return "", "", ""
         try:
@@ -94,6 +130,13 @@ class Tools:
                 json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
                 headers={"Authorization": f"Bearer {self.firecrawl_key}"},
             )
+        except httpx.HTTPError as e:
+            self._failed("fetch", type(e).__name__, url)
+            return "", "", ""
+        if r.status_code != 200:
+            self._failed("fetch", str(r.status_code), url)
+            return "", "", ""
+        try:
             data = r.json().get("data") or {}
             meta = data.get("metadata") or {}
             date = next(
@@ -117,7 +160,8 @@ class Tools:
                 data.get("markdown") or "",
                 date,
             )
-        except (httpx.HTTPError, ValueError):
+        except (ValueError, AttributeError):
+            self._failed("fetch", "bad_json", url)
             return "", "", ""
 
 

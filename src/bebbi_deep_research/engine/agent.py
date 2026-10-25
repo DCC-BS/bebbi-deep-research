@@ -898,6 +898,7 @@ class ResearchAgent:
                 "fetched": len(led.fetched),
                 "queries": len(led.queries),
                 "must_name_missing": missing,
+                "tool_errors": dict(getattr(self.tools, "errors", {})),
                 "runtime_s": round(time.time() - started, 1),
             }
         )

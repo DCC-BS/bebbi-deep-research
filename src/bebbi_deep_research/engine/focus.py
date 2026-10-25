@@ -249,6 +249,7 @@ class FocusEngine:
                 "engine": "focus",
                 "tools_used": _count(t["tool"] for t in trail),
                 "mcp_errors": dict(self.agent._mcp_errors),
+                "tool_errors": dict(getattr(self.tools, "errors", {})),
             }
         )
         u = self.llm.usage
