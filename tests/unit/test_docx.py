@@ -103,9 +103,7 @@ def test_citations_link_to_sources_and_source_list_has_hyperlinks():
     assert anchors.count("quelle_1") >= 2 and "quelle_2" in anchors and "quelle_2024" not in anchors
     bookmarks = {b.get(qn("w:name")) for b in body.iter(qn("w:bookmarkStart"))}
     assert bookmarks == {"quelle_1", "quelle_2"}
-    assert {"https://grosserrat.bs.ch/a", "https://www.fedlex.admin.ch/x", "https://example.org/a"} <= external_links(
-        doc
-    )
+    assert external_links(doc) == {"https://grosserrat.bs.ch/a"}  # only registered source URLs (see below)
     listing = [t for t in texts(doc) if t.startswith("[1]\t")]
     assert len(listing) == 1 and "Vorstoss A" in listing[0] and "https://grosserrat.bs.ch/a" in listing[0]
     assert "Stand 2023-05-01; abgerufen am 2026-10-09; Art der Quelle: Web" in listing[0]
@@ -155,3 +153,23 @@ def test_control_characters_do_not_break_the_export():
     data = render_docx(report, sources, task="Fra\x1bge", preset="grossrat", depth="quick", finished=1760000000.0)
     text = "\n".join(p.text for p in Document(BytesIO(data)).paragraphs)
     assert "Der Grosse Rat" in text and "\x1b" not in text
+
+
+def test_only_registered_source_urls_become_links():
+    md = MD.replace(
+        "Siehe auch [Fedlex]",
+        "Siehe [§ 12 Personalgesetz](https://evil.example/login), [Vorstoss A](https://grosserrat.bs.ch/a), "
+        "<https://evil.example/auto> und [Fedlex]",
+    )
+    doc, _ = render(md)
+    assert external_links(doc) == {"https://grosserrat.bs.ch/a"}
+    para = next(p for p in doc.paragraphs if p.text.startswith("Der Grosse Rat"))
+    assert "Siehe § 12 Personalgesetz, Vorstoss A, <https://evil.example/auto> und Fedlex" in para.text
+    assert "https://example.org/a" in para.text  # a bare URL that is not a source stays as plain text
+    link_texts = ["".join(t.text for t in h.iter(qn("w:t"))) for h in para._p.iter(qn("w:hyperlink"))]
+    assert "Vorstoss A" in link_texts and "§ 12 Personalgesetz" not in link_texts
+
+
+def test_report_without_sources_has_no_external_links():
+    doc = Document(BytesIO(render_docx("# T\n\n[Hier](https://evil.example/x) und https://evil.example/y", [])))
+    assert external_links(doc) == set() and "Hier und https://evil.example/y" in texts(doc)

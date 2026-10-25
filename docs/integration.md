@@ -228,7 +228,8 @@ returns itself (later message, fallback above): it carries no marker either.
 * `GET /jobs/{id}/report.docx` (bearer token) returns the Word file for n8n and other apps (409 while the job runs).
   python-docx renders title, header block (question, date, preset, depth), headings, lists, Markdown tables as Word tables,
   citations as links to the source list, the source list with hyperlinks, Stand and retrieval date, and a footer.
-  Rendering is on demand from the stored report; old jobs work too.
+  As in the chat (`sanitize_markdown`), only links to registered source URLs become hyperlinks; any other link or bare
+  URL in the report stays plain text. Rendering is on demand from the stored report; old jobs work too.
 
 
 ## 5b. Own sources: uploaded files and knowledge bases (requirement A4)
