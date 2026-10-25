@@ -4,8 +4,9 @@ Validation and limits, the storage format, and the link to Open WebUI's retrieva
 
 The pipe (running inside Open WebUI as the user) decides what the user may read and sends file texts and knowledge base
 ids with the plan and the job. The service stores them with the job, so a night run does not depend on the user's
-session, and passes them to the engine (`research_agent/own.py`). Knowledge bases are queried with the service's admin
-key, but only with the ids that were stored with the job, never with ids the model or a request made up at run time.
+session, and passes them to the engine (`engine/own.py`); the file texts are removed when the job ends. Knowledge
+bases are queried with the service's admin key, but only with the ids that were stored with the job, never with ids
+the model or a request made up at run time.
 """
 
 from datetime import UTC, datetime
@@ -94,6 +95,16 @@ def describe(stored: dict | None) -> dict | None:
     }
 
 
+def without_texts(stored: dict | None) -> dict | None:
+    """The stored record without the file texts (kept: names, sizes, ids, links, knowledge bases, notes).
+
+    A finished job needs no texts: delivery and the job views use the report, the evidence and `describe`.
+    """
+    if not stored:
+        return stored
+    return {**stored, "files": [{k: v for k, v in f.items() if k != "text"} for f in stored.get("files", [])]}
+
+
 class OwuiRetriever:
     """Passages of one Open WebUI knowledge base: POST /api/v1/retrieval/query/collection with the service's admin key.
 
@@ -131,7 +142,7 @@ class OwuiRetriever:
         s = self.settings
         if not (s.owui_url and s.owui_api_key):
             raise RuntimeError("OWUI_URL / OWUI_API_KEY not configured")
-        logger.debug("knowledge query", collection=collection.id, name=collection.name, query=query[:80])
+        logger.info("knowledge query", collection=collection.id, name=collection.name)  # never the query text
         async with self.http_factory() as http:
             r = await http.post(
                 f"{s.owui_url}/api/v1/retrieval/query/collection",

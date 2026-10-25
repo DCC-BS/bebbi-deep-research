@@ -19,6 +19,7 @@ requirements: httpx
 
 import asyncio
 import base64
+import contextvars
 import io
 import json
 import re
@@ -39,6 +40,24 @@ ATTACHED = re.compile(
 # (card closed or timed out, browser gone, no browser session) counts as "no": nothing runs, a new message starts over.
 APPROVE, CHANGE, DISCARD = "Freigeben", "Ändern", "Verwerfen"
 AUTO = "auto"  # id of the one model that lets the user choose the preset per task
+CANCEL_WORDS = {"abbrechen", "recherche abbrechen", "stopp"}  # the whole message, nothing else, cancels a queued job
+CANCELLED = "Die Recherche wurde abgebrochen. Es wird kein Bericht erstellt."
+# Version of the service API this pipe speaks (service: routers/contract.py). Sent with every call; the service refuses
+# another version with a German message, so a pipe and a service that do not fit together fail visibly.
+API_VERSION = "1"
+# Correlation id of the current chat turn, sent as X-Request-ID: "<chat_id>:<message_id>". The service logs it with
+# every request and stores it with the job, so the night run's log lines lead back to the chat message.
+REQUEST_ID: contextvars.ContextVar[str] = contextvars.ContextVar("dr_request_id", default="")
+_UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]")
+
+
+def request_id(chat_id, message_id) -> str:
+    """The X-Request-ID of a chat turn ("" without a chat, then the service makes its own)."""
+    if not chat_id:
+        return ""
+    return _UNSAFE.sub("", f"{chat_id}:{message_id or ''}")[:200]
+
+
 DEPTH_WORDS = {
     "quick": re.compile(r"\b(schnell|kurz|quick)\b", re.I),
     "deep": re.compile(r"\b(gründlich|gruendlich|tief|deep)\b", re.I),
@@ -330,17 +349,29 @@ def _state(messages: list[dict]) -> dict:
     return {}
 
 
+_MD_SPECIAL = re.compile(r"([\\`*_\[\]<>!|~#])")
+
+
+def _plain(value, limit: int = 1000) -> str:
+    """LLM-written text (plan, clarifying questions) as plain text in the chat: one line, Markdown characters escaped.
+
+    The planner sees web snippets, so its text is untrusted: an image (`![](https://...)` loads without a click and
+    could carry the task away), a link or raw HTML must not render. Escaped, they show as the characters they are.
+    """
+    return _MD_SPECIAL.sub(r"\\\1", " ".join(str(value or "").split())[:limit])
+
+
 def _render_plan(plan: dict, depth: str, own: dict | None = None) -> str:
-    lines = [f"**Rechercheplan: {plan['title']}**", "", f"*Auftrag:* {plan['task_core']}", ""]
+    lines = [f"**Rechercheplan: {_plain(plan['title'], 200)}**", "", f"*Auftrag:* {_plain(plan['task_core'])}", ""]
     for p in plan["parts"]:
         lines += [
-            f"**{p['title']}**: {p['goal']}",
+            f"**{_plain(p['title'], 200)}**: {_plain(p['goal'])}",
             "",
         ]  # blank lines: else the next part title becomes part of the last list item
-        lines += [f"- {q['text']}" for q in plan["sub_questions"] if q["part"] == p["id"]]
+        lines += [f"- {_plain(q['text'])}" for q in plan["sub_questions"] if q["part"] == p["id"]]
         lines.append("")
     if plan.get("must_name"):
-        lines += ["", f"*Muss abgedeckt werden:* {', '.join(plan['must_name'])}"]
+        lines += ["", f"*Muss abgedeckt werden:* {', '.join(_plain(m, 200) for m in plan['must_name'])}"]
     own_lines = _own_lines(own)
     if own_lines:
         lines += [""] + [ln + "  " for ln in own_lines[:-1]] + own_lines[-1:]
@@ -412,14 +443,19 @@ class Pipe:
             out += [{"id": name, "name": f"Deep Research · {label}"} for name, label in self._labels().items()]
         return out
 
+    def _headers(self) -> dict[str, str]:
+        rid = REQUEST_ID.get()
+        return {
+            "Authorization": f"Bearer {self.valves.SERVICE_TOKEN}",
+            "X-DR-API-Version": API_VERSION,
+            **({"X-Request-ID": rid} if rid else {}),
+        }
+
     async def _api(self, method: str, path: str, body: dict | None = None) -> dict:
         try:
             async with httpx.AsyncClient(timeout=300) as http:
                 r = await http.request(
-                    method,
-                    self.valves.SERVICE_URL.rstrip("/") + path,
-                    json=body,
-                    headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}"},
+                    method, self.valves.SERVICE_URL.rstrip("/") + path, json=body, headers=self._headers()
                 )
         except httpx.TransportError as e:
             raise RuntimeError(
@@ -433,16 +469,19 @@ class Pipe:
             detail = body.get("debugMessage") or body.get("detail") or r.text
             if r.status_code == 404:
                 raise NotFound(detail)
-            raise (UserError if r.status_code == 422 and isinstance(detail, str) else RuntimeError)(detail)
+            if r.status_code == 422 and not isinstance(detail, str):  # request validation: the API does not fit
+                raise RuntimeError(
+                    "Der Recherche-Dienst versteht die Anfrage nicht (die Versionen von Pipe und Dienst passen "
+                    "nicht zusammen). Bitte wenden Sie sich an den Betrieb."
+                )
+            # 422: a refusal meant for the user; 409: another API version (German text of the service)
+            raise (UserError if r.status_code in (409, 422) and isinstance(detail, str) else RuntimeError)(detail)
         return r.json()
 
     async def _download(self, path: str) -> bytes:
         try:
             async with httpx.AsyncClient(timeout=120) as http:
-                r = await http.get(
-                    self.valves.SERVICE_URL.rstrip("/") + path,
-                    headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}"},
-                )
+                r = await http.get(self.valves.SERVICE_URL.rstrip("/") + path, headers=self._headers())
         except httpx.TransportError as e:
             raise RuntimeError(f"Der Recherche-Dienst ist nicht erreichbar ({type(e).__name__})") from e
         if r.status_code >= 400:
@@ -462,8 +501,10 @@ class Pipe:
             )  # the chat history of the task carries our state marker (clarify state: the task)
             task_text = _decode(found.group(1)).get("task", "") if found else ""
             task_text = task_text if isinstance(task_text, str) else ""
-            plan_title = re.search(r"\*\*Rechercheplan: (.+?)\*\*", prompt)  # plan state: the title of the plan
-            title = " ".join((task_text or (plan_title.group(1) if plan_title else "")).split())[:50] or "Deep Research"
+            # plan state: the title of the plan (rendered escaped, see _plain)
+            plan_title = re.search(r"\*\*Rechercheplan: ((?:\\.|[^*])+?)\*\*", prompt)
+            shown = re.sub(r"\\(.)", r"\1", plan_title.group(1)) if plan_title else ""
+            title = " ".join((task_text or shown).split())[:50] or "Deep Research"
             return json.dumps({"title": title}, ensure_ascii=False)
         if task == "tags_generation":
             return json.dumps({"tags": ["Recherche"]}, ensure_ascii=False)
@@ -616,6 +657,7 @@ class Pipe:
     ):
         if __task__:
             return self._task_reply(str(__task__), body)
+        REQUEST_ID.set(request_id(__chat_id__, __message_id__))  # this turn's task only (Open WebUI runs one per call)
 
         async def status(text: str, done: bool = False):
             if __event_emitter__:
@@ -703,15 +745,23 @@ class Pipe:
             st = _state(messages)
             # --- running / finished job: report status or result
             if st.get("state") == "job":
+                if text.strip().strip(".!").lower() in CANCEL_WORDS:
+                    try:
+                        await self._api("POST", _jpath(f"/jobs/{quote(st['job'], safe='')}/cancel", uid))
+                        return CANCELLED
+                    except UserError:
+                        pass  # it has ended already: show what there is
                 job = await self._api("GET", _jpath(f"/jobs/{quote(st['job'], safe='')}", uid))
                 if job["status"] == "done":
                     return await self._publish(job, __event_emitter__, __user__, __request__)
                 if job["status"] == "error":
                     return f"Die Recherche ist fehlgeschlagen: {job.get('error')}"
+                if job["status"] == "cancelled":
+                    return CANCELLED
                 last = job["events"][-1]["text"] if job["events"] else "wartet in der Warteschlange"
                 return (
-                    f"Die Recherche läuft noch ({job['status']}: {last}). Der Bericht erscheint in diesem Chat."
-                    + _marker(st)
+                    f"Die Recherche läuft noch ({job['status']}: {last}). Der Bericht erscheint in diesem Chat. "
+                    "Schreiben Sie **abbrechen**, um sie abzubrechen." + _marker(st)
                 )
 
             # --- new task (or answers to clarifying questions)
@@ -747,9 +797,9 @@ class Pipe:
                     preset = picked
                 if c["questions"]:
                     await status("Rückfragen", done=True)
-                    qs = "\n".join(f"{i}. {q}" for i, q in enumerate(c["questions"], 1))
+                    qs = "\n".join(f"{i}. {_plain(q)}" for i, q in enumerate(c["questions"], 1))
                     assume = (
-                        ("\n\nOhne Antwort gehe ich davon aus: " + "; ".join(c["assumptions"]))
+                        ("\n\nOhne Antwort gehe ich davon aus: " + "; ".join(_plain(a) for a in c["assumptions"]))
                         if c["assumptions"]
                         else ""
                     )

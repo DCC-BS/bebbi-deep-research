@@ -72,7 +72,7 @@ mise run test:unit                       # unit tests (CI runs `mise run ci`)
 mise run dev                             # service with auto-reload on :8088 (secrets via varlock / Proton Pass)
 
 mise run docker:up                       # service + Postgres + Open WebUI v0.12.3 (docker-compose.dev.yml)
-curl localhost:8088/health/liveness      # {"status":"up",...}; /health/readiness checks the LLM and Open WebUI
+curl localhost:8088/health/liveness      # {"status":"up",...}; /health/readiness checks the database, /health/dependencies the LLM and Open WebUI
 uv run python scripts/install_pipe.py --service-url http://service:8088 --models   # pipe + valves (docs/integration.md)
 ```
 
@@ -87,8 +87,8 @@ EVAL_ENV=/path/to/deep-research-evaluation/.env scripts/smoke_local.sh   # needs
 
 | Path | Content |
 |---|---|
-| `src/bebbi_deep_research/` | `app.py` (FastAPI factory), `container.py` (dependency injection), `routers/`, `models/` (requests), `services/` (research service, job runner, DB, own sources, report, Word export), `utils/` (config, API errors) |
-| `src/bebbi_deep_research/engine/` | research engine: `llm.py` (pydantic-ai roles, tool loops, embeddings), `focus.py`, `agent.py` (pipeline), `own.py`, `sources.py`, `prompts.py` |
+| `src/bebbi_deep_research/` | `app.py` (FastAPI factory), `container.py` (dependency injection), `routers/`, `models/` (requests), `services/` (research service, job runner, job policy, DB, own sources, report, Word export), `utils/` (config, API errors) |
+| `src/bebbi_deep_research/engine/` | research engine: `agent.py` (`ResearchAgent`, the entry point for services), `engines.py` (`Engine` protocol and registry), `context.py` (`EngineContext`: services the engines share), `focus.py`, `pipeline.py`, `chat.py` (clarify, plan, edit), `mcp.py` (MCP connection pool), `llm.py` (pydantic-ai roles, tool loops, embeddings), `own.py`, `sources.py`, `prompts.py` |
 | `pipe/` | Open WebUI functions: pipe and Word download action |
 | `config/presets.yaml` | presets, MCP servers, budgets |
 | `Dockerfile` | image on the shared mise base image (python + varlock runtime, uid 1000, read-only root) |

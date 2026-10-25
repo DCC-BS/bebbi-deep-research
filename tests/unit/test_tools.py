@@ -1,10 +1,12 @@
 """Tools (Serper / Firecrawl mapping, fetch restrictions) and MCPClient against httpx.MockTransport."""
 
 import json
+import time
 
 import httpx
 import pytest
 
+from bebbi_deep_research.engine import metrics
 from bebbi_deep_research.engine import tools as T
 from bebbi_deep_research.engine.tools import MCPClient, Tools, fetchable
 
@@ -44,6 +46,59 @@ async def test_search_returns_nothing_on_errors_and_bad_json():
         raise httpx.ConnectError("down")
 
     assert await make_tools(boom).search("q") == []
+
+
+class LogRecorder:
+    """Stands in for a structlog logger: records (level, event, fields)."""
+
+    def __init__(self):
+        self.lines = []
+
+    def __getattr__(self, level):
+        return lambda event, **fields: self.lines.append((level, event, fields))
+
+
+@pytest.fixture
+def logs(monkeypatch):
+    rec = LogRecorder()
+    monkeypatch.setattr(T, "logger", rec)
+    return rec
+
+
+@pytest.mark.parametrize(("status", "level"), [(401, "error"), (403, "error"), (429, "warning"), (503, "warning")])
+async def test_search_http_errors_are_counted_and_logged_with_the_host_only(logs, status, level):
+    t = make_tools(lambda r: httpx.Response(status, json={"message": "quota"}))
+    assert await t.search("geheime frage") == []
+    assert t.errors == {f"search:{status}": 1}
+    assert metrics.value("research_tool_errors_total", tool="search", reason=str(status)) >= 1
+    assert logs.lines == [(level, "search failed", {"tool": "search", "reason": str(status), "host": "s"})]
+    assert "geheime" not in repr(logs.lines)
+
+
+async def test_search_transport_errors_and_bad_json_are_counted(logs):
+    def boom(req):
+        raise httpx.ReadTimeout("slow")
+
+    t = make_tools(boom)
+    await t.search("q")
+    t.http = make_tools(lambda r: httpx.Response(200, text="<html>")).http
+    await t.search("q")
+    assert t.errors == {"search:ReadTimeout": 1, "search:bad_json": 1}
+    assert [line[0] for line in logs.lines] == ["warning", "warning"]
+
+
+async def test_fetch_errors_are_counted_and_logged_with_the_page_host_only(logs):
+    t = make_tools(lambda r: httpx.Response(500, json={"success": False}))
+    assert await t.fetch_meta("https://www.bs.ch/private/path?x=1") == ("", "", "")
+    assert t.errors == {"fetch:500": 1}
+    assert logs.lines == [("warning", "fetch failed", {"tool": "fetch", "reason": "500", "host": "www.bs.ch"})]
+
+
+async def test_successful_calls_count_no_errors(logs):
+    t = make_tools(lambda r: httpx.Response(200, json={"organic": [], "data": {"markdown": "x"}}))
+    await t.search("q")
+    await t.fetch_meta("https://a.ch/")
+    assert t.errors == {} and logs.lines == []
 
 
 async def test_fetch_meta_maps_firecrawl_title_text_and_date():
@@ -100,6 +155,24 @@ async def test_fetch_meta_survives_missing_data_and_non_json():
         "http://localhost./",
         "",
         "https:///x",
+        # D5: names that are not public (verified to pass the old guard)
+        "http://intranet.bs.ch/",
+        "http://localtest.me/",
+        "http://open-webui.tenant-kdkp-kiw-openweb-ui/api/v1/files",
+        "http://kubernetes.default/",
+        "http://kubernetes.default.svc/",
+        "http://minio.minio.svc.cluster/",
+        "http://research-agent.tenant-kdkp-kiw-bebbi-deep-research:8088/jobs",
+        "http://10.0.0.1.nip.io/",
+        "http://127-0-0-1.sslip.io/",
+        "http://app.localhost.ch/",
+        "http://localhost.localdomain/",
+        "http://printer.home/",
+        "http://wiki.corp/",
+        "http://a..ch/",
+        "http://[fd00::1]/",
+        "http://[fe80::1]/",
+        "http://198.18.0.1/",
     ],
 )
 async def test_fetch_meta_refuses_internal_targets_without_a_request(url):
@@ -111,7 +184,21 @@ async def test_fetch_meta_refuses_internal_targets_without_a_request(url):
 
 
 @pytest.mark.parametrize(
-    "url", ["https://www.bs.ch/x?a=1#f", "http://example.com", "https://8.8.8.8/", "https://sub.example.co.uk:8443/a"]
+    "url",
+    [
+        "https://www.bs.ch/x?a=1#f",
+        "http://example.com",
+        "https://8.8.8.8/",
+        "https://sub.example.co.uk:8443/a",
+        "https://www.gesetzessammlung.bs.ch/app/de/texts_of_law/153.100",
+        "https://www.fedlex.admin.ch/eli/cc/1999/404/de",
+        "https://local.ch/de",
+        "https://www.internal-audit.swiss/",
+        "https://grosserrat.bs.ch.",
+        "https://bücher.ch/",
+        "https://example.xn--p1ai/",
+        "https://mcp.opencaselaw.ch/mcp",
+    ],
 )
 def test_public_urls_are_fetchable(url):
     assert fetchable(url)
@@ -121,6 +208,7 @@ def test_public_urls_are_fetchable(url):
 @pytest.fixture
 def mcp(monkeypatch):
     monkeypatch.setattr(T.time, "sleep", lambda s: None)
+    monkeypatch.setattr(MCPClient, "_sleep", lambda self, s: None)
 
     def build(handler, **kw):
         monkeypatch.setattr(T.httpx, "Client", lambda **k: REAL_CLIENT(transport=httpx.MockTransport(handler), **k))
@@ -199,6 +287,30 @@ def test_mcp_retries_5xx_then_succeeds(mcp):
         return standard(req)
 
     assert mcp(handler).call("a", {"q": 1}) == "ergebnis" and n["fails"] == 0
+
+
+def test_mcp_retries_and_error_results_are_logged_and_counted(mcp, logs):
+    n = {"fails": 1}
+
+    def handler(req):
+        body = rpc(req)
+        if body.get("method") == "tools/call" and n["fails"]:
+            n["fails"] -= 1
+            return httpx.Response(503)
+        if body.get("method") == "tools/call":
+            return jsonrpc(req, {"isError": True, "content": [{"type": "text", "text": "overload"}]})
+        return standard(req)
+
+    before = metrics.value("research_mcp_errors_total", host="mcp", kind="retry")
+    with pytest.raises(RuntimeError):
+        mcp(handler).call("a", {"q": 1})
+    assert metrics.value("research_mcp_errors_total", host="mcp", kind="retry") == before + 1
+    assert [(level, event) for level, event, _ in logs.lines] == [
+        ("warning", "mcp request retry"),
+        ("warning", "mcp tool error result"),
+        ("warning", "mcp tool error result"),
+    ]
+    assert logs.lines[0][2] == {"host": "mcp", "method": "tools/call", "attempt": 1, "reason": "503"}
 
 
 def test_mcp_gives_up_after_the_configured_attempts(mcp):
@@ -287,3 +399,30 @@ async def test_focus_embeds_only_the_head_of_a_huge_page():
     out = await T.focus(Emb(), "x" * 2_000_000, ["q"], budget_chars=6000)
     assert seen[0] - 1 <= T.FOCUS_MAX_CHARS // (1200 - 150) + 1
     assert 0 < len(out) < 10_000
+
+
+def test_closing_the_client_stops_a_retry_loop_in_its_thread(monkeypatch):
+    """The job's end closes the client; the thread must not sleep through the remaining retries (45 s)."""
+    import threading
+
+    def handler(r):
+        return httpx.Response(503) if rpc(r).get("method") == "tools/call" else standard(r)
+
+    monkeypatch.setattr(T.httpx, "Client", lambda **k: REAL_CLIENT(transport=httpx.MockTransport(handler), **k))
+    c = MCPClient("http://mcp/")
+    errors = []
+
+    def run():
+        try:
+            c.call("a", {"q": 1})
+        except Exception as e:
+            errors.append(e)
+
+    t = threading.Thread(target=run)
+    started = time.monotonic()
+    t.start()
+    time.sleep(0.3)
+    c.http.close()  # what the service's close_agent does
+    t.join(timeout=5)
+    assert not t.is_alive() and time.monotonic() - started < 2
+    assert errors and "closed" in str(errors[0])

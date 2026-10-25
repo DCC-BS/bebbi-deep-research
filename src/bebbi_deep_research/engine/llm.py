@@ -9,7 +9,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, override
 
+import httpx
 import json_repair
+import numpy as np
 from dcc_backend_common.config import log_secret
 from dcc_backend_common.config.app_config import LlmConfig
 from dcc_backend_common.llm_agent import BaseAgent
@@ -17,12 +19,17 @@ from dcc_backend_common.logger import get_logger
 from openai import AsyncOpenAI
 from pydantic import Field
 from pydantic_ai import Agent, RunContext, Tool, UnexpectedModelBehavior
+from pydantic_ai.concurrency import AbstractConcurrencyLimiter, ConcurrencyLimiter, get_concurrency_context
 from pydantic_ai.embeddings import Embedder
 from pydantic_ai.embeddings.openai import OpenAIEmbeddingModel
 from pydantic_ai.models import Model
+from pydantic_ai.models.concurrency import ConcurrencyLimitedModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
+from tenacity import RetryCallState
+
+from . import metrics
 
 logger = get_logger(__name__)
 
@@ -87,8 +94,8 @@ class LlmSettings:
     )
     max_tokens: dict[str, int] = field(default_factory=lambda: {"think": 16000, "fast": 4000})
     extra_body: dict[str, dict[str, Any]] = field(default_factory=dict)
-    timeout: int = 1800
-    max_retries: int = 3
+    timeout: int = 1800  # seconds per request (httpx read timeout; RA_LLM_TIMEOUT_SECONDS)
+    max_retries: int = 3  # retries of transient errors per request (RA_LLM_MAX_RETRIES)
 
     def role(self, role: str) -> RoleLlmConfig:
         """Return the backend-common configuration of one role."""
@@ -104,23 +111,66 @@ class LlmSettings:
         )
 
 
+def llm_limiter(max_running: int) -> ConcurrencyLimiter:
+    """Return the limiter that caps concurrent requests to the LLM endpoint; share one per process.
+
+    Its running and waiting counts are exported as gauges in `metrics.render()`.
+    """
+    limiter = ConcurrencyLimiter(max_running=max_running, name="llm")
+    metrics.gauge("research_llm_requests_running", lambda: limiter.running_count)
+    metrics.gauge("research_llm_requests_waiting", lambda: limiter.waiting_count)
+    return limiter
+
+
+def _log_retry(model: str, state: RetryCallState) -> None:
+    """Log and count one retry of an LLM request (tenacity ``before_sleep`` hook of the HTTP transport)."""
+    error = state.outcome.exception() if state.outcome else None
+    wait = state.next_action.sleep if state.next_action else 0
+    metrics.inc("research_llm_retries_total", model=model)
+    logger.warning(
+        "llm request retry",
+        model=model,
+        attempt=state.attempt_number,
+        error=f"{type(error).__name__}: {str(error)[:200]}" if error else "",
+        wait_s=round(float(wait), 1),
+    )
+
+
 class RoleAgent(BaseAgent[None, str]):
     """Text agent of one role; instructions and tools are given per run."""
 
-    def __init__(self, config: RoleLlmConfig, model: Model | None = None) -> None:
+    def __init__(
+        self, config: RoleLlmConfig, model: Model | None = None, limiter: AbstractConcurrencyLimiter | None = None
+    ) -> None:
         """Build the agent.
 
         Args:
             config: Role configuration.
             model: Model to use instead of the OpenAI-compatible endpoint (tests: a pydantic-ai FunctionModel).
+            limiter: Caps concurrent model requests (shared by all agents of the process); held per request only,
+                never across a tool call.
         """
         self._model_override = model
+        self._limiter = limiter
         self.role_config = config
         super().__init__(config, deps_type=None, output_type=str, enable_thinking=config.enable_thinking)
 
     @override
+    def _build_http_client(self) -> httpx.AsyncClient:
+        """backend-common's retrying client, plus a log line and a counter for every retry."""
+        client = super()._build_http_client()
+        config = getattr(getattr(client, "_transport", None), "config", None)
+        if isinstance(config, dict):
+            model = self.role_config.llm_model
+            config["before_sleep"] = lambda state: _log_retry(model, state)
+        return client
+
+    @override
     def create_agent(self, model: Model) -> Agent[None, str]:
-        return Agent(model=self._model_override or model, output_type=str)
+        chosen = self._model_override or model
+        if self._limiter is not None:
+            chosen = ConcurrencyLimitedModel(chosen, self._limiter)
+        return Agent(model=chosen, output_type=str)
 
     async def complete(
         self,
@@ -187,15 +237,19 @@ class LLM:
         usage: Token usage of this LLM object (one research).
     """
 
-    def __init__(self, settings: LlmSettings, model: Model | None = None) -> None:
+    def __init__(
+        self, settings: LlmSettings, model: Model | None = None, limiter: AbstractConcurrencyLimiter | None = None
+    ) -> None:
         """Create the role agents and the embedder.
 
         Args:
             settings: Endpoint, models and limits.
             model: Model for both roles instead of the endpoint (tests).
+            limiter: Caps concurrent chat and embedding requests (one per process, see ``llm_limiter``); None: no cap.
         """
         self.settings = settings
-        self.agents = {role: RoleAgent(settings.role(role), model) for role in ROLES}
+        self.limiter = limiter
+        self.agents = {role: RoleAgent(settings.role(role), model, limiter) for role in ROLES}
         self._embed_client = AsyncOpenAI(
             base_url=settings.embed_base_url or settings.base_url,
             api_key=(settings.embed_api_key if settings.embed_base_url else settings.api_key) or "none",
@@ -286,14 +340,19 @@ class LLM:
         self.usage.add(step, usage)
         return output.strip()
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Return one embedding per text (texts cut at 4000 characters, batches of 32)."""
-        out: list[list[float]] = []
+    async def embed(self, texts: list[str]) -> np.ndarray:
+        """Return one embedding per text as a float32 matrix (texts cut at 4000 characters, batches of 32).
+
+        Each batch is converted to float32 right away: the client's Python float lists (about 80 KB per
+        2560-dimensional vector) live only for one batch.
+        """
+        out: list[np.ndarray] = []
         for i in range(0, len(texts), EMBED_BATCH):
             batch = [t[:EMBED_CHARS] for t in texts[i : i + EMBED_BATCH]]
-            result = await self.embedder.embed(batch, input_type="document")
-            out += [list(v) for v in result.embeddings]
-        return out
+            async with get_concurrency_context(self.limiter, "embed"):
+                result = await self.embedder.embed(batch, input_type="document")
+            out.append(np.asarray(result.embeddings, dtype=np.float32))
+        return np.concatenate(out) if out else np.zeros((0, 0), dtype=np.float32)
 
 
 def budgeted_tools(

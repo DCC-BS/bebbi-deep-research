@@ -188,8 +188,10 @@ async def wait_status(c, job_id, want, timeout=5.0):
     raise AssertionError(f"job {job_id} did not reach {want}, last: {j['status']}")
 
 
-async def submit(c, preset="grossrat", depth="quick", when="now", **extra):
+async def submit(c, preset="grossrat", depth="quick", when="now", headers=None, **extra):
     d = (await c.post("/plans", json={"task": "Frage", "preset": preset, "depth": depth})).json()
-    r = await c.post("/jobs", json={"draft_id": d["draft_id"], "user_id": "u1", "when": when, **extra})
+    r = await c.post(
+        "/jobs", json={"draft_id": d["draft_id"], "user_id": "u1", "when": when, **extra}, headers=headers or {}
+    )
     assert r.status_code == 200, r.text
     return r.json()

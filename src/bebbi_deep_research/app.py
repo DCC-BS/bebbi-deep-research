@@ -10,37 +10,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from dcc_backend_common.fastapi_error_handling import ApiErrorCodes, inject_api_error_handler
-from dcc_backend_common.fastapi_health_probes import health_probe_router
-from dcc_backend_common.fastapi_health_probes.router import ServiceDependency
 from dcc_backend_common.fastapi_logging_middleware import add_logging_middleware
 from dcc_backend_common.logger import get_logger, init_logger
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from bebbi_deep_research.container import Container
-from bebbi_deep_research.routers import jobs, monitoring, research
-from bebbi_deep_research.services.jobs import describe_error
-from bebbi_deep_research.utils.app_config import AppConfig
+from bebbi_deep_research.routers import health, jobs, monitoring, research
+from bebbi_deep_research.routers.contract import API_VERSION, HEADER
+from bebbi_deep_research.services.policy import describe_error
 
 logger = get_logger(__name__)
-
-
-def service_dependencies(config: AppConfig) -> list[ServiceDependency]:
-    """Return the downstream services the readiness probe checks (the LLM endpoint and Open WebUI, if set)."""
-    llm: ServiceDependency = {
-        "name": "llm",
-        "health_check_url": f"{config.llm_base_url.rstrip('/')}/models",
-        "api_key": config.llm_api_key or None,
-    }
-    deps = [llm]
-    if config.owui_url:
-        owui: ServiceDependency = {
-            "name": "open-webui",
-            "health_check_url": f"{config.owui_url}/health",
-            "api_key": None,
-        }
-        deps.append(owui)
-    return deps
 
 
 async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
@@ -81,7 +61,15 @@ def create_app(container: Container | None = None) -> FastAPI:
     inject_api_error_handler(app)
     app.add_exception_handler(Exception, unexpected_error)
     add_logging_middleware(app)
-    app.include_router(health_probe_router(service_dependencies(config)))
+
+    @app.middleware("http")
+    async def api_version_header(request: Request, call_next):
+        """Name the API version in every answer (the pipe and other callers can check what they talk to)."""
+        response = await call_next(request)
+        response.headers[HEADER] = str(API_VERSION)
+        return response
+
+    app.include_router(health.router)
     app.include_router(monitoring.router)
     app.include_router(research.router)
     app.include_router(jobs.router)

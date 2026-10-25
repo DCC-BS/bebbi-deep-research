@@ -1,79 +1,58 @@
-"""Job queue: night window, daytime rule, workers, delivery into the Open WebUI chat."""
+"""Job runner: claims queued jobs, runs them, re-queues stale ones, applies retention, delivers into the chat.
+
+The night window and the daytime rule are in `services/policy.py`.
+"""
 
 import asyncio
 import json
-import re
 import time
 import uuid
 from collections.abc import Callable
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import httpx
-import openai
 from dcc_backend_common.logger import get_logger
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
+from structlog.contextvars import bind_contextvars, bound_contextvars
 
 from bebbi_deep_research.engine import LLM, ResearchAgent, Tools
-from bebbi_deep_research.engine.llm import LlmSettings
+from bebbi_deep_research.engine.llm import LlmSettings, llm_limiter
 from bebbi_deep_research.services.db import DB
-from bebbi_deep_research.services.own_sources import to_engine
-from bebbi_deep_research.services.report import build_sources, owui_source_events, ui_markdown
+from bebbi_deep_research.services.own_sources import to_engine, without_texts
+from bebbi_deep_research.services.policy import describe_error, in_window, runs_by_day
+from bebbi_deep_research.services.report import (
+    build_sources,
+    fit_delivery,
+    limit_sources,
+    owui_source_events,
+    ui_markdown,
+)
 from bebbi_deep_research.utils.app_config import AppConfig
 
 logger = get_logger(__name__)
 LIVE = ("starting", "running")
 MAX_ATTEMPTS = 3  # a job that was interrupted (pod killed, stalled) this often is given up with an error
-_HOSTS = re.compile(
-    r"https?://\S+|\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b|\b(?:[\w-]+\.)+[A-Za-z]{2,}(?::\d+)?\b|\blocalhost(?::\d+)?\b"
-)
+FINISHED = ("done", "error", "cancelled")
+CANCELLED_TEXT = "Die Recherche wurde abgebrochen. Es wird kein Bericht erstellt."
+DRAFT_DAYS = 14
 
 
-def describe_error(e: BaseException) -> str:
-    """Return a German, user-facing reason for a failure (shown in the chat), followed by a short technical detail.
-
-    URLs, IP addresses and host names are removed from the detail.
-    """
-    detail = _HOSTS.sub("<host>", " ".join(str(getattr(e, "message", None) or e).split()))[:200]
-    rejected = isinstance(e, ModelHTTPError) and 400 <= e.status_code < 500 and e.status_code not in (408, 429)
-    if rejected or isinstance(
-        e, (openai.NotFoundError, openai.BadRequestError, openai.AuthenticationError, openai.PermissionDeniedError)
-    ):
-        reason = "Das Sprachmodell lehnt die Anfrage ab (Modellname oder Zugang falsch konfiguriert)."
-    elif isinstance(e, (ModelAPIError, openai.APIConnectionError, openai.APITimeoutError)):
-        reason = "Das Sprachmodell ist nicht erreichbar."
-    elif isinstance(e, UnexpectedModelBehavior):
-        reason = "Das Sprachmodell hat keine verwertbare Antwort geliefert."
-    elif isinstance(e, TimeoutError):
-        reason = "Die Recherche hat das Zeitlimit überschritten."
-    elif isinstance(e, httpx.HTTPError):
-        reason = "Ein Dienst der Recherche (Suche oder Seitenabruf) ist nicht erreichbar."
-    else:
-        reason = "Unerwarteter Fehler."
-    return (
-        f"{reason} Bitte versuchen Sie es später erneut oder wenden Sie sich an den Betrieb. "
-        f"(Technisch: {type(e).__name__}: {detail})"
-    )
+def log_context(job: dict):
+    """Bind the job id and the request id it was submitted with (pipe: "<chat_id>:<message_id>") to every log line."""
+    return bound_contextvars(job_id=job["id"], request_id=job.get("request_id"))
 
 
-def in_window(settings: AppConfig, now: datetime | None = None) -> bool:
-    """Return whether `now` (default: the current time in the configured zone) is inside the night window."""
-    start, end = settings.window()
-    t = (now or datetime.now(ZoneInfo(settings.timezone))).time()
-    return (t >= start or t < end) if start > end else start <= t < end
-
-
-def runs_by_day(cfg, preset: str, depth: str) -> bool:
-    """Office hours: only quick runs of the focus engine (about 20-50k tokens, 2-3 min) start right away."""
-    p = cfg.presets.get(preset)
-    return depth == "quick" and p is not None and p.engine == "focus"
+def _no_texts(raw: str | None) -> str | None:
+    """The stored own sources of a job (JSON) without the file texts."""
+    stored = without_texts(json.loads(raw or "null"))
+    return json.dumps(stored, ensure_ascii=False) if stored else None
 
 
 def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]:
     """Return ``make_agent(job_id, on_event=None)``, which builds a research agent with its own LLM and tools.
 
-    "{job}" in the LLM and search keys is replaced by the job id (gateway metering).
+    "{job}" in the LLM and search keys is replaced by the job id (gateway metering). All agents of the factory share
+    one limiter, so the process sends at most ``RA_LLM_CONCURRENCY`` requests to the LLM endpoint at a time.
     """
+    limiter = llm_limiter(settings.llm_concurrency)
 
     def make_agent(job_id: str, on_event=None) -> ResearchAgent:
         llm = LLM(
@@ -86,7 +65,10 @@ def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]
                 extra_body={
                     r: b for r, b in (("think", settings.extra_body_think), ("fast", settings.extra_body_fast)) if b
                 },
-            )
+                timeout=settings.llm_timeout_seconds,
+                max_retries=settings.llm_max_retries,
+            ),
+            limiter=limiter,
         )
         tools = Tools(
             search_url=settings.search_url,
@@ -141,7 +123,8 @@ class JobRunner:
         # job id -> claim token of this run (only the claiming run may write the final status)
         self.owners: dict[str, str] = {}
         self.day: set[str] = set()  # running jobs that took a daytime slot
-        self._bg: set[asyncio.Task] = set()  # re-deliveries
+        self._bg: set[asyncio.Task] = set()  # re-deliveries, cancel notices
+        self._cancelled: set[str] = set()  # local runs stopped because their job was cancelled
         self._loop_task: asyncio.Task | None = None
         self._stopping = False
         self._last_sweep = 0.0
@@ -154,7 +137,6 @@ class JobRunner:
         self._loop_task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
-        """Stop the loop and cancel running jobs (they are re-queued for the next start)."""
         """Graceful shutdown: stop claiming, cancel running jobs and put them back into the queue."""
         self._stopping = True
         if self._loop_task:
@@ -173,12 +155,39 @@ class JobRunner:
                 await self.tick()
                 if time.time() - last_purge > 3600:
                     last_purge = time.time()
-                    await self.db.execute("delete from drafts where created < :t", t=time.time() - 14 * 86400)
+                    await self.purge(last_purge)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error("worker loop error", error=repr(e))
             await asyncio.sleep(self.settings.poll_seconds)
+
+    async def purge(self, now: float) -> None:
+        """Apply the retention rules (run hourly by the worker loop).
+
+        Drafts are deleted after 14 days, finished jobs (report, evidence, own sources) after RA_JOB_RETENTION_DAYS.
+        File texts that finished jobs of older versions still carry are removed.
+        """
+        await self.db.execute("delete from drafts where created < :t", t=now - DRAFT_DAYS * 86400)
+        finished = ", ".join(f"'{s}'" for s in FINISHED)
+        n = await self.db.execute(
+            f"delete from jobs where status in ({finished}) and coalesce(finished, created) < :t",
+            t=now - self.settings.job_retention_days * 86400,
+        )
+        if n:
+            logger.info("finished jobs deleted", count=n, retention_days=self.settings.job_retention_days)
+        rows = await self.db.run(
+            f"select id, own_sources from jobs where status in ({finished}) and own_sources like :p limit 100",
+            p='%"text":%',
+        )
+        for r in rows:
+            await self.db.execute(
+                f"update jobs set own_sources=:o where id=:i and status in ({finished})",
+                o=_no_texts(r["own_sources"]),
+                i=r["id"],
+            )
+        if rows:
+            logger.info("file texts of finished jobs removed", count=len(rows))
 
     async def tick(self) -> None:
         """Run one loop step: heartbeats, stale jobs, claiming new jobs, the delivery sweep."""
@@ -186,15 +195,20 @@ class JobRunner:
         now = time.time()
         # heartbeat for our jobs; jobs of dead replicas (no heartbeat) go back to the queue
         for jid in list(self.tasks):
-            await self.db.execute(
+            alive = await self.db.execute(
                 "update jobs set heartbeat=:h where id=:i and owner=:o and status in ('starting','running')",
                 h=now,
                 i=jid,
                 o=self.owners.get(jid, ""),
             )
+            if not alive and not self.tasks[jid].done():  # cancelled through another replica: stop our run
+                rows = await self.db.run("select status from jobs where id=:i", i=jid)
+                if rows and rows[0]["status"] == "cancelled":
+                    self._stop_run(jid)
         stale = "status in ('starting','running') and coalesce(heartbeat, created) < :t"
         for r in await self.db.run(
-            f"select id, user_id, chat_id, message_id from jobs where {stale} and coalesce(attempts,0) >= :m",
+            f"select id, user_id, chat_id, message_id, own_sources, request_id from jobs where {stale} "
+            "and coalesce(attempts,0) >= :m",
             t=now - s.stale_seconds,
             m=MAX_ATTEMPTS,
         ):
@@ -203,14 +217,17 @@ class JobRunner:
                 "Bitte versuchen Sie es erneut oder wenden Sie sich an den Betrieb."
             )
             if await self.db.execute(
-                "update jobs set status='error', finished=:f, error=:e, owner=null where id=:i and " + stale,
+                "update jobs set status='error', finished=:f, error=:e, owner=null, own_sources=:o where id=:i and "
+                + stale,
                 f=now,
                 e=msg,
+                o=_no_texts(r["own_sources"]),
                 i=r["id"],
                 t=now - s.stale_seconds,
             ):
-                logger.error("job given up after repeated interruptions", job=r["id"], attempts=MAX_ATTEMPTS)
-                await self._safe_deliver(r, f"Die Recherche ist fehlgeschlagen. {msg}")
+                with log_context(r):
+                    logger.error("job given up after repeated interruptions", attempts=MAX_ATTEMPTS)
+                    await self._safe_deliver(r, f"Die Recherche ist fehlgeschlagen. {msg}")
         n = await self.db.execute(f"update jobs set status='queued', owner=null where {stale}", t=now - s.stale_seconds)
         if n:
             logger.warning("re-queued stale jobs", count=n)
@@ -255,6 +272,34 @@ class JobRunner:
             self._last_sweep = now
             await self._sweep_deliveries(now)
 
+    def _stop_run(self, job_id: str) -> None:
+        task = self.tasks.get(job_id)
+        if task is not None and not task.done():
+            self._cancelled.add(job_id)
+            task.cancel()
+
+    async def cancel(self, job: dict) -> bool:
+        """Cancel a queued or running job: status `cancelled`, the run stops, the chat is told in German.
+
+        `job` is the job's row (id, own_sources and the delivery fields). Returns False if the job had already ended.
+        """
+        if not await self.db.execute(
+            "update jobs set status='cancelled', finished=:f, error=:e, owner=null, own_sources=:o "
+            "where id=:i and status in ('queued','starting','running')",
+            f=time.time(),
+            e=CANCELLED_TEXT,
+            o=_no_texts(job.get("own_sources")),
+            i=job["id"],
+        ):
+            return False
+        with log_context(job):
+            logger.info("job cancelled")
+            self._stop_run(job["id"])  # a run on another replica stops at its next heartbeat
+            t = asyncio.create_task(self._safe_deliver(job, CANCELLED_TEXT))
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+        return True
+
     async def _sweep_deliveries(self, now: float) -> None:
         """Deliver finished jobs again whose delivery failed or was cut off by a shutdown (up to 3 times)."""
         rows = await self.db.run(
@@ -271,16 +316,24 @@ class JobRunner:
                 i=job["id"],
                 k=job.get("delivery_tries") or 0,
             ):
-                logger.info("delivering again", job=job["id"], previous=(job.get("delivery") or "none")[:60])
-                t = asyncio.create_task(
-                    self._deliver_done(job, job["report"] or "", json.loads(job["evidence"] or "null"))
-                )
+                with log_context(job):  # the task copies the context: its delivery lines carry the ids too
+                    logger.info("delivering again", previous=(job.get("delivery") or "none")[:60])
+                    t = asyncio.create_task(
+                        self._deliver_done(job, job["report"] or "", json.loads(job["evidence"] or "null"))
+                    )
                 self._bg.add(t)
                 t.add_done_callback(self._bg.discard)
 
     # ----------------------------------------------------------------- job
     async def run_job(self, job_id: str, owner: str = "") -> None:
-        """Run one claimed job and deliver its report; `owner` is the claim token of this run."""
+        """Run one claimed job and deliver its report; `owner` is the claim token of this run.
+
+        Every log line of the run (engine included) carries `job_id` and the `request_id` stored with the job.
+        """
+        with log_context({"id": job_id}):
+            await self._run_job(job_id, owner)
+
+    async def _run_job(self, job_id: str, owner: str) -> None:
         guard = (
             "id=:i and owner=:o and status in ('starting','running')"  # only the run that claimed the job may change it
         )
@@ -298,18 +351,19 @@ class JobRunner:
                     o=owner,
                 )
             except Exception as e:
-                logger.warning("progress not stored", job=job_id, error=repr(e)[:200])
+                logger.warning("progress not stored", error=repr(e)[:200])
 
         started = time.time()
         agent = None
         try:
             job = (await self.db.run("select * from jobs where id=:i", i=job_id))[0]
+            bind_contextvars(request_id=job.get("request_id"))  # reset when run_job's log context ends
             if not await self.db.execute(
                 "update jobs set status='running', started=:t where " + guard, t=started, i=job_id, o=owner
             ):
-                logger.warning("job no longer ours", job=job_id)
+                logger.warning("job no longer ours")
                 return
-            logger.info("job started", job=job_id, preset=job["preset"], depth=job["depth"])
+            logger.info("job started", preset=job["preset"], depth=job["depth"])
             agent = self.make_agent(job_id, on_event)
             own = to_engine(json.loads(job.get("own_sources") or "null"), self.settings, self.http_factory)
             async with asyncio.timeout(self.settings.job_timeout_seconds):
@@ -322,20 +376,21 @@ class JobRunner:
                 )
             stats = {**res.stats, "usage": res.usage}
             if not await self.db.execute(
-                "update jobs set status='done', finished=:t, report=:r, stats=:s, evidence=:e where " + guard,
+                "update jobs set status='done', finished=:t, report=:r, stats=:s, evidence=:e, own_sources=:os "
+                "where " + guard,
                 t=time.time(),
+                os=_no_texts(job.get("own_sources")),
                 r=res.report,
                 s=json.dumps(stats, ensure_ascii=False),
                 e=json.dumps(res.ledger, ensure_ascii=False),
                 i=job_id,
                 o=owner,
             ):
-                logger.warning("job no longer ours, result dropped", job=job_id)
+                logger.warning("job no longer ours, result dropped")
                 return
             u = res.usage or {}
             logger.info(
                 "job done",
-                job=job_id,
                 runtime_s=round(time.time() - started, 1),
                 calls=u.get("calls"),
                 prompt_tokens=u.get("prompt_tokens"),
@@ -350,21 +405,26 @@ class JobRunner:
                     o=owner,
                 )
             )
-            logger.warning("job re-queued on shutdown", job=job_id)
+            if job_id in self._cancelled:
+                self._cancelled.discard(job_id)
+                logger.info("run stopped: job cancelled")
+            else:
+                logger.warning("job re-queued on shutdown")
             raise
         except Exception as e:
-            logger.error("job failed", job=job_id, error=repr(e)[:500])
+            logger.error("job failed", error=repr(e)[:500])
             message = describe_error(e)
             try:
                 mine = await self.db.execute(
-                    "update jobs set status='error', finished=:t, error=:e where " + guard,
+                    "update jobs set status='error', finished=:t, error=:e, own_sources=:os where " + guard,
                     t=time.time(),
                     e=message,
+                    os=_no_texts((job or {}).get("own_sources")),
                     i=job_id,
                     o=owner,
                 )
             except Exception as e2:  # database down as well: the stale-job requeue takes over
-                logger.error("job error not stored", job=job_id, error=repr(e2)[:200])
+                logger.error("job error not stored", error=repr(e2)[:200])
                 mine = 0
             if mine and job:
                 await self._safe_deliver(job, f"Die Recherche ist fehlgeschlagen. {message}")
@@ -378,9 +438,10 @@ class JobRunner:
     async def _deliver_done(self, job: dict, report: str, ledger: dict | None) -> None:
         try:
             sources = build_sources(report, ledger)
+            report, sources = limit_sources(report, sources)  # the route takes 200 sources: keep the most cited
             await self.deliver(job, ui_markdown(report, sources), sources)
         except Exception as e:
-            logger.error("delivery error", job=job["id"], error=repr(e)[:300])
+            logger.error("delivery error", error=repr(e)[:300])
             try:
                 await self.db.execute(
                     "update jobs set delivery=:d where id=:i", d=f"failed: {type(e).__name__}: {e}"[:300], i=job["id"]
@@ -392,7 +453,7 @@ class JobRunner:
         try:
             await self.deliver(job, content)
         except Exception as e:
-            logger.error("delivery error", job=job["id"], error=repr(e)[:300])
+            logger.error("delivery error", error=repr(e)[:300])
 
     async def deliver(self, job: dict, content: str, sources: list[dict] | None = None) -> None:
         """Write the finished report into the Open WebUI assistant message of the job.
@@ -414,16 +475,17 @@ class JobRunner:
             and job.get("user_id")
         ):
             await self.db.execute("update jobs set delivery='skipped' where id=:i", i=job["id"])
-            logger.info("delivery skipped", job=job["id"], reason="no delivery endpoint/secret or job without chat")
+            logger.info("delivery skipped", reason="no delivery endpoint/secret or job without chat")
             return
-        body = {
+        envelope = {
             "chat_id": job["chat_id"],
             "message_id": job["message_id"],
             "job_id": job["id"],
             "user_id": job.get("user_id") or "",
-            "content": content,
-            "sources": [e["data"] for e in owui_source_events(sources or [])],
         }
+        # within the route's size limits, else it refuses for good (400/413)
+        content, payloads = fit_delivery(content, [e["data"] for e in owui_source_events(sources or [])], envelope)
+        body = {**envelope, "content": content, "sources": payloads}
         outcome = "failed"
         for attempt in range(3):
             try:
@@ -442,12 +504,7 @@ class JobRunner:
             if attempt < 2:
                 await asyncio.sleep(self.retry_delay * (attempt + 1))
         if outcome == "ok":
-            logger.info("delivery ok", job=job["id"], chat=job["chat_id"], sources=len(sources or []))
+            logger.info("delivery ok", chat=job["chat_id"], sources=len(sources or []))
         else:
-            logger.error("delivery failed", job=job["id"], chat=job["chat_id"], outcome=outcome)
+            logger.error("delivery failed", chat=job["chat_id"], outcome=outcome)
         await self.db.execute("update jobs set delivery=:d where id=:i", d=outcome[:300], i=job["id"])
-
-
-def new_id() -> str:
-    """Return a new 12-character job or draft id."""
-    return uuid.uuid4().hex[:12]

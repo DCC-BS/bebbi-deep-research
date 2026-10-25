@@ -84,6 +84,9 @@ class AppConfig(AbstractAppConfig):
     model_embed: str = "qwen-embed"
     extra_body_think: dict[str, Any] = Field(default_factory=dict)
     extra_body_fast: dict[str, Any] = Field(default_factory=dict)
+    llm_timeout_seconds: int = Field(default=1800, ge=1, description="Timeout of one LLM request (read timeout)")
+    llm_max_retries: int = Field(default=3, ge=0, description="Retries of transient LLM errors per request")
+    llm_concurrency: int = Field(default=6, ge=1, description="Concurrent LLM and embedding requests per process")
     search_url: str = Field(description="Serper-compatible search endpoint (RA_SEARCH_URL)")
     search_key: str = ""
     firecrawl_url: str = Field(description="Firecrawl base URL (RA_FIRECRAWL_URL)")
@@ -98,6 +101,7 @@ class AppConfig(AbstractAppConfig):
     poll_seconds: float = Field(default=5.0, gt=0)
     stale_seconds: float = Field(default=120.0, gt=0)
     job_timeout_seconds: float = Field(default=3600.0, gt=0, description="A run that takes longer is stopped")
+    job_retention_days: int = Field(default=365, ge=1, description="Finished jobs are deleted after this many days")
     owui_url: str = ""
     owui_api_key: str = ""
     owui_delivery_url: str = ""
@@ -151,6 +155,9 @@ class AppConfig(AbstractAppConfig):
             "model_think": env.get("RA_LLM_MODEL_THINK"),
             "model_fast": env.get("RA_LLM_MODEL_FAST"),
             "model_embed": env.get("RA_LLM_MODEL_EMBED"),
+            "llm_timeout_seconds": env.get("RA_LLM_TIMEOUT_SECONDS"),
+            "llm_max_retries": env.get("RA_LLM_MAX_RETRIES"),
+            "llm_concurrency": env.get("RA_LLM_CONCURRENCY"),
             "presets_path": env.get("RA_PRESETS"),
             "database_url": normalize_db_url(db) if db else None,
             "night_window": env.get("RA_NIGHT_WINDOW"),
@@ -161,6 +168,7 @@ class AppConfig(AbstractAppConfig):
             "poll_seconds": env.get("RA_POLL_SECONDS"),
             "stale_seconds": env.get("RA_STALE_SECONDS"),
             "job_timeout_seconds": env.get("RA_JOB_TIMEOUT_SECONDS"),
+            "job_retention_days": env.get("RA_JOB_RETENTION_DAYS"),
             "own_max_files": env.get("RA_OWN_MAX_FILES"),
             "own_max_file_chars": env.get("RA_OWN_MAX_FILE_CHARS"),
             "own_max_collections": env.get("RA_OWN_MAX_COLLECTIONS"),
@@ -196,7 +204,9 @@ class AppConfig(AbstractAppConfig):
             f"AppConfig(token={log_secret(self.token)}, hmac_secret={log_secret(self.hmac_secret)}, "
             f"llm_base_url={self.llm_base_url}, llm_api_key={log_secret(self.llm_api_key)}, "
             f"llm_embed_base_url={self.llm_embed_base_url}, llm_embed_api_key={log_secret(self.llm_embed_api_key)}, "
-            f"models={self.model_think}/{self.model_fast}/{self.model_embed}, search_url={self.search_url}, "
+            f"models={self.model_think}/{self.model_fast}/{self.model_embed}, llm_timeout={self.llm_timeout_seconds}, "
+            f"llm_max_retries={self.llm_max_retries}, llm_concurrency={self.llm_concurrency}, "
+            f"search_url={self.search_url}, "
             f"firecrawl_url={self.firecrawl_url}, presets_path={self.presets_path}, "
             f"database={self.database_url.split('://')[0]}, night_window={self.night_window}, "
             f"timezone={self.timezone}, "

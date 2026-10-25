@@ -25,7 +25,8 @@ Helm chart `deploy/helm/bebbi-deep-research` (see [operations.md](operations.md)
 | `OWUI_API_KEY` | API key of the Open WebUI service account (step 3) |
 
 Check: `kubectl port-forward svc/bebbi-deep-research 8088` then `curl localhost:8088/health/readiness` returns
-`{"status":"ready",...}`; `checks` names an unreachable LLM endpoint or Open WebUI. Missing or invalid configuration stops
+`{"status":"ready",...}` (database reachable) and `curl localhost:8088/health/dependencies` names an unreachable LLM
+endpoint or Open WebUI. Missing or invalid configuration stops
 the pod at start with the variable named in the log (varlock and the service's own check).
 
 ## 2. Install the pipe and set the valves
@@ -115,12 +116,24 @@ Both still accept an admin key at v0.12.3 (`BYPASS_ADMIN_ACCESS_CONTROL` default
 `/api/v1/retrieval` and `/api/v1/files`), create the key in Settings, Account, API keys, store it as `OWUI_API_KEY`. The key no longer
 needs `/api/v1/chats`.
 
+Pipe, action and service share an API version (`X-DR-API-Version`, now `1`; [operations.md](operations.md#api)). Deploy
+the pipe from the same release as the service: a pipe of another version gets a German message in the chat ("Pipe und
+Dienst müssen gemeinsam aktualisiert werden") instead of a silently degraded answer.
+Every call also carries `X-Request-ID: <chat_id>:<message_id>`; the service logs it and keeps it with the job, so the
+logs of a night run lead back to the chat message ([operations.md](operations.md#logs-and-metrics)).
+
 The pipe sends the chat user's id (`user_id`) on `POST /plans`, `POST /plans/{id}/edit`, `POST /jobs` and as `?user_id=` on `GET /jobs/{id}`
 (and the other job reads). When both the stored draft/job and the request carry a user id and they differ, the service answers 404. Calls
 without `user_id` (n8n, scripts) are not checked.
 
 `RA_TOKEN` is full trust: whoever holds it can read every job and report and submit for any user id; the admin key paths run through the
 service. There are no separate tokens per caller yet; keep the token in the Secret and restrict ingress with the NetworkPolicy.
+
+The route's size limits (message text 2,000,000 characters, 200 sources, 100,000 bytes per source, 4 MB body) are
+mirrored in `services/report.py` and applied before sending, so a delivery is never refused for its size: with more than
+200 sources the chat gets the 200 most cited, numbered again, with a note that the Word file has the full list (the
+Word file and `GET /jobs/{id}` keep every source); a source preview or a text over the limit is shortened with a note.
+Change both sides together.
 
 Delivery is retried 3 times (not for 400, 401, 403, 404, which do not change by waiting); the result is stored per job
 (`delivery` in `GET /jobs/{id}`: `ok`, `skipped` when the job has no chat or no secret, or `failed: ...`). The admin key can read every
@@ -152,7 +165,10 @@ The manifold creates the model "Deep Research" (`bebbi_deep_research.auto`) auto
 3. For now every job runs in the night window; starting right away is not offered (the service still accepts
    `when=now` for its own API). The message says the job is queued. When the job finishes, the service replaces the
    assistant message content with the report.
-4. **Fallback:** the queued message carries a hidden state marker (`[//]: # (research-agent:...)`). If the user writes
+4. **Cancel:** while the job waits or runs, a message that is only **abbrechen** (or "Recherche abbrechen", "stopp")
+   cancels it (`POST /jobs/{id}/cancel`); the status answer says so. The queued message then gets "Die Recherche wurde
+   abgebrochen" from the service.
+5. **Fallback:** the queued message carries a hidden state marker (`[//]: # (research-agent:...)`). If the user writes
    again in that chat before the delivery, the pipe asks the service for the job and returns the report (or status) in the
    new reply. If the delivery failed, the report is retrievable this way and via `GET /jobs/{id}`.
 
@@ -165,6 +181,10 @@ returns itself (later message, fallback above): it carries no marker either.
 
 ### How the pipe and the delivery fit Open WebUI v0.11.4 and v0.12.3 (found in the end-to-end test)
 
+* **Plan and clarifying questions are plain text**: the planner sees web snippets, so the pipe escapes the Markdown
+  characters of every LLM-written line (plan title, task, parts, goals, sub-questions, must-name items, questions,
+  assumptions; `_plain` in the pipe). An injected image, link or HTML tag shows as text and loads nothing. The report
+  itself goes through the service's `sanitize_markdown`.
 * **State marker**: a markdown link reference definition `[//]: # (research-agent:<base64>)`. It is valid markdown and
   never rendered. The first version used an HTML comment, which Open WebUI shows as text.
 * **`output` wins over `content`**: v0.11 stores the pipe answer as `output` items and the UI renders `output` in
@@ -228,7 +248,13 @@ returns itself (later message, fallback above): it carries no marker either.
 * `GET /jobs/{id}/report.docx` (bearer token) returns the Word file for n8n and other apps (409 while the job runs).
   python-docx renders title, header block (question, date, preset, depth), headings, lists, Markdown tables as Word tables,
   citations as links to the source list, the source list with hyperlinks, Stand and retrieval date, and a footer.
-  Rendering is on demand from the stored report; old jobs work too.
+  The layout is the Kanton Basel-Stadt template of Bebbi Bot's document tools (`kdkp_office.word` in
+  FD-ITBS/kdkp-open-web-ui): `assets/word/template.docx` is a copy of its `template.docx` (provenance in
+  `src/bebbi_deep_research/assets/README.md`), and each element uses the same style (`Title`, numbered `Heading 1` to
+  `Heading 4`, `ListWithBullets`, `ListWithNumbers`, `Table Grid`, `Block Text`, `Plain Text`, `Hyperlink`), so a report
+  looks like a Word file written in the chat. Only the template is shared, not the renderer: see the module docstring.
+  As in the chat (`sanitize_markdown`), only links to registered source URLs become hyperlinks; any other link or bare
+  URL in the report stays plain text. Rendering is on demand from the stored report; old jobs work too.
 
 
 ## 5b. Own sources: uploaded files and knowledge bases (requirement A4)
@@ -275,6 +301,7 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
 2. **Service** (`services/own_sources.py`). Applies the limits (`RA_OWN_MAX_FILES` 10, `RA_OWN_MAX_FILE_CHARS` 2,000,000, `RA_OWN_MAX_COLLECTIONS` 5) and
    reports what it cut, in German, back to the pipe (shown in the plan and in the "queued" message). The plan step stores previews with the
    draft; the job stores the full texts and the knowledge base ids (`jobs.own_sources`), so a night run does not depend on the user's session.
+   The texts are removed when the job ends (`done`, `error` or `cancelled`); the job is deleted after `RA_JOB_RETENTION_DAYS` (365).
    Old databases get the column added on start. `GET /jobs/{id}` returns names and sizes (`own_sources`), never texts.
 3. **Knowledge bases at run time**: the engine tool `knowledge_search(query)` asks `OwuiRetriever`, which POSTs to
    `/api/v1/retrieval/query/collection` with the service's admin key for **one stored id at a time**. The tool has no collection argument, the
@@ -301,7 +328,7 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
   running does the pipe say so ("enthält keinen lesbaren Text" / "wird noch verarbeitet") and leave the file out.
 * Attachments of the type `url`, `note`, `chat`, `folder` are reported and not used. Images are ignored.
 * A knowledge base is approved when the plan is approved. If the user loses access before a night run starts, the run still reads it with
-  the service key (the content was approved by the system at approval time). Delete or re-share in Open WebUI and cancel the job if that matters.
+  the service key (the content was approved by the system at approval time). Delete or re-share in Open WebUI and cancel the job (`POST /jobs/{id}/cancel`, or "abbrechen" in the chat) if that matters.
 * The service trusts the pipe (shared bearer token). Anyone who can call the service with that token can name any knowledge base id; keep
   the NetworkPolicy and the token as described in section 3.
 * Retrieval quality for knowledge bases is Open WebUI's (its embedding model, hybrid search and `k` settings, here `k` = 6 chunks per query).

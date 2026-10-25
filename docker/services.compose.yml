@@ -7,7 +7,8 @@ services:
       POSTGRES_USER: research
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: research
-    volumes: [pgdata:/var/lib/postgresql/data]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U research -d research"]
       interval: 5s
@@ -28,6 +29,9 @@ services:
       RA_LLM_MODEL_EMBED: ${RA_LLM_MODEL_EMBED:-qwen-embed}
       RA_LLM_EXTRA_BODY_THINK: ${RA_LLM_EXTRA_BODY_THINK:-}
       RA_LLM_EXTRA_BODY_FAST: ${RA_LLM_EXTRA_BODY_FAST:-}
+      RA_LLM_TIMEOUT_SECONDS: ${RA_LLM_TIMEOUT_SECONDS:-1800}
+      RA_LLM_MAX_RETRIES: ${RA_LLM_MAX_RETRIES:-3}
+      RA_LLM_CONCURRENCY: ${RA_LLM_CONCURRENCY:-6}
       RA_SEARCH_URL: ${RA_SEARCH_URL:?set RA_SEARCH_URL}
       RA_SEARCH_KEY: ${RA_SEARCH_KEY:-}
       RA_FIRECRAWL_URL: ${RA_FIRECRAWL_URL:?set RA_FIRECRAWL_URL}
@@ -40,6 +44,7 @@ services:
       RA_POLL_SECONDS: ${RA_POLL_SECONDS:-5}
       RA_STALE_SECONDS: ${RA_STALE_SECONDS:-120}
       RA_JOB_TIMEOUT_SECONDS: ${RA_JOB_TIMEOUT_SECONDS:-3600}
+      RA_JOB_RETENTION_DAYS: ${RA_JOB_RETENTION_DAYS:-365}
       RA_OWN_MAX_FILES: ${RA_OWN_MAX_FILES:-10}
       RA_OWN_MAX_FILE_CHARS: ${RA_OWN_MAX_FILE_CHARS:-2000000}
       RA_OWN_MAX_COLLECTIONS: ${RA_OWN_MAX_COLLECTIONS:-5}
@@ -77,5 +82,6 @@ services:
       OPENAI_API_KEY: ${RA_LLM_API_KEY:-none}
       OFFLINE_MODE: "true"
       ENABLE_OLLAMA_API: "false"
-    volumes: [owui-data:/app/backend/data]
+    volumes:
+      - owui-data:/app/backend/data
     extra_hosts: ["host.docker.internal:host-gateway"]

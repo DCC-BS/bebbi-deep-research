@@ -108,11 +108,13 @@ async def test_own_sources_are_stored_with_the_job_and_reach_the_engine(tmp_path
         assert r.status_code == 200 and r.json()["own_sources"]["collections"] == [{"name": "Beschaffung"}]
         job = await wait_status(c, r.json()["job_id"], {"done"})
         assert job["own_sources"]["files"][0]["chars"] == len(("Frist 28 Tage. " * 50).strip())
-        assert "Frist 28 Tage" not in json.dumps(job)  # texts stay in the database
+        assert "Frist 28 Tage" not in json.dumps(job)  # the API never returns texts
+        # the texts were needed by the run only: the finished job keeps names, sizes and the knowledge base ids
         stored = json.loads((await app.state.container.db().run("select own_sources from jobs"))[0]["own_sources"])
-        assert stored["files"][0]["text"].startswith("Frist 28 Tage") and stored["collections"] == [
-            {"id": "kb1", "name": "Beschaffung"}
-        ]
+        assert (
+            "text" not in stored["files"][0] and stored["files"][0]["chars"] == job["own_sources"]["files"][0]["chars"]
+        )
+        assert stored["collections"] == [{"id": "kb1", "name": "Beschaffung"}]
         kind, own = FakeAgent.own_seen[-1]
         assert kind == "run" and own.files[0].text.startswith("Frist") and own.files[0].url.endswith("/f1/content")
         assert own.retrieve is not None and own.collections[0].id == "kb1"

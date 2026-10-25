@@ -6,10 +6,13 @@ repos:
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
+        # Helm templates are not plain YAML; ruamel rejects the `[mcp:x, web]` flow lists PyYAML reads.
+        exclude: ^deploy/helm/.*/templates/|presets\.yaml$
       - id: check-json
         exclude: ^.devcontainer/devcontainer.json|.vscode/.*
       - id: pretty-format-json
-        exclude: ^.devcontainer/devcontainer.json|.vscode/.*
+        # deploy/openwebui/*.json is generated (scripts/build_openwebui_assets.py, test_openwebui_assets_up_to_date)
+        exclude: ^.devcontainer/devcontainer.json|.vscode/.*|^deploy/openwebui/
         args: [--autofix]
       - id: end-of-file-fixer
       - id: trailing-whitespace

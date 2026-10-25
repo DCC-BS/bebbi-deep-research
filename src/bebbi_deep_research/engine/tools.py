@@ -3,13 +3,20 @@
 import asyncio
 import ipaddress
 import json
-import math
 import re
 import threading
 import time
+from collections import Counter
 from urllib.parse import urlparse
 
 import httpx
+from dcc_backend_common.logger import get_logger
+
+from . import metrics
+from .tlds import TLDS
+from .vectors import scores
+
+logger = get_logger(__name__)
 
 
 def domain(url: str) -> str:
@@ -25,14 +32,31 @@ def domain_match(url: str, domains: list[str]) -> bool:
 
 
 _BAD_SUFFIX = (".local", ".localhost", ".svc", ".cluster.local", ".internal", ".lan", ".home.arpa")
+# public names that resolve to loopback or to an IP written into the name (DNS rebinding helpers)
+_LOOPBACK_DOMAINS = (
+    "localtest.me",
+    "lvh.me",
+    "vcap.me",
+    "localhost.direct",
+    "nip.io",
+    "sslip.io",
+    "xip.io",
+    "traefik.me",
+)
+_INTERNAL_FIRST_LABEL = ("intranet", "intra")  # intranet.bs.ch: an internal host under a public domain
 _NUMERIC_HOST = re.compile(r"(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+))*", re.I)
 
 
 def fetchable(url: str) -> bool:
     """Return whether a URL may be fetched: public http(s) pages only.
 
-    Rejected: other schemes, localhost and cluster-internal names, and private, loopback, link-local or reserved
-    IP literals (the scraper runs inside the cluster).
+    Rejected: other schemes; IP literals that are private, loopback, link-local or reserved; and host names that are
+    not public: single labels (``intranet``, ``open-webui``), names whose last label is not a public top-level
+    domain (Kubernetes ``svc.namespace`` and ``kubernetes.default``, ``.svc``, ``.cluster.local``, ``.internal``),
+    localhost-style names (``localhost``, ``localtest.me``, ``nip.io``) and ``intranet.*`` hosts. The scraper runs
+    inside the cluster and may reach internal hosts directly, so only names of the public DNS pass.
+
+    Not covered: a public name that resolves to an internal address, and redirects followed by the scraper.
     """
     try:
         u = urlparse(url.strip())
@@ -41,42 +65,80 @@ def fetchable(url: str) -> bool:
         return False
     if u.scheme not in ("http", "https") or not host:
         return False
-    if host == "localhost" or "." not in host and ":" not in host or host.endswith(_BAD_SUFFIX):
-        return False
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return not _NUMERIC_HOST.fullmatch(host)  # 2130706433 / 0x7f.1: inet_aton forms of an IP
+        return _public_name(host)
     ip = getattr(ip, "ipv4_mapped", None) or ip
     return ip.is_global and not ip.is_multicast
 
 
+def _public_name(host: str) -> bool:
+    labels = host.split(".")
+    if len(labels) < 2 or not all(labels) or _NUMERIC_HOST.fullmatch(host):  # 2130706433 / 0x7f.1: forms of an IP
+        return False
+    if host.endswith(_BAD_SUFFIX) or "localhost" in labels or labels[0] in _INTERNAL_FIRST_LABEL:
+        return False
+    if any(host == d or host.endswith("." + d) for d in _LOOPBACK_DOMAINS):
+        return False
+    return labels[-1] in TLDS
+
+
 class Tools:
-    """Web search (Serper) and page fetching (Firecrawl) for one research."""
+    """Web search (Serper) and page fetching (Firecrawl) for one research.
+
+    Attributes:
+        errors: Failed calls of this research by ``"<tool>:<reason>"`` (reason: HTTP status, exception name or
+            ``bad_json``), e.g. ``{"search:429": 2}``.
+    """
 
     def __init__(self, search_url: str, search_key: str, firecrawl_url: str, firecrawl_key: str = ""):
         """Create the HTTP client for search and fetch."""
         self.search_url, self.search_key = search_url, search_key
         self.firecrawl_url, self.firecrawl_key = firecrawl_url, firecrawl_key
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=150, write=30, pool=60))
+        self.errors: Counter[str] = Counter()
+
+    def _failed(self, tool: str, reason: str, url: str) -> None:
+        """Count and log a failed search or fetch; the log names the host only (queries and paths may be personal).
+
+        401 and 403 mean a wrong key or a blocked account and are logged as errors; the rest as warnings.
+        """
+        self.errors[f"{tool}:{reason}"] += 1
+        metrics.inc("research_tool_errors_total", tool=tool, reason=reason)
+        log = logger.error if reason in ("401", "403") else logger.warning
+        log(f"{tool} failed", tool=tool, reason=reason, host=urlparse(url).hostname or "")
 
     async def search(self, q: str, lang: str = "de", num: int = 8) -> list[dict]:
-        """Search the web (Swiss results); return title, URL, snippet and date per hit, [] on errors."""
+        """Search the web (Swiss results); return title, URL, snippet and date per hit.
+
+        A failure (HTTP status other than 200, transport error, unreadable body) returns [] and is counted in
+        `errors` and logged, so a wrong key or an exhausted quota shows up instead of looking like "no results".
+        """
         body = {"q": q, "num": num, "gl": "ch", "hl": lang if lang in ("de", "fr", "it", "en") else "de"}
         try:
             r = await self.http.post(self.search_url, json=body, headers={"X-API-KEY": self.search_key})
-            return [
-                {
-                    "title": o.get("title", ""),
-                    "url": o.get("link", ""),
-                    "snippet": o.get("snippet", ""),
-                    "date": o.get("date", ""),
-                }
-                for o in (r.json().get("organic") or [])
-                if o.get("link")
-            ]
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError as e:
+            self._failed("search", type(e).__name__, self.search_url)
             return []
+        if r.status_code != 200:
+            self._failed("search", str(r.status_code), self.search_url)
+            return []
+        try:
+            organic = r.json().get("organic") or []
+        except (ValueError, AttributeError):
+            self._failed("search", "bad_json", self.search_url)
+            return []
+        return [
+            {
+                "title": o.get("title", ""),
+                "url": o.get("link", ""),
+                "snippet": o.get("snippet", ""),
+                "date": o.get("date", ""),
+            }
+            for o in organic
+            if isinstance(o, dict) and o.get("link")
+        ]
 
     async def fetch(self, url: str) -> tuple[str, str]:
         """Returns (title, markdown); empty markdown if the page could not be fetched."""
@@ -84,7 +146,11 @@ class Tools:
         return title, text
 
     async def fetch_meta(self, url: str) -> tuple[str, str, str]:
-        """Returns (title, markdown, date): the date is the page's published/modified date if it states one."""
+        """Returns (title, markdown, date): the date is the page's published/modified date if it states one.
+
+        A failed scrape (HTTP status other than 200, transport error, unreadable body) returns empty strings and is
+        counted in `errors` and logged with the page's host.
+        """
         if not fetchable(url):
             return "", "", ""
         try:
@@ -93,6 +159,13 @@ class Tools:
                 json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
                 headers={"Authorization": f"Bearer {self.firecrawl_key}"},
             )
+        except httpx.HTTPError as e:
+            self._failed("fetch", type(e).__name__, url)
+            return "", "", ""
+        if r.status_code != 200:
+            self._failed("fetch", str(r.status_code), url)
+            return "", "", ""
+        try:
             data = r.json().get("data") or {}
             meta = data.get("metadata") or {}
             date = next(
@@ -116,7 +189,8 @@ class Tools:
                 data.get("markdown") or "",
                 date,
             )
-        except (httpx.HTTPError, ValueError):
+        except (ValueError, AttributeError):
+            self._failed("fetch", "bad_json", url)
             return "", "", ""
 
 
@@ -136,13 +210,7 @@ async def focus(
     text = text[:max_chars]
     chunks = [text[i : i + chunk] for i in range(0, len(text), chunk - 150)]
     vecs = await llm.embed(queries + chunks)
-    qv, cv = vecs[: len(queries)], vecs[len(queries) :]
-
-    def cos(a, b):
-        norm = math.sqrt(sum(x * x for x in a) * sum(y * y for y in b)) or 1
-        return sum(x * y for x, y in zip(a, b, strict=True)) / norm
-
-    score = await asyncio.to_thread(lambda: [max(cos(c, q) for q in qv) for c in cv])
+    score = (await asyncio.to_thread(scores, vecs, len(queries))).tolist()
     keep, used = [], 0
     for i in sorted(range(len(chunks)), key=lambda i: -score[i]):
         if used + len(chunks[i]) > budget_chars:
@@ -157,6 +225,10 @@ class MCPClient:
 
     Every request is retried on 5xx and connection errors (the Grossrat server answers 503 now and then), and
     the session is re-opened when the server forgets it (404).
+
+    Calls run in worker threads (``acall``), which asyncio cannot cancel. When the job ends (done, cancelled,
+    timed out) the service closes the client; a retry loop then stops within half a second instead of sleeping on
+    (up to 45 s per request). A request already sent still runs to its own timeout.
     """
 
     RETRIES = 6
@@ -180,8 +252,10 @@ class MCPClient:
                 must not take minutes).
         """
         self.url, self.allow = url, set(allow or [])
+        self.host = urlparse(url).hostname or ""
         self.retries, self.deadline = retries or self.RETRIES, deadline
         self._lock = threading.RLock()  # request ids and the session are shared by the threads of one job
+        self._closed = threading.Event()
         self.http = httpx.Client(
             timeout=timeout,
             headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
@@ -190,6 +264,25 @@ class MCPClient:
         self._tools = None
         self._open()
         self.retries, self.deadline = self.RETRIES, None  # connect limits apply to the connect only
+
+    def close(self) -> None:
+        """Close the connections; retry loops in other threads stop at their next wait."""
+        self._closed.set()
+        self.http.close()
+
+    def _sleep(self, seconds: float) -> None:
+        """Wait between attempts, in steps of 0.5 s.
+
+        Raises:
+            RuntimeError: Once the client is closed (``close()`` or ``http.close()``): the job is over.
+        """
+        end = time.monotonic() + seconds
+        while not self.http.is_closed:
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            self._closed.wait(min(left, 0.5))
+        raise RuntimeError("MCP client closed")
 
     def _open(self) -> None:
         with self._lock:
@@ -207,6 +300,10 @@ class MCPClient:
                 self.http.headers["mcp-session-id"] = sid
             self.http.post(self.url, json={"jsonrpc": "2.0", "method": "notifications/initialized"}).raise_for_status()
 
+    def _retrying(self, method: str, attempt: int, reason: str) -> None:
+        metrics.inc("research_mcp_errors_total", host=self.host, kind="retry")
+        logger.warning("mcp request retry", host=self.host, method=method, attempt=attempt + 1, reason=reason)
+
     def _post(self, method: str, params: dict, reopen: bool = True):
         for attempt in range(self.retries):
             with self._lock:
@@ -221,18 +318,21 @@ class MCPClient:
                     json={"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
                     headers={"mcp-session-id": sid} if sid else None,
                 )
-            except httpx.TransportError:
+            except httpx.TransportError as e:
                 if last:
                     raise
-                time.sleep(3 * (attempt + 1))
+                self._retrying(method, attempt, type(e).__name__)
+                self._sleep(3 * (attempt + 1))
                 continue
             if r.status_code == 404 and reopen and sid:
+                logger.info("mcp session re-opened", host=self.host, method=method)
                 with self._lock:
                     if self.http.headers.get("mcp-session-id") == sid:  # not re-opened by another thread meanwhile
                         self._open()
                 continue
             if r.status_code >= 500 and not last:
-                time.sleep(3 * (attempt + 1))  # 3+6+...: rides out a container restart
+                self._retrying(method, attempt, str(r.status_code))
+                self._sleep(3 * (attempt + 1))  # 3+6+...: rides out a container restart
                 continue
             r.raise_for_status()
             return r
@@ -267,8 +367,10 @@ class MCPClient:
             text = "\n".join(c.get("text", "") for c in res.get("content", []) if c.get("type") == "text")
             if not res.get("isError"):
                 return text
+            metrics.inc("research_mcp_errors_total", host=self.host, kind="tool_error")
+            logger.warning("mcp tool error result", host=self.host, tool=name, attempt=attempt + 1)
             if attempt == 0:
-                time.sleep(3)
+                self._sleep(3)
         raise RuntimeError(f"{name}: {text[:300]}")
 
     async def acall(self, name: str, arguments: dict) -> str:

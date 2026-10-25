@@ -327,7 +327,7 @@ wheels = [
 
 [[package]]
 name = "bebbi-deep-research"
-version = "1.1.0"
+version = "1.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -337,6 +337,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "json-repair" },
+    { name = "numpy" },
     { name = "openai" },
     { name = "pydantic" },
     { name = "python-docx" },
@@ -344,6 +345,7 @@ dependencies = [
     { name = "rapidfuzz" },
     { name = "rich" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "structlog" },
     { name = "tzdata" },
     { name = "uvicorn" },
 ]
@@ -367,6 +369,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "json-repair", specifier = ">=0.50" },
+    { name = "numpy", specifier = ">=2.1" },
     { name = "openai", specifier = ">=1.109" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "python-docx", specifier = ">=1.2.0" },
@@ -374,6 +377,7 @@ requires-dist = [
     { name = "rapidfuzz", specifier = ">=3.13" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
+    { name = "structlog", specifier = ">=26.1.0" },
     { name = "tzdata", specifier = ">=2024.2" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
