@@ -1,6 +1,7 @@
 """Tools (Serper / Firecrawl mapping, fetch restrictions) and MCPClient against httpx.MockTransport."""
 
 import json
+import time
 
 import httpx
 import pytest
@@ -207,6 +208,7 @@ def test_public_urls_are_fetchable(url):
 @pytest.fixture
 def mcp(monkeypatch):
     monkeypatch.setattr(T.time, "sleep", lambda s: None)
+    monkeypatch.setattr(MCPClient, "_sleep", lambda self, s: None)
 
     def build(handler, **kw):
         monkeypatch.setattr(T.httpx, "Client", lambda **k: REAL_CLIENT(transport=httpx.MockTransport(handler), **k))
@@ -397,3 +399,30 @@ async def test_focus_embeds_only_the_head_of_a_huge_page():
     out = await T.focus(Emb(), "x" * 2_000_000, ["q"], budget_chars=6000)
     assert seen[0] - 1 <= T.FOCUS_MAX_CHARS // (1200 - 150) + 1
     assert 0 < len(out) < 10_000
+
+
+def test_closing_the_client_stops_a_retry_loop_in_its_thread(monkeypatch):
+    """The job's end closes the client; the thread must not sleep through the remaining retries (45 s)."""
+    import threading
+
+    def handler(r):
+        return httpx.Response(503) if rpc(r).get("method") == "tools/call" else standard(r)
+
+    monkeypatch.setattr(T.httpx, "Client", lambda **k: REAL_CLIENT(transport=httpx.MockTransport(handler), **k))
+    c = MCPClient("http://mcp/")
+    errors = []
+
+    def run():
+        try:
+            c.call("a", {"q": 1})
+        except Exception as e:
+            errors.append(e)
+
+    t = threading.Thread(target=run)
+    started = time.monotonic()
+    t.start()
+    time.sleep(0.3)
+    c.http.close()  # what the service's close_agent does
+    t.join(timeout=5)
+    assert not t.is_alive() and time.monotonic() - started < 2
+    assert errors and "closed" in str(errors[0])

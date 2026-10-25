@@ -138,6 +138,9 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 
 * **Graceful shutdown (SIGTERM):** running jobs are cancelled and put back to `queued`; they restart from the beginning on
   the next start (no partial resume). uvicorn waits up to 20 s (`--timeout-graceful-shutdown` in the Dockerfile entrypoint); the chart sets `terminationGracePeriodSeconds: 45`, keep it above that plus the re-queue.
+* **MCP calls** run in worker threads, which asyncio cannot cancel. When a run ends (done, failed, timed out,
+  cancelled) its MCP clients are closed: a retry wait stops within 0.5 s, a request already sent runs to its 120 s
+  timeout and is then dropped.
 * **Crash / OOM kill:** the heartbeat (every worker tick) stops; after `RA_STALE_SECONDS` any replica re-queues the job.
 * **Failure:** the job becomes `error` with the message; the message is also written into the chat.
 * Drafts older than 14 days are deleted; jobs and reports are kept (add a retention job if needed).

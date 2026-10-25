@@ -225,6 +225,10 @@ class MCPClient:
 
     Every request is retried on 5xx and connection errors (the Grossrat server answers 503 now and then), and
     the session is re-opened when the server forgets it (404).
+
+    Calls run in worker threads (``acall``), which asyncio cannot cancel. When the job ends (done, cancelled,
+    timed out) the service closes the client; a retry loop then stops within half a second instead of sleeping on
+    (up to 45 s per request). A request already sent still runs to its own timeout.
     """
 
     RETRIES = 6
@@ -251,6 +255,7 @@ class MCPClient:
         self.host = urlparse(url).hostname or ""
         self.retries, self.deadline = retries or self.RETRIES, deadline
         self._lock = threading.RLock()  # request ids and the session are shared by the threads of one job
+        self._closed = threading.Event()
         self.http = httpx.Client(
             timeout=timeout,
             headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
@@ -259,6 +264,25 @@ class MCPClient:
         self._tools = None
         self._open()
         self.retries, self.deadline = self.RETRIES, None  # connect limits apply to the connect only
+
+    def close(self) -> None:
+        """Close the connections; retry loops in other threads stop at their next wait."""
+        self._closed.set()
+        self.http.close()
+
+    def _sleep(self, seconds: float) -> None:
+        """Wait between attempts, in steps of 0.5 s.
+
+        Raises:
+            RuntimeError: Once the client is closed (``close()`` or ``http.close()``): the job is over.
+        """
+        end = time.monotonic() + seconds
+        while not self.http.is_closed:
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            self._closed.wait(min(left, 0.5))
+        raise RuntimeError("MCP client closed")
 
     def _open(self) -> None:
         with self._lock:
@@ -298,7 +322,7 @@ class MCPClient:
                 if last:
                     raise
                 self._retrying(method, attempt, type(e).__name__)
-                time.sleep(3 * (attempt + 1))
+                self._sleep(3 * (attempt + 1))
                 continue
             if r.status_code == 404 and reopen and sid:
                 logger.info("mcp session re-opened", host=self.host, method=method)
@@ -308,7 +332,7 @@ class MCPClient:
                 continue
             if r.status_code >= 500 and not last:
                 self._retrying(method, attempt, str(r.status_code))
-                time.sleep(3 * (attempt + 1))  # 3+6+...: rides out a container restart
+                self._sleep(3 * (attempt + 1))  # 3+6+...: rides out a container restart
                 continue
             r.raise_for_status()
             return r
@@ -346,7 +370,7 @@ class MCPClient:
             metrics.inc("research_mcp_errors_total", host=self.host, kind="tool_error")
             logger.warning("mcp tool error result", host=self.host, tool=name, attempt=attempt + 1)
             if attempt == 0:
-                time.sleep(3)
+                self._sleep(3)
         raise RuntimeError(f"{name}: {text[:300]}")
 
     async def acall(self, name: str, arguments: dict) -> str:
