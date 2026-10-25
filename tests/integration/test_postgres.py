@@ -5,11 +5,15 @@ RA_TEST_DATABASE_URL=postgresql://postgres:x@localhost:55432/postgres mise run i
 """
 
 import asyncio
+import json
 import os
+import time
+from types import SimpleNamespace
 
 import pytest
 
 from bebbi_deep_research.services.db import DB, MIGRATIONS
+from bebbi_deep_research.services.jobs import JobRunner
 from bebbi_deep_research.utils.app_config import normalize_db_url
 
 URL = os.environ.get("RA_TEST_DATABASE_URL", "")
@@ -57,4 +61,31 @@ async def test_database_of_the_first_release_gets_the_new_columns_and_keeps_its_
         assert column in await _columns(db, table)
     rows = await db.run("select id, status, attempts, owner from jobs")
     assert rows == [{"id": "old", "status": "done", "attempts": None, "owner": None}]
+    indexes = {
+        r["indexname"] for r in await db.run("select indexname from pg_indexes where tablename in ('jobs','drafts')")
+    }
+    assert {"jobs_user_idx", "jobs_message_idx", "jobs_draft_idx", "drafts_created_idx"} <= indexes
+    await db.close()
+
+
+async def test_retention_on_postgres():
+    db = await _fresh()
+    await db.init()
+    now, day = time.time(), 86400.0
+    texts = json.dumps({"files": [{"id": "f", "name": "a.pdf", "text": "Geheim", "chars": 6}], "collections": []})
+    for jid, status, finished in (("old", "done", now - 366 * day), ("new", "error", now - day), ("q", "queued", None)):
+        await db.execute(
+            "insert into jobs (id, status, finished, created, own_sources) values (:i, :s, :f, :c, :o)",
+            i=jid,
+            s=status,
+            f=finished,
+            c=now - 400 * day,
+            o=texts,
+        )
+    await db.execute("insert into drafts (id, created) values ('d', :c)", c=now - 15 * day)
+    runner = JobRunner(SimpleNamespace(job_retention_days=365), db, None, None)
+    await runner.purge(now)
+    jobs = {r["id"]: r["own_sources"] for r in await db.run("select id, own_sources from jobs")}
+    assert set(jobs) == {"new", "q"} and "Geheim" not in jobs["new"] and "Geheim" in jobs["q"]
+    assert await db.run("select id from drafts") == []
     await db.close()

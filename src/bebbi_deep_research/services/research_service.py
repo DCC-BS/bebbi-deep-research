@@ -9,6 +9,7 @@ from typing import Any
 
 from dcc_backend_common.logger import get_logger
 from dcc_backend_common.usage_tracking import UsageTrackingService
+from structlog.contextvars import get_contextvars
 
 from bebbi_deep_research.engine.config import Config
 from bebbi_deep_research.models.own_sources import OwnSourcesRequest
@@ -21,8 +22,8 @@ from bebbi_deep_research.models.research import (
 )
 from bebbi_deep_research.services.db import DB
 from bebbi_deep_research.services.docx_export import docx_filename, render_docx
-from bebbi_deep_research.services.jobs import in_window, new_id, runs_by_day
 from bebbi_deep_research.services.own_sources import describe, prepare, to_engine
+from bebbi_deep_research.services.policy import in_window, new_id, runs_by_day
 from bebbi_deep_research.services.report import build_sources, owui_source_events, ui_markdown
 from bebbi_deep_research.utils.app_config import AppConfig
 from bebbi_deep_research.utils.errors import conflict, invalid_request, not_found, rate_limited, user_error
@@ -69,6 +70,7 @@ class ResearchService:
         db: DB,
         agent_factory: Callable[..., Any],
         usage: UsageTrackingService,
+        runner: Any = None,
     ) -> None:
         """Initialize the service.
 
@@ -78,12 +80,14 @@ class ResearchService:
             db: The jobs and drafts database.
             agent_factory: ``agent_factory(job_id, on_event=None)`` returns an object with clarify, plan, edit_plan.
             usage: Usage events with pseudonymised user ids.
+            runner: The job runner (cancels runs and tells the chat).
         """
         self.settings = settings
         self.presets = presets
         self.db = db
         self.agent_factory = agent_factory
         self.usage = usage
+        self.runner = runner
 
     def _own_for(
         self, preset: str, own: OwnSourcesRequest | None, preview: bool
@@ -233,8 +237,8 @@ class ResearchService:
         # quota and one-job-per-draft are part of the insert, so that parallel requests cannot slip past a read
         inserted = await self.db.execute(
             "insert into jobs (id, draft, task, preset, depth, plan, user_id, chat_id, message_id, run_when, status,"
-            " created, events, own_sources) select :id,:dr,:t,:p,:d,:pl,:u,:c,:m,:w,'queued',"
-            "cast(:cr as double precision),'[]',:o where not exists (select 1 from jobs where draft=:dr) "
+            " created, events, own_sources, request_id) select :id,:dr,:t,:p,:d,:pl,:u,:c,:m,:w,'queued',"
+            "cast(:cr as double precision),'[]',:o,:rid where not exists (select 1 from jobs where draft=:dr) "
             "and (cast(:q as integer) = 0 or (select count(*) from jobs where user_id=:u "
             "and created>cast(:since as double precision)) < :q)",
             id=job_id,
@@ -251,6 +255,8 @@ class ResearchService:
             o=json.dumps(stored, ensure_ascii=False) if stored else None,
             q=quota,
             since=now - 86400,
+            # X-Request-ID of the submit (the pipe sends "<chat_id>:<message_id>"): the run logs it with every line
+            rid=str(get_contextvars().get("request_id") or "")[:200] or None,
         )
         if not inserted:
             prior = await self._job_of_draft(draft["id"])
@@ -260,7 +266,7 @@ class ResearchService:
         files, collections = (stored or {}).get("files", []), (stored or {}).get("collections", [])
         logger.info(
             "job queued",
-            job=job_id,
+            job_id=job_id,
             preset=draft["preset"],
             depth=draft["depth"],
             when=str(when),
@@ -339,6 +345,18 @@ class ResearchService:
         )
         return WordFile(data, docx_filename(report_title(job["report"]), job["finished"], self.settings.timezone))
 
+    async def cancel(self, job_id: str, user_id: str | None) -> dict[str, str]:
+        """Cancel a queued or running job; the chat message of the job says so.
+
+        Raises:
+            ApiErrorException: 404 for an unknown or foreign job, 409 if the job has already ended.
+        """
+        job = await self._job(job_id, user_id, "id, user_id, chat_id, message_id, status, own_sources, request_id")
+        if job["status"] not in ("queued", "starting", "running") or not await self.runner.cancel(job):
+            raise conflict("Die Recherche ist bereits beendet und kann nicht mehr abgebrochen werden.")
+        self.usage.log_event("research.cancel", user_id)
+        return {"job_id": job_id, "status": "cancelled"}
+
     async def evidence(self, job_id: str, user_id: str | None) -> dict[str, Any]:
         """Return the evidence ledger of a job (cards with quotes and URLs)."""
         job = await self._job(job_id, user_id, "user_id, evidence")
@@ -351,7 +369,7 @@ class ResearchService:
         lines = ["# TYPE research_jobs gauge"]
         lines += [
             f'research_jobs{{status="{s}"}} {counts.get(s, 0)}'
-            for s in ("queued", "starting", "running", "done", "error")
+            for s in ("queued", "starting", "running", "done", "error", "cancelled")
         ]
         lines += ["# TYPE research_in_night_window gauge", f"research_in_night_window {int(in_window(self.settings))}"]
         return "\n".join(lines) + "\n"

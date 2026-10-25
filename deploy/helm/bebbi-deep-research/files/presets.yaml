@@ -1,4 +1,4 @@
-# research-agent presets (docs/research-agent-design.md). One preset = one research profile; in Open WebUI the
+# bebbi-deep-research presets (docs/presets.md). One preset = one research profile; in Open WebUI the
 # model "Deep Research" suggests one per task from its `description` and the user confirms it. Only steering surface:
 # no code per topic.
 #
@@ -64,7 +64,7 @@ mcp_servers:
 budgets:
   # rounds: research rounds incl. follow-ups; max_subq: sub-questions in the plan;
   # queries_per_subq: web queries per sub-question and round; fetch_per_subq: pages read per sub-question and round;
-  # max_follow_up: new sub-questions the reflection may add per round; max_tokens: hard stop for research.
+  # max_follow_up: new sub-questions the reflection may add per round; max_tokens: research budget (see docs/presets.md).
   # focus_calls / focus_words: tool calls and typical report length of the focus engine.
   quick:    {rounds: 1, max_subq: 4, queries_per_subq: 2, fetch_per_subq: 3, max_follow_up: 0, max_tokens: 200000, words_per_part: 350, parts: [2, 3], focus_calls: 8, focus_words: 600}
   standard: {rounds: 2, max_subq: 8, queries_per_subq: 3, fetch_per_subq: 4, max_follow_up: 4, max_tokens: 450000, words_per_part: 800, parts: [4, 6], focus_calls: 14, focus_words: 900}

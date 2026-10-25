@@ -4,6 +4,14 @@
 (chart: `presets.inline` or `presets.existingConfigMap`; the chart ships a copy in `files/presets.yaml`, kept identical to
 `config/presets.yaml` by a test). Restart the pod after a change (the chart rolls the pod via a checksum annotation).
 
+The file is validated when the service starts (`engine/config.py`, pydantic): an unknown or misspelled key at any level,
+an `engine`, `language` or `own_sources` value outside the lists below, a route other than `web` or `mcp:<server of
+mcp_servers>`, an `mcp` allowlist for a server that is not configured or with a tool missing from the server's `tools`,
+a `budget` override of a field that does not exist, and a missing `quick`/`standard`/`deep` budget stop the start with
+a message that lists every problem (`presets file ... is invalid: - presets.dokumente.own_source: unknown key (typo?)`).
+Check a file (for example the ConfigMap copy in kdkp-kiw-k8s-config) before deploying it:
+`uv run python -m bebbi_deep_research.engine.config path/to/presets.yaml`.
+
 ## Engines
 
 | Engine | Presets | How it works |
@@ -16,7 +24,7 @@ Daytime rule: only `quick` runs of a `focus` preset may start outside the night 
 ## Budgets (depth)
 
 `quick`, `standard`, `deep` in `budgets:`. Fields: `rounds`, `max_subq`, `queries_per_subq`, `fetch_per_subq`,
-`max_follow_up`, `max_tokens` (hard stop), `words_per_part`, `parts` (min, max parts), `focus_calls` (tool calls of the
+`max_follow_up`, `max_tokens` (research budget: no new round or tool call above 80 %; writing is not capped), `words_per_part`, `parts` (min, max parts), `focus_calls` (tool calls of the
 focus engine), `focus_words` (typical report length). A preset may override single fields with `budget:`.
 
 ## Preset fields
@@ -32,6 +40,7 @@ focus engine), `focus_words` (typical report length). A preset may override sing
 | `query_rules` | text added to query generation and to the focus engine's instructions |
 | `report` | `parts_hint`, `words_per_part`, `analysis_part`, `closing_part`, `writer_rules`, `length_rule`, `format_rule` |
 | `verify_entailment` | check that cited quotes support the sentence |
+| `plan_first` | focus engine: plan before the tool loop (the plan is the checklist); default `true` |
 | `house_style` | `true` (default): German reports follow the Hausstil Kanton Basel-Stadt (`engine/house_style.py`, copied from text-mate-backend `utils/house_style.py`: tone, short sentences, Swiss spelling and typography, numbers, dates, `Fr. 20.–`, gender-neutral wording, anglicisms). Letter rules (Sie/wir) are switched off for reports and citations `[S12]` stay untouched. Not applied to English reports. `false` turns it off |
 | `own_sources` | what happens with files uploaded in the chat and knowledge bases (own sources, [integration.md](integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4)): `prefer` (default) the model uses them first and web search and data tools for the rest; `only` removes web search, page fetch and all MCP tools (and the planner's web discovery), the report rests on the user's documents alone and the service refuses a question without any readable own source; `off` ignores attachments and says so in the plan |
 
@@ -46,8 +55,11 @@ engine: in every sub-question the best matching uploads and the knowledge hits a
 2. Add `name:Label` to the pipe valve `PRESETS` (the preset appears in the card of "Deep Research"; the service
    suggests it from its `description`) and to `LABELS` and `SUGGESTIONS` in `scripts/build_openwebui_assets.py`; run
    `uv run python scripts/build_openwebui_assets.py`.
-3. Copy the file into the chart: `cp config/presets.yaml deploy/helm/bebbi-deep-research/files/presets.yaml`.
-4. Test with `scripts/test_pipe.py "<question>" <preset>`.
+3. Add the label for the Word file to `PRESET_LABELS` in `services/docx_export.py` (without it the Word header shows
+   the preset name) and the preset name to the list in `tests/unit/test_packaging.py`.
+4. Copy the file into the chart: `cp config/presets.yaml deploy/helm/bebbi-deep-research/files/presets.yaml`, and the
+   deployed copy in kdkp-kiw-k8s-config.
+5. Run `mise run test:unit` (it loads and validates both copies) and test with `scripts/test_pipe.py "<question>" <preset>`.
 
 ## Add an MCP server
 

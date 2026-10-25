@@ -5,7 +5,8 @@ import time
 
 import httpx
 
-from bebbi_deep_research.services.jobs import MAX_ATTEMPTS, describe_error
+from bebbi_deep_research.services.jobs import MAX_ATTEMPTS
+from bebbi_deep_research.services.policy import describe_error
 from bebbi_deep_research.utils.app_config import AppConfig
 
 from .conftest import DELIVERY, FakeAgent, running, submit, utc_window, wait_status

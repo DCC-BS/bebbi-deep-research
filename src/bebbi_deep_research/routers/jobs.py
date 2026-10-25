@@ -1,4 +1,4 @@
-"""Job endpoints: submit, status and report, Word file, evidence."""
+"""Job endpoints: submit, status and report, Word file, evidence, cancel."""
 
 from typing import Any
 
@@ -8,10 +8,11 @@ from fastapi import APIRouter, Depends, Response
 from bebbi_deep_research.container import Container
 from bebbi_deep_research.models.research import SubmitJobRequest
 from bebbi_deep_research.routers.auth import require_token
+from bebbi_deep_research.routers.contract import require_api_version
 from bebbi_deep_research.services.docx_export import MIME
 from bebbi_deep_research.services.research_service import ResearchService
 
-router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(require_token)])
+router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(require_token), Depends(require_api_version)])
 
 
 @router.post("")
@@ -58,6 +59,17 @@ async def get_word_file(
     return Response(
         word.data, media_type=MIME, headers={"Content-Disposition": f'attachment; filename="{word.filename}"'}
     )
+
+
+@router.post("/{job_id}/cancel")
+@inject
+async def cancel_job(
+    job_id: str,
+    user_id: str | None = None,
+    service: ResearchService = Depends(Provide[Container.research_service]),
+) -> dict[str, str]:
+    """Cancel a queued or running job (409 if it has already ended)."""
+    return await service.cancel(job_id, user_id)
 
 
 @router.get("/{job_id}/evidence")

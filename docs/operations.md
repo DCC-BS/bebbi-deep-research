@@ -70,9 +70,10 @@ Long files are split into at most about 1,200 passages and embedded once per run
 (about 12 MB per file of 2 million characters with Qwen3-Embedding-4B, so 10 such files take about 120 MB of the pod's
 memory for the duration of the run). Similarity scoring runs in a worker thread.
 
-File texts are stored with the job (`jobs.own_sources`; drafts keep a 1,500-character preview) and stay there with the finished job like the
-report; plan a retention job if documents must not stay in the database. Knowledge bases are read at run time through
-`OWUI_URL`/`OWUI_API_KEY` (`POST /api/v1/retrieval/query/collection`, one stored id at a time, logged as `knowledge query` at DEBUG level); without both
+File texts are stored with the job (`jobs.own_sources`; drafts keep a 1,500-character preview) only until the run ends: when the job
+becomes `done`, `error` or `cancelled` the texts are removed and only names, sizes, links and knowledge base ids stay (enough for `GET /jobs/{id}`,
+delivery and the Word file). See [Retention](#job-lifecycle-and-restarts). Knowledge bases are read at run time through
+`OWUI_URL`/`OWUI_API_KEY` (`POST /api/v1/retrieval/query/collection`, one stored id at a time, logged as `knowledge query`); without both
 variables a knowledge base cannot be used (the tool reports "not reachable" to the model and the report says so under open points).
 Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4).
 
@@ -88,6 +89,7 @@ Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded
 | `RA_POLL_SECONDS` | `5` | worker loop interval |
 | `RA_STALE_SECONDS` | `120` | a running job without heartbeat for this long is re-queued (dead replica) |
 | `RA_JOB_TIMEOUT_SECONDS` | `3600` | a run that takes longer is stopped and reported as failed in the chat; a hung LLM or MCP call cannot block the queue |
+| `RA_JOB_RETENTION_DAYS` | `365` | finished jobs (report, evidence, own-source names) are deleted this many days after they finished; matches the 365-day chat retention of Bebbi Bot |
 
 ### Delivery
 
@@ -108,7 +110,8 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 * Depends on where they are reachable from: Serper (`google.serper.dev`) and the MCP servers (`mcp.opencaselaw.ch`
   external; `*.bs.ch` hosts may be internal). If a `*.bs.ch` MCP host is reachable only directly, add it to `NO_PROXY`;
   if only via proxy, leave it out. A wrong choice shows up as `mcp request retry` and `mcp connect failed, web search
-  instead for 2 minutes` log lines (WARNING, with the server or host), and the run falls back to web search.
+  instead for 2 minutes` log lines (WARNING, with the server or host), and as connection errors in `stats.mcp_errors` of the job
+  (`GET /jobs/{id}`); the run falls back to web search.
 
 ## Night window and daytime rule
 
@@ -128,13 +131,23 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
   cap wait in the service, not in vLLM. Raise `RA_WORKERS` or `RA_LLM_CONCURRENCY` only after watching vLLM queue
   time (`vllm:num_requests_waiting`) during the night.
 * More replicas multiply the worker counts. Jobs are claimed with an atomic `update ... where status='queued'`, so replicas
-  do not run the same job twice. One replica is the recommended setup; run more only after job claims carry an owner token (until then a stale re-queue can let two replicas work on the same job). The chart uses the `Recreate` strategy so that a rollout never runs two pods at once.
-* Token budgets per run are set by depth in `presets.yaml` (`quick` 200k, `standard` 450k, `deep` 900k tokens, hard stop).
+  do not run the same job twice, and every write of a run is guarded by its claim token (`owner`), so a run whose job was
+  re-queued by another replica cannot overwrite the result. One replica is still the recommended setup (worker counts
+  multiply with replicas). The chart uses the `Recreate` strategy so that a rollout never runs two pods at once.
+* Token budgets per run are set by depth in `presets.yaml` (`quick` 200k, `standard` 450k, `deep` 900k tokens). They are
+  not a hard stop: the pipeline engine starts no new research round above 80 % of the budget and the focus engine
+  withdraws its tools there, but writing the report is not capped. `RA_JOB_TIMEOUT_SECONDS` is the hard limit of a run.
 * Measure before allowing more daytime runs: `RA_DAY_WORKERS` is the only knob that moves load into office hours.
 
 ## Job lifecycle and restarts
 
-`queued` to `starting` to `running` to `done` or `error`. Events (status lines) are stored with the job (last 50).
+`queued` to `starting` to `running` to `done` or `error`; `cancelled` from `queued`, `starting` or `running`. Events
+(status lines) are stored with the job (last 50).
+
+* **Cancel:** `POST /jobs/{id}/cancel?user_id=` (the pipe: the user writes **abbrechen** in the chat while the job
+  waits or runs). The job becomes `cancelled`, a run on this replica stops at once, a run on another replica at its
+  next heartbeat (`RA_POLL_SECONDS`); the chat message of the job gets "Die Recherche wurde abgebrochen. Es wird kein
+  Bericht erstellt." through the delivery route.
 
 * **Graceful shutdown (SIGTERM):** running jobs are cancelled and put back to `queued`; they restart from the beginning on
   the next start (no partial resume). uvicorn waits up to 20 s (`--timeout-graceful-shutdown` in the Dockerfile entrypoint); the chart sets `terminationGracePeriodSeconds: 45`, keep it above that plus the re-queue.
@@ -143,7 +156,10 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
   timeout and is then dropped.
 * **Crash / OOM kill:** the heartbeat (every worker tick) stops; after `RA_STALE_SECONDS` any replica re-queues the job.
 * **Failure:** the job becomes `error` with the message; the message is also written into the chat.
-* Drafts older than 14 days are deleted; jobs and reports are kept (add a retention job if needed).
+* **Retention** (hourly, in the worker loop): drafts older than 14 days are deleted; finished jobs (`done`, `error`, `cancelled`) with
+  their report, evidence and own-source metadata are deleted `RA_JOB_RETENTION_DAYS` (365) days after they finished.
+  Uploaded file texts are removed from a job as soon as it ends (they are needed only by the run; jobs of older
+  versions are cleaned by the same hourly pass). Queued and running jobs are never deleted.
 
 ## API
 
@@ -151,10 +167,19 @@ Bearer token on all except probes and metrics. Errors use backend-common's forma
 `{"errorId", "status", "debugMessage"}`; `debugMessage` is German text the pipe shows as it is (request validation errors
 keep FastAPI's `detail`).
 
+**API version.** The pipe and the Word action send `X-DR-API-Version: 1` with every call; every answer carries the
+service's version in the same header. A caller with another major version gets HTTP 409 with a German `debugMessage`
+("... passt nicht zur Version des Recherche-Dienstes ..."), which the pipe shows in the chat; a header that is not a
+number gets 400. Calls without the header (n8n, scripts) are not checked. Request bodies refuse unknown fields (HTTP
+422), so a field one side renamed fails visibly instead of being ignored. Raise `API_VERSION` in
+`routers/contract.py`, `pipe/deep_research.py` and `pipe/deep_research_download.py` together when a request or
+response changes in a way the other side cannot handle; additive response fields need no new version.
+
 | Method, path | Purpose |
 |---|---|
-| `GET /health/liveness`, `/health/startup` | process up / started (backend-common probes) |
-| `GET /health/readiness` | 200 if the LLM endpoint (`/models`) and Open WebUI (`/health`, if `OWUI_URL` is set) answer, else 503 with `checks` |
+| `GET /health/liveness`, `/health/startup` | process up / started |
+| `GET /health/readiness` | 200 if the database answers within 3 s, else 503 with `checks`. Nothing else: job status and reports need only the database, so an LLM or Open WebUI outage does not take the pod out of the Service |
+| `GET /health/dependencies` | status of the LLM endpoint (`/models`) and Open WebUI (`/health`, if `OWUI_URL` is set): `{"status": "ok" \| "degraded", "checks"}`, always 200 (unauthenticated, no content) |
 | `GET /metrics` | Prometheus text: `research_jobs{status}`, `research_in_night_window` (unauthenticated, no content) |
 | `GET /presets` | preset names, descriptions, engine |
 | `POST /clarify` `{task, preset?, own_sources?}` | clarifying questions and assumptions (knows the attached sources) |
@@ -165,6 +190,7 @@ keep FastAPI's `detail`).
 | `GET /jobs/{id}/report.docx` | the report as Word file (409 while the job runs) |
 | `GET /jobs/lookup?chat_id&message_id&user_id` | job that delivers into a chat message (used by the download action) |
 | `GET /jobs/{id}/evidence` | evidence trail: sources, queries, pages, quotes |
+| `POST /jobs/{id}/cancel?user_id` | cancel a queued or running job: `{job_id, status: "cancelled"}`; 404 for an unknown or foreign job, 409 (German message) if it has ended |
 
 ## NetworkPolicy
 
@@ -197,9 +223,13 @@ database).
 
 backend-common logger (structlog): one JSON object per line on stdout with `timestamp`, `level`, `logger`, `app`,
 `event` (closed vocabulary: `request_finished`, `request_failed`, `llm_call`, `app_event`, `health check failed` /
-`recovered`) or `message` (free text) plus fields. Every request carries a `request_id`. Job messages: `job queued`,
+`recovered`) or `message` (free text) plus fields. Every request carries a `request_id`: the `X-Request-ID` header, which
+the pipe and the Word action set to `<chat_id>:<message_id>` of the Open WebUI chat turn, else a new UUID. The job keeps
+the `request_id` of its submit (`jobs.request_id`), and every line of its run (engine, delivery, errors, re-delivery)
+carries `job_id` and that `request_id`, so `request_id` finds a chat's requests and its night run. Job messages: `job queued`,
 `job started`, `job done` (with `runtime_s`, `calls`, `prompt_tokens`, `completion_tokens`), `job failed`,
-`job re-queued on shutdown`, `delivery ok` / `delivery failed`, `re-queued stale jobs`. Usage events (`app_event`)
+`job re-queued on shutdown`, `job cancelled` / `run stopped: job cancelled`, `delivery ok` / `delivery failed`,
+`re-queued stale jobs`. Usage events (`app_event`)
 `research.plan` and `research.submit` carry a pseudonymised user id (HMAC), never the raw id. Token usage per run is
 also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and log shipping.
 
@@ -228,7 +258,8 @@ hosts, never search queries, page paths or document text:
 | Symptom | Check |
 |---|---|
 | Pod does not start | the log names the missing or invalid variable (varlock before the start, then the service's own check) |
-| Pod not ready | `curl /health/readiness`: `checks` shows whether the LLM endpoint or Open WebUI is unreachable |
+| Pod not ready | `curl /health/readiness`: the database is unreachable (`RA_DATABASE_URL`, NetworkPolicy egress to 5432) |
+| Jobs fail with "Das Sprachmodell ist nicht erreichbar" | `curl /health/dependencies`: `checks` shows whether the LLM endpoint or Open WebUI answers |
 | Pipe says "Deep Research ist nicht verfügbar: invalid token" | `SERVICE_TOKEN` valve differs from `RA_TOKEN` |
 | Job stays `queued` | outside the window and not a quick focus run: it waits for 20:00. `GET /metrics` shows `research_in_night_window`. Check `RA_TIMEZONE` |
 | Job `queued` forever inside the window | all workers busy (`RA_WORKERS`), or no replica running |
@@ -241,5 +272,5 @@ hosts, never search queries, page paths or document text:
 | Own sources: plan says "nicht lesbar" for a file or knowledge base the user can read in Open WebUI | the pipe checks with the chat user's rights inside Open WebUI; check the share settings of the knowledge base (read grant for the user or group) or whether the file belongs to the user or to a knowledge base they can read |
 | Own sources: "wird noch verarbeitet" / "keinen lesbaren Text" | Open WebUI (Docling) has not finished extracting the file, or extraction failed for it: check the Docling service and the file's processing status in Open WebUI |
 | Own sources: no upload button, or Open WebUI rewrites the question | the model entries need `capabilities.file_upload: true` and `file_context: false` (`deploy/openwebui/models.json`, re-import after upgrading the repo) |
-| Own sources: knowledge base "not reachable" in the report | `OWUI_URL` / `OWUI_API_KEY` of the service, `POST /api/v1/retrieval/query/collection` needs an admin key; log lines `knowledge query` show the ids queried |
-| Database | tables `drafts` and `jobs` are created on start; the column `own_sources` of both is added automatically to older databases; other schema changes still need a manual `alter table` |
+| Own sources: knowledge base "not reachable" in the report | `OWUI_URL` / `OWUI_API_KEY` of the service, `POST /api/v1/retrieval/query/collection` needs an admin key; log lines `knowledge query` (INFO, with `job_id`) show the ids queried |
+| Database | tables `drafts` and `jobs` and their indexes are created on start; new columns (`own_sources`, `owner`, ...) and indexes are added automatically to older databases; other schema changes still need a manual `alter table` |

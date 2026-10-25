@@ -2,7 +2,7 @@
 
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from bebbi_deep_research.models.own_sources import OwnSourcesRequest
 
@@ -16,6 +16,8 @@ class RunWhen(StrEnum):
 
 class ClarifyRequest(BaseModel):
     """A research task for which clarifying questions are wanted."""
+
+    model_config = ConfigDict(extra="forbid")  # an unknown field is a contract mismatch, not something to ignore
 
     task: str = Field(max_length=20_000)
     preset: str = Field("verwaltung_web", max_length=100)
@@ -33,12 +35,16 @@ class CreatePlanRequest(ClarifyRequest):
 class EditPlanRequest(BaseModel):
     """A change to a draft plan, in the user's words."""
 
+    model_config = ConfigDict(extra="forbid")
+
     instruction: str = Field(max_length=10_000)
     user_id: str | None = Field(None, max_length=200)
 
 
 class SubmitJobRequest(BaseModel):
     """Start the research of an approved draft and deliver the report into a chat message."""
+
+    model_config = ConfigDict(extra="forbid")
 
     draft_id: str = Field(max_length=100)
     user_id: str = Field(max_length=200)
