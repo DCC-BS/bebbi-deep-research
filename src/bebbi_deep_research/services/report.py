@@ -7,7 +7,9 @@ evidence ledger (pipeline engine: the verbatim quote of the evidence card; focus
 cites the source). Nothing in the engines has to change for this.
 """
 
+import json
 import re
+from collections import Counter
 
 # Readable names for the kind of a source; a citation never names "MCP" or a tool.
 SOURCE_LABELS = {
@@ -264,3 +266,85 @@ def owui_source_events(sources: list[dict]) -> list[dict]:
             }
         )
     return events
+
+
+# Limits of the delivery route in the Open WebUI image (kdkp-open-web-ui image/site-packages/dr_delivery.py). A body
+# over them is refused with 400/413, which no retry changes, so the service keeps every delivery inside them.
+DELIVERY_MAX_CONTENT = 2_000_000  # characters of the message text
+DELIVERY_MAX_SOURCES = 200
+DELIVERY_MAX_SOURCE_BYTES = 100_000  # json.dumps of one source event payload
+DELIVERY_MAX_BODY = 4_000_000  # bytes of the request body
+SOURCES_CUT_NOTE = (
+    "*Hinweis: Im Chat sind die {kept} meistzitierten von {total} Quellen verlinkt; die übrigen Belege sind hier nicht "
+    "nummeriert. Die vollständige Quellenliste enthält die Word-Datei.*"
+)
+CONTENT_CUT_NOTE = (
+    "\n\n*Der Bericht ist für den Chat zu lang und wurde gekürzt. Den vollständigen Bericht enthält die Word-Datei.*"
+)
+
+
+def limit_sources(report: str, sources: list[dict], limit: int = DELIVERY_MAX_SOURCES) -> tuple[str, list[dict]]:
+    """Keep the `limit` most cited sources for the chat (more source events are refused by the delivery route).
+
+    The kept sources are numbered again 1..limit in their old order, the citations in the text follow them, citations
+    of dropped sources are removed and a note says where the full list is (the Word file renders the stored report).
+    Returns the report and sources unchanged when they fit.
+    """
+    if len(sources) <= limit:
+        return report, sources
+    body, heading, _ = split_report(report)
+    counts = Counter(int(m.group(1)) for m in _CITE.finditer(body))
+    kept = sorted(sorted(sources, key=lambda s: (-counts[s["n"]], s["n"]))[:limit], key=lambda s: s["n"])
+    new = {s["n"]: i for i, s in enumerate(kept, 1)}
+    known = {s["n"] for s in sources}
+
+    def cite(m: re.Match) -> str:
+        n = int(m.group(2))
+        if n in new:
+            return f"{m.group(1)}[{new[n]}]"
+        return "" if n in known else m.group(0)  # a dropped source's citation goes, with the space before it
+
+    body = re.sub(r"([ \t]*)\[(\d+)\]", cite, body)
+    note = SOURCES_CUT_NOTE.format(kept=len(kept), total=len(sources))
+    return f"{body}\n\n{note}\n\n## {heading}\n", [{**s, "n": new[s["n"]]} for s in kept]
+
+
+def _shrink_source(data: dict) -> dict:
+    """One source event payload within DELIVERY_MAX_SOURCE_BYTES (title and preview text are shortened)."""
+    if len(json.dumps(data)) <= DELIVERY_MAX_SOURCE_BYTES:
+        return data
+    doc = "\n".join(data.get("document") or [])
+    meta = [{**m, "name": str(m.get("name", ""))[:300]} for m in data.get("metadata") or []]
+    data = {**data, "source": {**data.get("source", {}), "name": str(data.get("source", {}).get("name", ""))[:300]}}
+    data["metadata"] = meta
+    while doc and (n := len(json.dumps({**data, "document": [doc + " …"]}))) > DELIVERY_MAX_SOURCE_BYTES:
+        doc = doc[: max(0, int(len(doc) * DELIVERY_MAX_SOURCE_BYTES / n * 0.98) - 100)]
+    return {**data, "document": [doc + " …" if doc else ""]}
+
+
+def fit_delivery(content: str, sources: list[dict], envelope: dict) -> tuple[str, list[dict]]:
+    """Message text and source payloads cut to the delivery route's limits.
+
+    `envelope` is the rest of the body (ids), counted against DELIVERY_MAX_BODY. Too many sources are cut here as a
+    last resort (the caller renumbers with `limit_sources` first), too long text is cut with a note.
+    """
+    sources = [_shrink_source(s) for s in sources[:DELIVERY_MAX_SOURCES]]
+    budget = min(DELIVERY_MAX_CONTENT, DELIVERY_MAX_BODY)
+
+    def size(text: str) -> int:
+        # json.dumps with ASCII escapes and spaces is at least as long as the UTF-8 body httpx sends
+        return len(json.dumps({**envelope, "content": text, "sources": sources}))
+
+    if len(content) <= DELIVERY_MAX_CONTENT and size(content) <= DELIVERY_MAX_BODY:
+        return content, sources
+    used, fitting = 0, []
+    for src in sources:  # sources never take more than half of the body
+        used += len(json.dumps(src)) + 2
+        if used > DELIVERY_MAX_BODY // 2:
+            break
+        fitting.append(src)
+    sources = fitting
+    keep = min(len(content), budget - len(CONTENT_CUT_NOTE))
+    while keep > 0 and (n := size(content[:keep] + CONTENT_CUT_NOTE)) > DELIVERY_MAX_BODY:
+        keep = int(keep * DELIVERY_MAX_BODY / n * 0.99)  # escaped text is longer than the characters it holds
+    return content[:keep].rstrip() + CONTENT_CUT_NOTE, sources

@@ -15,7 +15,13 @@ from bebbi_deep_research.engine.llm import LlmSettings
 from bebbi_deep_research.services.db import DB
 from bebbi_deep_research.services.own_sources import to_engine, without_texts
 from bebbi_deep_research.services.policy import describe_error, in_window, runs_by_day
-from bebbi_deep_research.services.report import build_sources, owui_source_events, ui_markdown
+from bebbi_deep_research.services.report import (
+    build_sources,
+    fit_delivery,
+    limit_sources,
+    owui_source_events,
+    ui_markdown,
+)
 from bebbi_deep_research.utils.app_config import AppConfig
 
 logger = get_logger(__name__)
@@ -425,6 +431,7 @@ class JobRunner:
     async def _deliver_done(self, job: dict, report: str, ledger: dict | None) -> None:
         try:
             sources = build_sources(report, ledger)
+            report, sources = limit_sources(report, sources)  # the route takes 200 sources: keep the most cited
             await self.deliver(job, ui_markdown(report, sources), sources)
         except Exception as e:
             logger.error("delivery error", error=repr(e)[:300])
@@ -463,14 +470,15 @@ class JobRunner:
             await self.db.execute("update jobs set delivery='skipped' where id=:i", i=job["id"])
             logger.info("delivery skipped", reason="no delivery endpoint/secret or job without chat")
             return
-        body = {
+        envelope = {
             "chat_id": job["chat_id"],
             "message_id": job["message_id"],
             "job_id": job["id"],
             "user_id": job.get("user_id") or "",
-            "content": content,
-            "sources": [e["data"] for e in owui_source_events(sources or [])],
         }
+        # within the route's size limits, else it refuses for good (400/413)
+        content, payloads = fit_delivery(content, [e["data"] for e in owui_source_events(sources or [])], envelope)
+        body = {**envelope, "content": content, "sources": payloads}
         outcome = "failed"
         for attempt in range(3):
             try:

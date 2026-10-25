@@ -129,6 +129,12 @@ without `user_id` (n8n, scripts) are not checked.
 `RA_TOKEN` is full trust: whoever holds it can read every job and report and submit for any user id; the admin key paths run through the
 service. There are no separate tokens per caller yet; keep the token in the Secret and restrict ingress with the NetworkPolicy.
 
+The route's size limits (message text 2,000,000 characters, 200 sources, 100,000 bytes per source, 4 MB body) are
+mirrored in `services/report.py` and applied before sending, so a delivery is never refused for its size: with more than
+200 sources the chat gets the 200 most cited, numbered again, with a note that the Word file has the full list (the
+Word file and `GET /jobs/{id}` keep every source); a source preview or a text over the limit is shortened with a note.
+Change both sides together.
+
 Delivery is retried 3 times (not for 400, 401, 403, 404, which do not change by waiting); the result is stored per job
 (`delivery` in `GET /jobs/{id}`: `ok`, `skipped` when the job has no chat or no secret, or `failed: ...`). The admin key can read every
 knowledge base and file; keep it in the Secret only, and restrict ingress to the service with the NetworkPolicy
