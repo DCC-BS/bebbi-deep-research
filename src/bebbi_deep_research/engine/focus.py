@@ -117,7 +117,7 @@ class FocusEngine:
         return specs, routes, hints
 
     async def _call(
-        self, name: str, args: dict, routes: dict, reg: Registry, question: str, lang: str, ctx: dict, trail: list
+        self, name: str, args: dict, routes: dict, reg: Registry, question: str, lang: str, mcp_ctx: dict, trail: list
     ) -> str:
         started = time.time()
         try:
@@ -161,7 +161,7 @@ class FocusEngine:
                     args = {**args, "limit": LIST_LIMITS[tool]}
                 await self.ctx.emit("status", f"{server}: {tool}")
                 raw = await client.acall(tool, args)
-                out, added = mcp_to_sources(server, tool, args, raw, reg, self.cfg.mcp_servers[server], ctx)
+                out, added = mcp_to_sources(server, tool, args, raw, reg, self.cfg.mcp_servers[server], mcp_ctx)
             else:
                 return f"error: unknown tool {name}"
         except Exception as e:  # tool errors go back to the model
@@ -188,7 +188,7 @@ class FocusEngine:
         lang = (plan or {}).get("language") or (preset.language if preset.language != "auto" else "de")
         de = lang == "de"
         specs, routes, hints = await self._tool_specs(preset)
-        reg, ctx, trail = Registry(), {}, []
+        reg, mcp_ctx, trail = Registry(), {}, []  # mcp_ctx: per-run MCP lookups (dataset titles)
         own_system, own_first = O.prompt_block(self.ctx.own, reg, de) if self.ctx.own else ("", "")
         style = "\n\n" + report_house_style() if de and preset.house_style else ""
         system = (
@@ -230,7 +230,7 @@ class FocusEngine:
         async def dispatch(name: str, args: dict) -> str:
             nonlocal executed
             executed += 1
-            return await self._call(name, args, routes, reg, task, lang, ctx, trail)
+            return await self._call(name, args, routes, reg, task, lang, mcp_ctx, trail)
 
         tools = budgeted_tools(specs, dispatch, tool_budget)
         try:

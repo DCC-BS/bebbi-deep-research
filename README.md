@@ -88,7 +88,7 @@ EVAL_ENV=/path/to/deep-research-evaluation/.env scripts/smoke_local.sh   # needs
 | Path | Content |
 |---|---|
 | `src/bebbi_deep_research/` | `app.py` (FastAPI factory), `container.py` (dependency injection), `routers/`, `models/` (requests), `services/` (research service, job runner, DB, own sources, report, Word export), `utils/` (config, API errors) |
-| `src/bebbi_deep_research/engine/` | research engine: `llm.py` (pydantic-ai roles, tool loops, embeddings), `focus.py`, `agent.py` (pipeline), `own.py`, `sources.py`, `prompts.py` |
+| `src/bebbi_deep_research/engine/` | research engine: `agent.py` (`ResearchAgent`, the entry point for services), `engines.py` (`Engine` protocol and registry), `context.py` (`EngineContext`: services the engines share), `focus.py`, `pipeline.py`, `chat.py` (clarify, plan, edit), `mcp.py` (MCP connection pool), `llm.py` (pydantic-ai roles, tool loops, embeddings), `own.py`, `sources.py`, `prompts.py` |
 | `pipe/` | Open WebUI functions: pipe and Word download action |
 | `config/presets.yaml` | presets, MCP servers, budgets |
 | `Dockerfile` | image on the shared mise base image (python + varlock runtime, uid 1000, read-only root) |

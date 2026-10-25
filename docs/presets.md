@@ -23,7 +23,7 @@ focus engine), `focus_words` (typical report length). A preset may override sing
 
 | Field | Meaning |
 |---|---|
-| `engine` | `focus` or `pipeline` |
+| `engine` | `focus` or `pipeline` (the keys of `ENGINES` in `engine/engines.py`) |
 | `description` | shown in the model description and by `GET /presets` |
 | `language` | `de`, `en`, `auto` (language of the task) |
 | `routes` | per intent (`primary`, `data`, `secondary`) the ordered sources: `web`, `mcp:<server>` |
