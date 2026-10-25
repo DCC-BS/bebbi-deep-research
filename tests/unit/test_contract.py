@@ -1,8 +1,12 @@
 """The API contract between the pipe and the service: version header, unknown fields, the real pipe against the app."""
 
+import asyncio
 import importlib.util
 
 import httpx
+import structlog
+from structlog.contextvars import merge_contextvars
+from structlog.testing import capture_logs
 
 from bebbi_deep_research.routers.contract import API_VERSION, HEADER
 
@@ -97,8 +101,9 @@ async def test_the_real_pipe_talks_to_the_real_service(tmp_path, monkeypatch):
         queued = events[-1]["data"]["content"]
         assert "Nachtfenster" in queued
         job_id = mod._state([{"role": "assistant", "content": queued}, {}])["job"]
-        row = (await app.state.container.db().run("select user_id, chat_id, preset from jobs where id=:i", i=job_id))[0]
-        assert row == {"user_id": "u1", "chat_id": "c1", "preset": "grossrat"}
+        db = app.state.container.db()
+        row = (await db.run("select user_id, chat_id, preset, request_id from jobs where id=:i", i=job_id))[0]
+        assert row == {"user_id": "u1", "chat_id": "c1", "preset": "grossrat", "request_id": "c1:m1"}
 
 
 async def test_pipe_of_another_version_shows_the_service_message(tmp_path, monkeypatch):
@@ -139,3 +144,29 @@ def test_pipe_and_action_speak_the_service_version():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert mod.API_VERSION == str(API_VERSION)
+
+
+def test_request_id_of_a_chat_turn():
+    mod = load_pipe()
+    assert mod.request_id("chat-1", "msg-2") == "chat-1:msg-2"
+    assert mod.request_id("c\r\nX: y", "m") == "cX:y:m" and mod.request_id(None, "m") == ""
+
+
+async def test_every_log_line_of_a_run_carries_job_and_request_id(tmp_path, monkeypatch):
+    from bebbi_deep_research.services import jobs, research_service
+
+    async with running(tmp_path, night_window=utc_window(True)) as (c, app):
+        with capture_logs(processors=[merge_contextvars]) as logs:
+            for module in (jobs, research_service):  # module loggers are cached on first use: fresh ones capture
+                monkeypatch.setattr(module, "logger", structlog.get_logger(module.__name__))
+            job = await submit(c, chat_id="c9", message_id="m9", headers={"X-Request-ID": "c9:m9"})
+            await wait_status(c, job["job_id"], {"done"})
+            for _ in range(100):  # the delivery runs after the status is written
+                if any(e["event"] == "delivery skipped" for e in logs):
+                    break
+                await asyncio.sleep(0.02)
+        run = [e for e in logs if e["event"] in ("job started", "job done", "delivery skipped")]
+        assert [e["event"] for e in run] == ["job started", "job done", "delivery skipped"]
+        assert all(e["job_id"] == job["job_id"] and e["request_id"] == "c9:m9" for e in run)
+        queued = next(e for e in logs if e["event"] == "job queued")
+        assert queued["job_id"] == job["job_id"] and queued["request_id"] == "c9:m9"

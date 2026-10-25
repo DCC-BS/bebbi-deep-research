@@ -118,6 +118,8 @@ needs `/api/v1/chats`.
 Pipe, action and service share an API version (`X-DR-API-Version`, now `1`; [operations.md](operations.md#api)). Deploy
 the pipe from the same release as the service: a pipe of another version gets a German message in the chat ("Pipe und
 Dienst müssen gemeinsam aktualisiert werden") instead of a silently degraded answer.
+Every call also carries `X-Request-ID: <chat_id>:<message_id>`; the service logs it and keeps it with the job, so the
+logs of a night run lead back to the chat message ([operations.md](operations.md#logs-and-metrics)).
 
 The pipe sends the chat user's id (`user_id`) on `POST /plans`, `POST /plans/{id}/edit`, `POST /jobs` and as `?user_id=` on `GET /jobs/{id}`
 (and the other job reads). When both the stored draft/job and the request carry a user id and they differ, the service answers 404. Calls

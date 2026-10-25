@@ -192,7 +192,10 @@ database).
 
 backend-common logger (structlog): one JSON object per line on stdout with `timestamp`, `level`, `logger`, `app`,
 `event` (closed vocabulary: `request_finished`, `request_failed`, `llm_call`, `app_event`, `health check failed` /
-`recovered`) or `message` (free text) plus fields. Every request carries a `request_id`. Job messages: `job queued`,
+`recovered`) or `message` (free text) plus fields. Every request carries a `request_id`: the `X-Request-ID` header, which
+the pipe and the Word action set to `<chat_id>:<message_id>` of the Open WebUI chat turn, else a new UUID. The job keeps
+the `request_id` of its submit (`jobs.request_id`), and every line of its run (engine, delivery, errors, re-delivery)
+carries `job_id` and that `request_id`, so `request_id` finds a chat's requests and its night run. Job messages: `job queued`,
 `job started`, `job done` (with `runtime_s`, `calls`, `prompt_tokens`, `completion_tokens`), `job failed`,
 `job re-queued on shutdown`, `delivery ok` / `delivery failed`, `re-queued stale jobs`. Usage events (`app_event`)
 `research.plan` and `research.submit` carry a pseudonymised user id (HMAC), never the raw id. Token usage per run is

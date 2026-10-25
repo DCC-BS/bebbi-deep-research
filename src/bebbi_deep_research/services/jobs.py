@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 import httpx
 from dcc_backend_common.logger import get_logger
+from structlog.contextvars import bind_contextvars, bound_contextvars
 
 from bebbi_deep_research.engine import LLM, ResearchAgent, Tools
 from bebbi_deep_research.engine.llm import LlmSettings
@@ -22,6 +23,11 @@ LIVE = ("starting", "running")
 MAX_ATTEMPTS = 3  # a job that was interrupted (pod killed, stalled) this often is given up with an error
 FINISHED = ("done", "error")
 DRAFT_DAYS = 14
+
+
+def log_context(job: dict):
+    """Bind the job id and the request id it was submitted with (pipe: "<chat_id>:<message_id>") to every log line."""
+    return bound_contextvars(job_id=job["id"], request_id=job.get("request_id"))
 
 
 def _no_texts(raw: str | None) -> str | None:
@@ -182,7 +188,7 @@ class JobRunner:
             )
         stale = "status in ('starting','running') and coalesce(heartbeat, created) < :t"
         for r in await self.db.run(
-            f"select id, user_id, chat_id, message_id, own_sources from jobs where {stale} "
+            f"select id, user_id, chat_id, message_id, own_sources, request_id from jobs where {stale} "
             "and coalesce(attempts,0) >= :m",
             t=now - s.stale_seconds,
             m=MAX_ATTEMPTS,
@@ -200,8 +206,9 @@ class JobRunner:
                 i=r["id"],
                 t=now - s.stale_seconds,
             ):
-                logger.error("job given up after repeated interruptions", job=r["id"], attempts=MAX_ATTEMPTS)
-                await self._safe_deliver(r, f"Die Recherche ist fehlgeschlagen. {msg}")
+                with log_context(r):
+                    logger.error("job given up after repeated interruptions", attempts=MAX_ATTEMPTS)
+                    await self._safe_deliver(r, f"Die Recherche ist fehlgeschlagen. {msg}")
         n = await self.db.execute(f"update jobs set status='queued', owner=null where {stale}", t=now - s.stale_seconds)
         if n:
             logger.warning("re-queued stale jobs", count=n)
@@ -262,16 +269,24 @@ class JobRunner:
                 i=job["id"],
                 k=job.get("delivery_tries") or 0,
             ):
-                logger.info("delivering again", job=job["id"], previous=(job.get("delivery") or "none")[:60])
-                t = asyncio.create_task(
-                    self._deliver_done(job, job["report"] or "", json.loads(job["evidence"] or "null"))
-                )
+                with log_context(job):  # the task copies the context: its delivery lines carry the ids too
+                    logger.info("delivering again", previous=(job.get("delivery") or "none")[:60])
+                    t = asyncio.create_task(
+                        self._deliver_done(job, job["report"] or "", json.loads(job["evidence"] or "null"))
+                    )
                 self._bg.add(t)
                 t.add_done_callback(self._bg.discard)
 
     # ----------------------------------------------------------------- job
     async def run_job(self, job_id: str, owner: str = "") -> None:
-        """Run one claimed job and deliver its report; `owner` is the claim token of this run."""
+        """Run one claimed job and deliver its report; `owner` is the claim token of this run.
+
+        Every log line of the run (engine included) carries `job_id` and the `request_id` stored with the job.
+        """
+        with log_context({"id": job_id}):
+            await self._run_job(job_id, owner)
+
+    async def _run_job(self, job_id: str, owner: str) -> None:
         guard = (
             "id=:i and owner=:o and status in ('starting','running')"  # only the run that claimed the job may change it
         )
@@ -289,18 +304,19 @@ class JobRunner:
                     o=owner,
                 )
             except Exception as e:
-                logger.warning("progress not stored", job=job_id, error=repr(e)[:200])
+                logger.warning("progress not stored", error=repr(e)[:200])
 
         started = time.time()
         agent = None
         try:
             job = (await self.db.run("select * from jobs where id=:i", i=job_id))[0]
+            bind_contextvars(request_id=job.get("request_id"))  # reset when run_job's log context ends
             if not await self.db.execute(
                 "update jobs set status='running', started=:t where " + guard, t=started, i=job_id, o=owner
             ):
-                logger.warning("job no longer ours", job=job_id)
+                logger.warning("job no longer ours")
                 return
-            logger.info("job started", job=job_id, preset=job["preset"], depth=job["depth"])
+            logger.info("job started", preset=job["preset"], depth=job["depth"])
             agent = self.make_agent(job_id, on_event)
             own = to_engine(json.loads(job.get("own_sources") or "null"), self.settings, self.http_factory)
             async with asyncio.timeout(self.settings.job_timeout_seconds):
@@ -323,12 +339,11 @@ class JobRunner:
                 i=job_id,
                 o=owner,
             ):
-                logger.warning("job no longer ours, result dropped", job=job_id)
+                logger.warning("job no longer ours, result dropped")
                 return
             u = res.usage or {}
             logger.info(
                 "job done",
-                job=job_id,
                 runtime_s=round(time.time() - started, 1),
                 calls=u.get("calls"),
                 prompt_tokens=u.get("prompt_tokens"),
@@ -343,10 +358,10 @@ class JobRunner:
                     o=owner,
                 )
             )
-            logger.warning("job re-queued on shutdown", job=job_id)
+            logger.warning("job re-queued on shutdown")
             raise
         except Exception as e:
-            logger.error("job failed", job=job_id, error=repr(e)[:500])
+            logger.error("job failed", error=repr(e)[:500])
             message = describe_error(e)
             try:
                 mine = await self.db.execute(
@@ -358,7 +373,7 @@ class JobRunner:
                     o=owner,
                 )
             except Exception as e2:  # database down as well: the stale-job requeue takes over
-                logger.error("job error not stored", job=job_id, error=repr(e2)[:200])
+                logger.error("job error not stored", error=repr(e2)[:200])
                 mine = 0
             if mine and job:
                 await self._safe_deliver(job, f"Die Recherche ist fehlgeschlagen. {message}")
@@ -374,7 +389,7 @@ class JobRunner:
             sources = build_sources(report, ledger)
             await self.deliver(job, ui_markdown(report, sources), sources)
         except Exception as e:
-            logger.error("delivery error", job=job["id"], error=repr(e)[:300])
+            logger.error("delivery error", error=repr(e)[:300])
             try:
                 await self.db.execute(
                     "update jobs set delivery=:d where id=:i", d=f"failed: {type(e).__name__}: {e}"[:300], i=job["id"]
@@ -386,7 +401,7 @@ class JobRunner:
         try:
             await self.deliver(job, content)
         except Exception as e:
-            logger.error("delivery error", job=job["id"], error=repr(e)[:300])
+            logger.error("delivery error", error=repr(e)[:300])
 
     async def deliver(self, job: dict, content: str, sources: list[dict] | None = None) -> None:
         """Write the finished report into the Open WebUI assistant message of the job.
@@ -408,7 +423,7 @@ class JobRunner:
             and job.get("user_id")
         ):
             await self.db.execute("update jobs set delivery='skipped' where id=:i", i=job["id"])
-            logger.info("delivery skipped", job=job["id"], reason="no delivery endpoint/secret or job without chat")
+            logger.info("delivery skipped", reason="no delivery endpoint/secret or job without chat")
             return
         body = {
             "chat_id": job["chat_id"],
@@ -436,7 +451,7 @@ class JobRunner:
             if attempt < 2:
                 await asyncio.sleep(self.retry_delay * (attempt + 1))
         if outcome == "ok":
-            logger.info("delivery ok", job=job["id"], chat=job["chat_id"], sources=len(sources or []))
+            logger.info("delivery ok", chat=job["chat_id"], sources=len(sources or []))
         else:
-            logger.error("delivery failed", job=job["id"], chat=job["chat_id"], outcome=outcome)
+            logger.error("delivery failed", chat=job["chat_id"], outcome=outcome)
         await self.db.execute("update jobs set delivery=:d where id=:i", d=outcome[:300], i=job["id"])

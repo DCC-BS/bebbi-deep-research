@@ -24,6 +24,7 @@ MIGRATIONS = [
     ("jobs", "owner", "text"),
     ("jobs", "attempts", "integer"),
     ("jobs", "delivery_tries", "integer"),
+    ("jobs", "request_id", "text"),
 ]
 # indexes after the columns exist; `create index if not exists` is a no-op on a database that has them
 INDEXES = [

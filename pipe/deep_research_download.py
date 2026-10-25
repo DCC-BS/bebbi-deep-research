@@ -13,6 +13,7 @@ icon_url: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAw
 # returns the report itself.
 
 import io
+import re
 
 import httpx
 from pydantic import BaseModel, Field
@@ -61,13 +62,12 @@ class Action:
     def __init__(self):
         self.valves = self.Valves()
 
-    async def _get(self, path: str, params: dict | None = None) -> httpx.Response:
+    async def _get(self, path: str, params: dict | None = None, rid: str = "") -> httpx.Response:
+        headers = {"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}", "X-DR-API-Version": API_VERSION}
+        if rid:
+            headers["X-Request-ID"] = rid  # "<chat_id>:<message_id>", as the pipe sends it
         async with httpx.AsyncClient(timeout=120) as http:
-            return await http.get(
-                self.valves.SERVICE_URL.rstrip("/") + path,
-                params=params,
-                headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}", "X-DR-API-Version": API_VERSION},
-            )
+            return await http.get(self.valves.SERVICE_URL.rstrip("/") + path, params=params, headers=headers)
 
     async def action(self, body: dict, __user__: dict | None = None, __event_emitter__=None, __request__=None):
         async def toast(kind: str, text: str):
@@ -77,8 +77,11 @@ class Action:
         chat_id, message_id, user_id = body.get("chat_id"), body.get("id"), (__user__ or {}).get("id")
         if not (chat_id and message_id and user_id and __request__ is not None):
             return await toast("error", "Die Word-Datei kann nur in einem gespeicherten Chat erstellt werden.")
+        rid = re.sub(r"[^A-Za-z0-9_.:-]", "", f"{chat_id}:{message_id}")[:200]
         try:
-            found = await self._get("/jobs/lookup", {"chat_id": chat_id, "message_id": message_id, "user_id": user_id})
+            found = await self._get(
+                "/jobs/lookup", {"chat_id": chat_id, "message_id": message_id, "user_id": user_id}, rid
+            )
             if found.status_code == 404:
                 return await toast("warning", "Zu dieser Nachricht gehört keine Recherche.")
             if found.status_code == 409:  # another API version: the service says so in German
@@ -87,14 +90,14 @@ class Action:
             job = found.json()
             if job["status"] != "done":
                 return await toast("warning", "Die Recherche ist noch nicht fertig.")
-            info = (await self._get(f"/jobs/{job['job_id']}", {"user_id": user_id})).json()
+            info = (await self._get(f"/jobs/{job['job_id']}", {"user_id": user_id}, rid)).json()
             name = info.get("docx_name") or f"Bebbi-Deep-Research_{job['job_id']}.docx"
             from open_webui.models.chats import Chats
 
             attached = await Chats.get_message_metadata(chat_id, message_id, "files")
             if isinstance(attached, list) and any(isinstance(f, dict) and f.get("name") == name for f in attached):
                 return await toast("info", "Die Word-Datei hängt bereits an dieser Nachricht.")
-            data = await self._get(info["docx"], {"user_id": user_id})
+            data = await self._get(info["docx"], {"user_id": user_id}, rid)
             data.raise_for_status()
             item = await store_user_file(__request__, user_id, name, data.content, DOCX)
             if __event_emitter__:

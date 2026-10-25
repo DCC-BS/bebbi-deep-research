@@ -19,6 +19,7 @@ requirements: httpx
 
 import asyncio
 import base64
+import contextvars
 import io
 import json
 import re
@@ -42,6 +43,19 @@ AUTO = "auto"  # id of the one model that lets the user choose the preset per ta
 # Version of the service API this pipe speaks (service: routers/contract.py). Sent with every call; the service refuses
 # another version with a German message, so a pipe and a service that do not fit together fail visibly.
 API_VERSION = "1"
+# Correlation id of the current chat turn, sent as X-Request-ID: "<chat_id>:<message_id>". The service logs it with
+# every request and stores it with the job, so the night run's log lines lead back to the chat message.
+REQUEST_ID: contextvars.ContextVar[str] = contextvars.ContextVar("dr_request_id", default="")
+_UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]")
+
+
+def request_id(chat_id, message_id) -> str:
+    """The X-Request-ID of a chat turn ("" without a chat, then the service makes its own)."""
+    if not chat_id:
+        return ""
+    return _UNSAFE.sub("", f"{chat_id}:{message_id or ''}")[:200]
+
+
 DEPTH_WORDS = {
     "quick": re.compile(r"\b(schnell|kurz|quick)\b", re.I),
     "deep": re.compile(r"\b(gründlich|gruendlich|tief|deep)\b", re.I),
@@ -416,7 +430,12 @@ class Pipe:
         return out
 
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}", "X-DR-API-Version": API_VERSION}
+        rid = REQUEST_ID.get()
+        return {
+            "Authorization": f"Bearer {self.valves.SERVICE_TOKEN}",
+            "X-DR-API-Version": API_VERSION,
+            **({"X-Request-ID": rid} if rid else {}),
+        }
 
     async def _api(self, method: str, path: str, body: dict | None = None) -> dict:
         try:
@@ -622,6 +641,7 @@ class Pipe:
     ):
         if __task__:
             return self._task_reply(str(__task__), body)
+        REQUEST_ID.set(request_id(__chat_id__, __message_id__))  # this turn's task only (Open WebUI runs one per call)
 
         async def status(text: str, done: bool = False):
             if __event_emitter__:

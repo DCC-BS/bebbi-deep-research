@@ -9,6 +9,7 @@ from typing import Any
 
 from dcc_backend_common.logger import get_logger
 from dcc_backend_common.usage_tracking import UsageTrackingService
+from structlog.contextvars import get_contextvars
 
 from bebbi_deep_research.engine.config import Config
 from bebbi_deep_research.models.own_sources import OwnSourcesRequest
@@ -233,8 +234,8 @@ class ResearchService:
         # quota and one-job-per-draft are part of the insert, so that parallel requests cannot slip past a read
         inserted = await self.db.execute(
             "insert into jobs (id, draft, task, preset, depth, plan, user_id, chat_id, message_id, run_when, status,"
-            " created, events, own_sources) select :id,:dr,:t,:p,:d,:pl,:u,:c,:m,:w,'queued',"
-            "cast(:cr as double precision),'[]',:o where not exists (select 1 from jobs where draft=:dr) "
+            " created, events, own_sources, request_id) select :id,:dr,:t,:p,:d,:pl,:u,:c,:m,:w,'queued',"
+            "cast(:cr as double precision),'[]',:o,:rid where not exists (select 1 from jobs where draft=:dr) "
             "and (cast(:q as integer) = 0 or (select count(*) from jobs where user_id=:u "
             "and created>cast(:since as double precision)) < :q)",
             id=job_id,
@@ -251,6 +252,8 @@ class ResearchService:
             o=json.dumps(stored, ensure_ascii=False) if stored else None,
             q=quota,
             since=now - 86400,
+            # X-Request-ID of the submit (the pipe sends "<chat_id>:<message_id>"): the run logs it with every line
+            rid=str(get_contextvars().get("request_id") or "")[:200] or None,
         )
         if not inserted:
             prior = await self._job_of_draft(draft["id"])
@@ -260,7 +263,7 @@ class ResearchService:
         files, collections = (stored or {}).get("files", []), (stored or {}).get("collections", [])
         logger.info(
             "job queued",
-            job=job_id,
+            job_id=job_id,
             preset=draft["preset"],
             depth=draft["depth"],
             when=str(when),
