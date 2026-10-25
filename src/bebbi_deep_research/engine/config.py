@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 
 @dataclass
@@ -129,10 +129,19 @@ class PresetSpec(_Strict):
     report: ReportSpec = Field(default_factory=ReportSpec)
     budget: BudgetOverride = Field(default_factory=BudgetOverride)
     verify_entailment: bool = True
-    engine: Literal["pipeline", "focus"] = "pipeline"
+    engine: str = "pipeline"  # a key of engine.engines.ENGINES
     plan_first: bool = True
     house_style: bool = True
     own_sources: Literal["prefer", "only", "off"] = "prefer"
+
+    @field_validator("engine")
+    @classmethod
+    def _known_engine(cls, name: str) -> str:
+        from .engines import ENGINES  # engines imports this module
+
+        if name not in ENGINES:
+            raise ValueError(f"unknown engine {name!r} (known: {', '.join(sorted(ENGINES))})")
+        return name
 
 
 class McpServerSpec(_Strict):

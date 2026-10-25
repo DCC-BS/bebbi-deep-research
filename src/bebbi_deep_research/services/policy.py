@@ -55,7 +55,7 @@ def in_window(settings: AppConfig, now: datetime | None = None) -> bool:
 
 
 def runs_by_day(cfg, preset: str, depth: str) -> bool:
-    """Office hours: only quick runs of an engine that allows it (focus: about 20-50k tokens, 2-3 min) start right away."""
+    """Office hours: only quick runs of an engine that allows it (focus: 20-50k tokens, 2-3 min) start at once."""
     p = cfg.presets.get(preset)
     return depth == "quick" and p is not None and engine_class(p.engine).runs_by_day
 
