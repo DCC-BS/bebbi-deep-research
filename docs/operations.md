@@ -34,9 +34,12 @@ The engine uses three roles: `think` (planning, research, writing), `fast` (deci
 | `RA_LLM_EMBED_API_KEY` **S** | empty | key for `RA_LLM_EMBED_BASE_URL` (`{job}` as above); used only when that is set |
 | `RA_LLM_MODEL_THINK` / `_FAST` / `_EMBED` | `gemma-think` / `gemma-fast` / `qwen-embed` | real model names. Production: `RedHatAI/gemma-4-31B-it-NVFP4` for think and fast, `Qwen/Qwen3-Embedding-4B` for embed |
 | `RA_LLM_EXTRA_BODY_THINK` / `_FAST` | empty | JSON merged into every chat request of that role, over backend-common's thinking switch (`chat_template_kwargs.enable_thinking`: `true` for think, `false` for fast, always sent). Verify the key name against the model's chat template |
+| `RA_LLM_TIMEOUT_SECONDS` | `1800` | timeout of one chat or embedding request (httpx read timeout: a slow but steady answer does not trip it). The run as a whole is capped by `RA_JOB_TIMEOUT_SECONDS` |
+| `RA_LLM_MAX_RETRIES` | `3` | retries of a request after a timeout, a dropped connection, 5xx or 429 (backoff, `Retry-After` honoured); a refused connection is not retried |
+| `RA_LLM_CONCURRENCY` | `6` | requests the process sends to the LLM endpoint at the same time (chat and embeddings, all jobs and chat turns together); further requests wait in the process |
 
 The LLM layer is backend-common's pydantic-ai `BaseAgent` (one per role): retries of transient errors with backoff
-(not of refused connections), `max_completion_tokens` per role (think 16000, fast 4000; an empty answer is retried once
+(`RA_LLM_MAX_RETRIES`, not of refused connections), `max_completion_tokens` per role (think 16000, fast 4000; an empty answer is retried once
 with twice the budget), one `llm_call` usage event per call, `ß` replaced by `ss` in every answer.
 
 The embed role needs `/v1/embeddings` on the same endpoint, or its own endpoint in `RA_LLM_EMBED_BASE_URL`.
@@ -109,9 +112,11 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 
 ## Scaling and GPU load
 
-* Load on vLLM = `workers x` the calls of one run. Each run issues LLM calls in parallel (the engine uses a
-  semaphore of 3 per job). Raise `RA_WORKERS` only after watching vLLM queue time (`vllm:num_requests_waiting`)
-  during the night.
+* Load on vLLM: at most `RA_LLM_CONCURRENCY` (default 6) requests per replica at a time, chat and embeddings
+  together, however many jobs run. Inside a job, 3 sub-questions are researched at once and each fans out into
+  page reads and extractions; without the cap one pipeline run reaches 15-20 concurrent calls. Requests above the
+  cap wait in the service, not in vLLM. Raise `RA_WORKERS` or `RA_LLM_CONCURRENCY` only after watching vLLM queue
+  time (`vllm:num_requests_waiting`) during the night.
 * More replicas multiply the worker counts. Jobs are claimed with an atomic `update ... where status='queued'`, so replicas
   do not run the same job twice. One replica is the recommended setup; run more only after job claims carry an owner token (until then a stale re-queue can let two replicas work on the same job). The chart uses the `Recreate` strategy so that a rollout never runs two pods at once.
 * Token budgets per run are set by depth in `presets.yaml` (`quick` 200k, `standard` 450k, `deep` 900k tokens, hard stop).
@@ -198,7 +203,7 @@ also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and lo
 | Many `503` from the MCP servers | the shared front proxy of the `*.bs.ch` hosts returns bursts of 503 (all hosts at once, minutes long). The MCP client retries each request up to 6 times over about 45 s, re-opens the session after a 404 and falls back to web search for 2 minutes after three failed connects. Nothing to do on our side except monitoring `/healthz` of the hosts (see [mcp-servers.md](mcp-servers.md)); runs complete anyway, with fewer MCP sources |
 | Reports without MCP sources | the MCP host is unreachable from the pod (proxy / NO_PROXY, NetworkPolicy), or `enabled: false` |
 | Empty answers from the LLM | thinking tokens count against `max_completion_tokens`; the engine retries once with double the budget. Check that `RA_LLM_EXTRA_BODY_FAST` keeps thinking off for the fast role |
-| Timeouts | LLM request timeout is 1800 s with 3 retries (backend-common transport); Firecrawl read timeout 150 s |
+| Timeouts | LLM request timeout `RA_LLM_TIMEOUT_SECONDS` (1800 s) with `RA_LLM_MAX_RETRIES` (3) retries; Firecrawl read timeout 150 s; the whole run is stopped after `RA_JOB_TIMEOUT_SECONDS` |
 | Own sources: plan says "nicht lesbar" for a file or knowledge base the user can read in Open WebUI | the pipe checks with the chat user's rights inside Open WebUI; check the share settings of the knowledge base (read grant for the user or group) or whether the file belongs to the user or to a knowledge base they can read |
 | Own sources: "wird noch verarbeitet" / "keinen lesbaren Text" | Open WebUI (Docling) has not finished extracting the file, or extraction failed for it: check the Docling service and the file's processing status in Open WebUI |
 | Own sources: no upload button, or Open WebUI rewrites the question | the model entries need `capabilities.file_upload: true` and `file_context: false` (`deploy/openwebui/models.json`, re-import after upgrading the repo) |

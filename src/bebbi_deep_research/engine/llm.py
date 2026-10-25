@@ -17,9 +17,11 @@ from dcc_backend_common.logger import get_logger
 from openai import AsyncOpenAI
 from pydantic import Field
 from pydantic_ai import Agent, RunContext, Tool, UnexpectedModelBehavior
+from pydantic_ai.concurrency import AbstractConcurrencyLimiter, ConcurrencyLimiter, get_concurrency_context
 from pydantic_ai.embeddings import Embedder
 from pydantic_ai.embeddings.openai import OpenAIEmbeddingModel
 from pydantic_ai.models import Model
+from pydantic_ai.models.concurrency import ConcurrencyLimitedModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -87,8 +89,8 @@ class LlmSettings:
     )
     max_tokens: dict[str, int] = field(default_factory=lambda: {"think": 16000, "fast": 4000})
     extra_body: dict[str, dict[str, Any]] = field(default_factory=dict)
-    timeout: int = 1800
-    max_retries: int = 3
+    timeout: int = 1800  # seconds per request (httpx read timeout; RA_LLM_TIMEOUT_SECONDS)
+    max_retries: int = 3  # retries of transient errors per request (RA_LLM_MAX_RETRIES)
 
     def role(self, role: str) -> RoleLlmConfig:
         """Return the backend-common configuration of one role."""
@@ -104,23 +106,36 @@ class LlmSettings:
         )
 
 
+def llm_limiter(max_running: int) -> ConcurrencyLimiter:
+    """Return the limiter that caps concurrent requests to the LLM endpoint; share one per process."""
+    return ConcurrencyLimiter(max_running=max_running, name="llm")
+
+
 class RoleAgent(BaseAgent[None, str]):
     """Text agent of one role; instructions and tools are given per run."""
 
-    def __init__(self, config: RoleLlmConfig, model: Model | None = None) -> None:
+    def __init__(
+        self, config: RoleLlmConfig, model: Model | None = None, limiter: AbstractConcurrencyLimiter | None = None
+    ) -> None:
         """Build the agent.
 
         Args:
             config: Role configuration.
             model: Model to use instead of the OpenAI-compatible endpoint (tests: a pydantic-ai FunctionModel).
+            limiter: Caps concurrent model requests (shared by all agents of the process); held per request only,
+                never across a tool call.
         """
         self._model_override = model
+        self._limiter = limiter
         self.role_config = config
         super().__init__(config, deps_type=None, output_type=str, enable_thinking=config.enable_thinking)
 
     @override
     def create_agent(self, model: Model) -> Agent[None, str]:
-        return Agent(model=self._model_override or model, output_type=str)
+        chosen = self._model_override or model
+        if self._limiter is not None:
+            chosen = ConcurrencyLimitedModel(chosen, self._limiter)
+        return Agent(model=chosen, output_type=str)
 
     async def complete(
         self,
@@ -187,15 +202,19 @@ class LLM:
         usage: Token usage of this LLM object (one research).
     """
 
-    def __init__(self, settings: LlmSettings, model: Model | None = None) -> None:
+    def __init__(
+        self, settings: LlmSettings, model: Model | None = None, limiter: AbstractConcurrencyLimiter | None = None
+    ) -> None:
         """Create the role agents and the embedder.
 
         Args:
             settings: Endpoint, models and limits.
             model: Model for both roles instead of the endpoint (tests).
+            limiter: Caps concurrent chat and embedding requests (one per process, see ``llm_limiter``); None: no cap.
         """
         self.settings = settings
-        self.agents = {role: RoleAgent(settings.role(role), model) for role in ROLES}
+        self.limiter = limiter
+        self.agents = {role: RoleAgent(settings.role(role), model, limiter) for role in ROLES}
         self._embed_client = AsyncOpenAI(
             base_url=settings.embed_base_url or settings.base_url,
             api_key=(settings.embed_api_key if settings.embed_base_url else settings.api_key) or "none",
@@ -291,7 +310,8 @@ class LLM:
         out: list[list[float]] = []
         for i in range(0, len(texts), EMBED_BATCH):
             batch = [t[:EMBED_CHARS] for t in texts[i : i + EMBED_BATCH]]
-            result = await self.embedder.embed(batch, input_type="document")
+            async with get_concurrency_context(self.limiter, "embed"):
+                result = await self.embedder.embed(batch, input_type="document")
             out += [list(v) for v in result.embeddings]
         return out
 

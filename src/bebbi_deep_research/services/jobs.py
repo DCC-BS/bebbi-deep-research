@@ -15,7 +15,7 @@ from dcc_backend_common.logger import get_logger
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 
 from bebbi_deep_research.engine import LLM, ResearchAgent, Tools
-from bebbi_deep_research.engine.llm import LlmSettings
+from bebbi_deep_research.engine.llm import LlmSettings, llm_limiter
 from bebbi_deep_research.services.db import DB
 from bebbi_deep_research.services.own_sources import to_engine
 from bebbi_deep_research.services.report import build_sources, owui_source_events, ui_markdown
@@ -72,8 +72,10 @@ def runs_by_day(cfg, preset: str, depth: str) -> bool:
 def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]:
     """Return ``make_agent(job_id, on_event=None)``, which builds a research agent with its own LLM and tools.
 
-    "{job}" in the LLM and search keys is replaced by the job id (gateway metering).
+    "{job}" in the LLM and search keys is replaced by the job id (gateway metering). All agents of the factory share
+    one limiter, so the process sends at most ``RA_LLM_CONCURRENCY`` requests to the LLM endpoint at a time.
     """
+    limiter = llm_limiter(settings.llm_concurrency)
 
     def make_agent(job_id: str, on_event=None) -> ResearchAgent:
         llm = LLM(
@@ -86,7 +88,10 @@ def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]
                 extra_body={
                     r: b for r, b in (("think", settings.extra_body_think), ("fast", settings.extra_body_fast)) if b
                 },
-            )
+                timeout=settings.llm_timeout_seconds,
+                max_retries=settings.llm_max_retries,
+            ),
+            limiter=limiter,
         )
         tools = Tools(
             search_url=settings.search_url,
