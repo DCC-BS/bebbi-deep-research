@@ -302,6 +302,7 @@ def _filename(job: dict) -> str:
 
 
 STATE_KEYS = {"clarify": ("task",), "job": ("job",)}
+SERVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # job and draft ids: no "/", "#", "?" or "&" that change the path
 
 
 def _marker(state: dict) -> str:
@@ -322,9 +323,10 @@ def _state(messages: list[dict]) -> dict:
         if m.get("role") == "assistant":
             found = MARK.search(m.get("content") or "")
             st = _decode(found.group(1)) if found else {}
-            return (
-                st if all(k in st for k in STATE_KEYS.get(st.get("state"), ("?",))) else {}
-            )  # a forged or broken marker is no state
+            # a forged or broken marker is no state; the user can edit the marker, so ids that go into a service path
+            # must be plain ids (`<id>#` or `<id>?...` would cut off or replace the user_id owner check)
+            ids_ok = all(isinstance(st[k], str) and SERVICE_ID.fullmatch(st[k]) for k in ("job", "draft") if k in st)
+            return st if ids_ok and all(k in st for k in STATE_KEYS.get(st.get("state"), ("?",))) else {}
     return {}
 
 
@@ -670,7 +672,9 @@ class Pipe:
 
         async def change(st: dict, instruction: str) -> tuple[dict, dict | None]:
             await status("Passe den Plan an")
-            res = await self._api("POST", f"/plans/{st['draft']}/edit", {"instruction": instruction, "user_id": uid})
+            res = await self._api(
+                "POST", f"/plans/{quote(st['draft'], safe='')}/edit", {"instruction": instruction, "user_id": uid}
+            )
             st["edits"] = st.get("edits", 0) + 1
             await status("Plan angepasst", done=True)
             return res["plan"], res.get("own_sources")
@@ -699,7 +703,7 @@ class Pipe:
             st = _state(messages)
             # --- running / finished job: report status or result
             if st.get("state") == "job":
-                job = await self._api("GET", _jpath(f"/jobs/{st['job']}", uid))
+                job = await self._api("GET", _jpath(f"/jobs/{quote(st['job'], safe='')}", uid))
                 if job["status"] == "done":
                     return await self._publish(job, __event_emitter__, __user__, __request__)
                 if job["status"] == "error":
