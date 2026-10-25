@@ -1,5 +1,6 @@
-# research-agent presets (docs/research-agent-design.md). One preset = one research profile; in Open WebUI
-# each preset becomes its own model ("Deep Research · Recht", ...). Only steering surface: no code per topic.
+# research-agent presets (docs/research-agent-design.md). One preset = one research profile; in Open WebUI the
+# model "Deep Research" suggests one per task from its `description` and the user confirms it. Only steering surface:
+# no code per topic.
 #
 # engine: focus    = bounded tool-calling loop with code-resolved citations (administrative presets)
 #         pipeline = plan, research rounds, section-wise writing (broad web surveys)

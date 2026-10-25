@@ -22,6 +22,8 @@ class ClarifyRequest(BaseModel):
     depth: str = Field("standard", max_length=100)
     user_id: str | None = Field(None, max_length=200)
     own_sources: OwnSourcesRequest | None = None
+    # One Deep Research model: the answer also suggests the preset ("preset", or None), which the user confirms.
+    suggest_preset: bool = False
 
 
 class CreatePlanRequest(ClarifyRequest):

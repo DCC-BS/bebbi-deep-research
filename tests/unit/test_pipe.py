@@ -533,3 +533,100 @@ def test_vanished_job_drops_the_marker_and_failed_submit_keeps_nothing():
     body = {"model": "x.grossrat", "messages": [{"role": "user", "content": "Frage"}]}
     out = asyncio.run(pipe.pipe(body, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
     assert "nicht verfügbar" in out and "research-agent" not in out  # no job, no plan kept: the user asks again
+
+
+# ---------------------------------------------------------------- one model, preset chosen per task
+def _preset_pipe(mod, answers: list, suggestion="grossrat", questions=()):
+    """Model "Deep Research": the fake service suggests `suggestion`; the fake browser answers the cards in order."""
+    pipe, calls, asked, events, call, emit = _card_pipe(mod, answers)
+    plan_api = pipe._api
+
+    async def api(method, path, body=None):
+        if path == "/clarify":
+            calls.append((method, path, body))
+            return {"questions": list(questions), "assumptions": [], "preset": suggestion}
+        if path == "/presets":
+            calls.append((method, path, body))
+            return [{"name": "grossrat", "description": "Grosser Rat Basel-Stadt"}, {"name": "rechtsrecherche"}]
+        return await plan_api(method, path, body)
+
+    pipe._api = api
+    return pipe, calls, asked, events, call, emit
+
+
+def _choose(index):
+    return {"status": "answered", "answers": {"preset": {"type": "option", "option_index": index, "label": "x"}}}
+
+
+AUTO_BODY = {"model": "bebbi_deep_research.auto", "messages": [{"role": "user", "content": "Vorstösse zum Wohnschutz"}]}
+
+
+def test_one_model_by_default_and_preset_models_on_request():
+    mod = load_pipe()
+    pipe = mod.Pipe()
+    assert pipe.pipes() == [{"id": "auto", "name": "Deep Research"}]
+    pipe.valves.PRESET_MODELS = True
+    assert {"id": "grossrat", "name": "Deep Research · Grosser Rat"} in pipe.pipes() and len(pipe.pipes()) == 7
+
+
+def test_the_suggested_preset_comes_first_and_the_users_pick_is_planned():
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit = _preset_pipe(mod, [_choose(1), _pick(2)])
+    out = asyncio.run(pipe.pipe(AUTO_BODY, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    clarify = next(c for c in calls if c[1] == "/clarify")
+    assert clarify[2]["suggest_preset"] is True and "preset" not in clarify[2]
+    card = asked[0]["data"]["questions"][0]
+    labels = [o["label"] for o in card["options"]]
+    assert labels[0] == "Grosser Rat (empfohlen)" and "Recht" in labels and len(labels) == 6
+    assert card["options"][0]["description"] == "Grosser Rat Basel-Stadt"
+    plan = next(c for c in calls if c[1] == "/plans")
+    assert plan[2]["preset"] == labels_to_name(mod, labels[1])
+    assert f"Recherche: **{labels[1]}**" in out  # the plan names the chosen preset
+
+
+def labels_to_name(mod, label):
+    return {v: k for k, v in mod.Pipe()._labels().items()}[label]
+
+
+def test_no_preset_answer_starts_nothing():
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit = _preset_pipe(mod, [{"status": "cancelled"}])
+    out = asyncio.run(pipe.pipe(AUTO_BODY, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    assert "Keine Auswahl" in out and not any(c[1] == "/plans" for c in calls)
+
+
+def test_without_a_browser_the_suggestion_or_the_default_is_used():
+    mod = load_pipe()
+    for suggestion, expected in (("grossrat", "grossrat"), (None, "verwaltung_web"), ("erfunden", "verwaltung_web")):
+        pipe, calls, *_ = _preset_pipe(mod, [], suggestion=suggestion)
+        asyncio.run(pipe.pipe(AUTO_BODY, {"id": "u"}))
+        assert next(c for c in calls if c[1] == "/plans")[2]["preset"] == expected
+
+
+def test_the_chosen_preset_survives_the_clarifying_questions():
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit = _preset_pipe(mod, [_choose(0)], questions=["Zeitraum?"])
+    first = asyncio.run(pipe.pipe(AUTO_BODY, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    assert "Zeitraum?" in first and not any(c[1] == "/plans" for c in calls)
+    body = {
+        "model": "bebbi_deep_research.auto",
+        "messages": [
+            *AUTO_BODY["messages"],
+            {"role": "assistant", "content": first},
+            {"role": "user", "content": "ab 2020"},
+        ],
+    }
+    pipe2, calls2, *_ = _preset_pipe(mod, [], suggestion="statistik")
+    asyncio.run(pipe2.pipe(body, {"id": "u"}))
+    assert next(c for c in calls2 if c[1] == "/plans")[2]["preset"] == "grossrat"
+    assert not any(c[1] == "/clarify" for c in calls2)
+
+
+def test_a_preset_model_skips_the_choice():
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit = _preset_pipe(mod, [_pick(2)])
+    body = {"model": "x.rechtsrecherche", "messages": [{"role": "user", "content": "Frage"}]}
+    asyncio.run(pipe.pipe(body, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    clarify = next(c for c in calls if c[1] == "/clarify")
+    assert clarify[2]["preset"] == "rechtsrecherche" and "suggest_preset" not in clarify[2]
+    assert [q["data"]["questions"][0]["id"] for q in asked] == ["plan"]

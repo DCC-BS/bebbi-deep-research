@@ -6,7 +6,8 @@
 
 function.json  two entries (pipe and download action) in the format of Open WebUI's /api/v1/functions/sync
                (seeder: POST it with an admin key).
-models.json    one model entry per preset ("Deep Research · Recht", ...) in the format of /api/v1/models/import.
+models.json    the one model "Deep Research" (the user picks the preset per task) in the format of
+               /api/v1/models/import.
 """
 
 import json
@@ -71,26 +72,28 @@ def build() -> dict[str, str]:
             "created_at": 0,
         },
     ]
-    models = []
-    for name, p in cfg["presets"].items():
-        models.append(
-            {
-                "id": f"{FUNCTION_ID}.{name}",
-                "base_model_id": None,
-                "name": f"Deep Research · {LABELS.get(name, name)}",
-                "params": {},
-                "access_grants": [{"principal_type": "user", "principal_id": "*", "permission": "read"}],
-                "is_active": True,
-                "meta": {
-                    "description": p["description"],
-                    # file_upload: the chat offers file upload and knowledge bases (own sources, docs/integration.md);
-                    # file_context false: Open WebUI must not run its own retrieval and rewrite the user's message
-                    # for the pipe
-                    "capabilities": {"vision": False, "file_upload": True, "file_context": False, "citations": True},
-                    "suggestion_prompts": [{"content": s} for s in SUGGESTIONS.get(name, [])],
-                },
-            }
-        )
+    labels = ", ".join(LABELS.get(name, name) for name in cfg["presets"])
+    models = [
+        {
+            "id": f"{FUNCTION_ID}.auto",
+            "base_model_id": None,
+            "name": "Deep Research",
+            "params": {},
+            "access_grants": [{"principal_type": "user", "principal_id": "*", "permission": "read"}],
+            "is_active": True,
+            "meta": {
+                "description": (
+                    "Gründliche Recherche mit Rückfragen und Plan, als Bericht mit Quellen. "
+                    f"Sie wählen, wo recherchiert wird ({labels}); die Recherche läuft über Nacht."
+                ),
+                # file_upload: the chat offers file upload and knowledge bases (own sources, docs/integration.md);
+                # file_context false: Open WebUI must not run its own retrieval and rewrite the user's message
+                # for the pipe
+                "capabilities": {"vision": False, "file_upload": True, "file_context": False, "citations": True},
+                "suggestion_prompts": [{"content": s} for name in cfg["presets"] for s in SUGGESTIONS.get(name, [])],
+            },
+        }
+    ]
     return {
         "function.json": json.dumps(function, indent=2, ensure_ascii=False) + "\n",
         "models.json": json.dumps(models, indent=2, ensure_ascii=False) + "\n",

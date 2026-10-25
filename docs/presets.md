@@ -38,13 +38,14 @@ focus engine), `focus_words` (typical report length). A preset may override sing
 Own sources work in both engines. Focus engine: tools `read_upload` and `knowledge_search`, small uploads are read directly. Pipeline
 engine: in every sub-question the best matching uploads and the knowledge hits are extracted into evidence cards before the web and MCP routes
 (in `only` mode instead of them). Source kinds in the ledger: `upload`, `knowledge:<knowledge base>`; labels "Hochgeladene Datei" and
-"Wissensbasis <Name>". The shipped preset `dokumente` ("Deep Research · Eigene Dokumente") is the `only` example.
+"Wissensbasis <Name>". The shipped preset `dokumente` ("Eigene Dokumente") is the `only` example.
 
 ## Add a preset
 
 1. Add an entry under `presets:` (copy `grossrat` for a focus preset; set `routes`, `mcp`, `prefer_domains`, `query_rules`, `report`).
-2. Add `name:Label` to the pipe valve `PRESETS` (the model "Deep Research · Label" appears) and to `LABELS` in
-   `scripts/build_openwebui_assets.py` if you want a seeded model entry; run `uv run python scripts/build_openwebui_assets.py`.
+2. Add `name:Label` to the pipe valve `PRESETS` (the preset appears in the card of "Deep Research"; the service
+   suggests it from its `description`) and to `LABELS` and `SUGGESTIONS` in `scripts/build_openwebui_assets.py`; run
+   `uv run python scripts/build_openwebui_assets.py`.
 3. Copy the file into the chart: `cp config/presets.yaml deploy/helm/bebbi-deep-research/files/presets.yaml`.
 4. Test with `scripts/test_pipe.py "<question>" <preset>`.
 

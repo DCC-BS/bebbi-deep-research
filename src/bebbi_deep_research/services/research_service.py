@@ -115,8 +115,16 @@ class ResearchService:
         ]
 
     async def clarify(self, request: ClarifyRequest) -> dict[str, Any]:
-        """Return up to two clarifying questions and the assumptions made without an answer."""
+        """Return up to two clarifying questions and the assumptions made without an answer.
+
+        With `suggest_preset` the answer also has the preset that fits the task best ("preset", None if none fits).
+        """
         agent = self.agent_factory("clarify-" + uuid.uuid4().hex[:8])
+        if request.suggest_preset:
+            # No preset chosen yet: the model sees the attached sources without any preset's rule.
+            stored, _ = prepare(request.own_sources, self.settings, preview=True)
+            presets = {p.name: p.description for p in self.presets.presets.values()}
+            return await agent.clarify(request.task, presets=presets, **self._engine_own(stored))
         stored = None
         if request.preset in self.presets.presets:
             stored, _ = self._own_for(request.preset, request.own_sources, preview=True)

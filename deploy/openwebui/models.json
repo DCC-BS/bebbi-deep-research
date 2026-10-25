@@ -1,8 +1,8 @@
 [
   {
-    "id": "bebbi_deep_research.web_survey",
+    "id": "bebbi_deep_research.auto",
     "base_model_id": null,
-    "name": "Deep Research · Web",
+    "name": "Deep Research",
     "params": {},
     "access_grants": [
       {
@@ -13,7 +13,7 @@
     ],
     "is_active": true,
     "meta": {
-      "description": "Broad research across the web (international topics, markets, technology, science).",
+      "description": "Gründliche Recherche mit Rückfragen und Plan, als Bericht mit Quellen. Sie wählen, wo recherchiert wird (Web, Verwaltung, Recht, Grosser Rat, Statistik, Eigene Dokumente); die Recherche läuft über Nacht.",
       "capabilities": {
         "vision": false,
         "file_upload": true,
@@ -23,144 +23,19 @@
       "suggestion_prompts": [
         {
           "content": "Which approaches exist for citizen participation platforms in European cities?"
-        }
-      ]
-    }
-  },
-  {
-    "id": "bebbi_deep_research.verwaltung_web",
-    "base_model_id": null,
-    "name": "Deep Research · Verwaltung",
-    "params": {},
-    "access_grants": [
-      {
-        "principal_type": "user",
-        "principal_id": "*",
-        "permission": "read"
-      }
-    ],
-    "is_active": true,
-    "meta": {
-      "description": "Recherche zu Verwaltung, Strategien und Webangeboten von Bund, Kantonen und Städten.",
-      "capabilities": {
-        "vision": false,
-        "file_upload": true,
-        "file_context": false,
-        "citations": true
-      },
-      "suggestion_prompts": [
+        },
         {
           "content": "Wie organisieren andere Kantone die Open-Data-Strategie?"
-        }
-      ]
-    }
-  },
-  {
-    "id": "bebbi_deep_research.rechtsrecherche",
-    "base_model_id": null,
-    "name": "Deep Research · Recht",
-    "params": {},
-    "access_grants": [
-      {
-        "principal_type": "user",
-        "principal_id": "*",
-        "permission": "read"
-      }
-    ],
-    "is_active": true,
-    "meta": {
-      "description": "Rechtsrecherche Bund und Kanton Basel-Stadt (Erlasse, Rechtsprechung, Materialien).",
-      "capabilities": {
-        "vision": false,
-        "file_upload": true,
-        "file_context": false,
-        "citations": true
-      },
-      "suggestion_prompts": [
+        },
         {
           "content": "Welche Rechtsgrundlagen regeln Videoüberwachung durch Kantonsbehörden in Basel-Stadt?"
-        }
-      ]
-    }
-  },
-  {
-    "id": "bebbi_deep_research.grossrat",
-    "base_model_id": null,
-    "name": "Deep Research · Grosser Rat",
-    "params": {},
-    "access_grants": [
-      {
-        "principal_type": "user",
-        "principal_id": "*",
-        "permission": "read"
-      }
-    ],
-    "is_active": true,
-    "meta": {
-      "description": "Recherche in Geschäften, Vorstössen und Beschlüssen des Grossen Rates Basel-Stadt.",
-      "capabilities": {
-        "vision": false,
-        "file_upload": true,
-        "file_context": false,
-        "citations": true
-      },
-      "suggestion_prompts": [
+        },
         {
           "content": "Welche Vorstösse zum Stadtklima hat der Grosse Rat in den letzten Jahren behandelt?"
-        }
-      ]
-    }
-  },
-  {
-    "id": "bebbi_deep_research.statistik",
-    "base_model_id": null,
-    "name": "Deep Research · Statistik",
-    "params": {},
-    "access_grants": [
-      {
-        "principal_type": "user",
-        "principal_id": "*",
-        "permission": "read"
-      }
-    ],
-    "is_active": true,
-    "meta": {
-      "description": "Zahlen und Zeitreihen aus der amtlichen Statistik (Basel-Stadt, Bund).",
-      "capabilities": {
-        "vision": false,
-        "file_upload": true,
-        "file_context": false,
-        "citations": true
-      },
-      "suggestion_prompts": [
+        },
         {
           "content": "Wie hat sich die Leerwohnungsziffer in Basel-Stadt seit 2015 entwickelt?"
-        }
-      ]
-    }
-  },
-  {
-    "id": "bebbi_deep_research.dokumente",
-    "base_model_id": null,
-    "name": "Deep Research · Eigene Dokumente",
-    "params": {},
-    "access_grants": [
-      {
-        "principal_type": "user",
-        "principal_id": "*",
-        "permission": "read"
-      }
-    ],
-    "is_active": true,
-    "meta": {
-      "description": "Recherche ausschliesslich in eigenen Dokumenten (im Chat hochgeladene Dateien, Wissensbasen).",
-      "capabilities": {
-        "vision": false,
-        "file_upload": true,
-        "file_context": false,
-        "citations": true
-      },
-      "suggestion_prompts": [
+        },
         {
           "content": "Fasse die wichtigsten Aussagen der angehängten Dokumente zusammen und nenne offene Fragen."
         }
