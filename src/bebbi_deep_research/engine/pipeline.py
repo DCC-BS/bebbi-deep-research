@@ -8,6 +8,7 @@ import asyncio
 import json
 import re
 import time
+from typing import ClassVar
 
 from dcc_backend_common.logger import get_logger
 from pydantic_ai import UnexpectedModelBehavior
@@ -37,8 +38,8 @@ class PipelineEngine:
     One instance per run: it keeps the run's citation-check state.
     """
 
-    name = "pipeline"
-    runs_by_day = False  # office hours: quick runs of this engine still wait for the night window
+    name: ClassVar[str] = "pipeline"
+    runs_by_day: ClassVar[bool] = False  # office hours: quick runs of this engine still wait for the night window
 
     def __init__(self, ctx: EngineContext):
         """Use the LLM, tools, MCP pool, own sources and event callback of `ctx`."""

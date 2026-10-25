@@ -15,6 +15,7 @@ from dcc_backend_common.logger import get_logger
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 
 from bebbi_deep_research.engine import LLM, ResearchAgent, Tools
+from bebbi_deep_research.engine.engines import engine_class
 from bebbi_deep_research.engine.llm import LlmSettings, llm_limiter
 from bebbi_deep_research.services.db import DB
 from bebbi_deep_research.services.own_sources import to_engine
@@ -66,7 +67,7 @@ def in_window(settings: AppConfig, now: datetime | None = None) -> bool:
 def runs_by_day(cfg, preset: str, depth: str) -> bool:
     """Office hours: only quick runs of the focus engine (about 20-50k tokens, 2-3 min) start right away."""
     p = cfg.presets.get(preset)
-    return depth == "quick" and p is not None and p.engine == "focus"
+    return depth == "quick" and p is not None and engine_class(p.engine).runs_by_day
 
 
 def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]:

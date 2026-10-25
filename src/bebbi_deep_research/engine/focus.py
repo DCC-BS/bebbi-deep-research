@@ -9,6 +9,7 @@ re-points or removes citations and builds the source list with Stand.
 import asyncio
 import re
 import time
+from typing import ClassVar
 
 from dcc_backend_common.logger import get_logger
 from pydantic_ai import UnexpectedModelBehavior
@@ -68,8 +69,8 @@ _IDS = re.compile(r"\[S(\d+)(?:\s*[,;/]\s*S?(\d+))*\]")
 class FocusEngine:
     """Runs one focus research: tool loop, then citation check and source list in code."""
 
-    name = "focus"
-    runs_by_day = True  # office hours: quick runs (about 20-50k tokens, 2-3 min) start right away
+    name: ClassVar[str] = "focus"
+    runs_by_day: ClassVar[bool] = True  # office hours: quick runs (about 20-50k tokens, 2-3 min) start right away
 
     def __init__(self, ctx: EngineContext):
         """Use the LLM, tools, MCP pool, own sources and event callback of `ctx`."""

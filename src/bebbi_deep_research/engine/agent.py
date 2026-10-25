@@ -1,7 +1,8 @@
 """ResearchAgent: the engine's entry point for services (chat turns and one research run).
 
 It owns the shared services (`EngineContext`: config, LLM, tools, MCP pool, events, own sources) and hands a run to
-the engine the preset names: the pipeline engine (pipeline.py) or the focus engine (focus.py).
+the engine the preset names (registry in engines.py: the pipeline engine in pipeline.py, the focus engine in
+focus.py).
 """
 
 import dataclasses
@@ -10,10 +11,9 @@ from . import own as O
 from .chat import INTENTS, ChatTurns, own_for
 from .config import Budget, Config, Preset
 from .context import EngineContext, Event, Result
-from .focus import FocusEngine
+from .engines import engine_class
 from .llm import LLM
 from .mcp import McpPool
-from .pipeline import PipelineEngine
 from .tools import MCPClient, Tools
 
 __all__ = ["INTENTS", "Event", "ResearchAgent", "Result"]
@@ -80,5 +80,4 @@ class ResearchAgent:
         self.ctx.own = own_for(own, preset)
         if preset.budget:  # per-preset budget overrides (e.g. more pages for surveys)
             budget = dataclasses.replace(budget, **preset.budget)
-        engine = FocusEngine if preset.engine == "focus" else PipelineEngine
-        return await engine(self.ctx).run(task, preset, budget, plan, requirements)
+        return await engine_class(preset.engine)(self.ctx).run(task, preset, budget, plan, requirements)
