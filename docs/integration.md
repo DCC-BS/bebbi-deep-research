@@ -228,6 +228,11 @@ returns itself (later message, fallback above): it carries no marker either.
 * `GET /jobs/{id}/report.docx` (bearer token) returns the Word file for n8n and other apps (409 while the job runs).
   python-docx renders title, header block (question, date, preset, depth), headings, lists, Markdown tables as Word tables,
   citations as links to the source list, the source list with hyperlinks, Stand and retrieval date, and a footer.
+  The layout is the Kanton Basel-Stadt template of Bebbi Bot's document tools (`kdkp_office.word` in
+  FD-ITBS/kdkp-open-web-ui): `assets/word/template.docx` is a copy of its `template.docx` (provenance in
+  `src/bebbi_deep_research/assets/README.md`), and each element uses the same style (`Title`, numbered `Heading 1` to
+  `Heading 4`, `ListWithBullets`, `ListWithNumbers`, `Table Grid`, `Block Text`, `Plain Text`, `Hyperlink`), so a report
+  looks like a Word file written in the chat. Only the template is shared, not the renderer: see the module docstring.
   As in the chat (`sanitize_markdown`), only links to registered source URLs become hyperlinks; any other link or bare
   URL in the report stays plain text. Rendering is on demand from the stored report; old jobs work too.
 
