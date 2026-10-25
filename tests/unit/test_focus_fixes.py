@@ -49,13 +49,11 @@ class _Tools:
 
 
 def _engine():
-    agent = SimpleNamespace(llm=None, tools=_Tools(), cfg=None)
-
     async def emit(*a):
         pass
 
-    agent._emit = emit
-    return FocusEngine(agent), agent
+    ctx = SimpleNamespace(llm=None, tools=_Tools(), cfg=None, own=None, emit=emit)
+    return FocusEngine(ctx), ctx
 
 
 def test_fetch_page_only_known_urls():
@@ -78,7 +76,6 @@ def test_empty_final_answer_raises():
     eng, agent = _engine()
 
     eng.llm = ScriptedLLM([say("")] * 6)
-    agent.plan = None
     preset = SimpleNamespace(plan_first=False, language="de", mcp={}, query_rules="", report={}, house_style=True)
     agent.own = None
     agent.cfg = SimpleNamespace(mcp_servers={})

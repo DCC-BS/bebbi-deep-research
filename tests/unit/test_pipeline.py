@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from bebbi_deep_research.engine import ResearchAgent, load_config
 from bebbi_deep_research.engine.ledger import Ledger, SubQ
+from bebbi_deep_research.engine.pipeline import PipelineEngine
 from bebbi_deep_research.engine.text import distinctive
 
 from .test_own_engine import ROOT, FakeTools, make_own
@@ -40,7 +41,7 @@ class ScriptedLLM:
 
 def agent_for(llm, tools=None):
     agent = ResearchAgent(load_config(ROOT / "config/presets.yaml"), llm, tools or FakeTools())
-    agent._mcp_client = lambda server, p: None
+    agent.ctx.mcp.client = lambda server, p: None
     return agent
 
 
@@ -78,19 +79,23 @@ async def test_non_dict_json_answers_do_not_crash_clarify_plan_and_reflect():
     assert plan["sub_questions"][0]["text"] == "Aufgabe"
     led = Ledger()
     led.subqs["Q1"] = SubQ("Q1", "P1", "Frage?")
-    assert await agent._reflect(1, plan, budget, led) == []
+    assert await PipelineEngine(agent.ctx)._reflect(1, plan, budget, led) == []
 
 
 # ------------------------------------------------------------------------------------- verify
 async def test_verify_applies_every_check_of_a_sentence_to_its_current_text():
     agent = agent_for(ScriptedLLM())
     led = add_cards(agent, "Es waren 4500 Franken im Jahr.", "Es waren 5555 Einwohner im Dorf.")
-    out = await agent._verify("Es waren 7777 Franken [E1] und 9999 Einwohner [E2].", led, {}, entail=False)
+    out = await PipelineEngine(agent.ctx)._verify(
+        "Es waren 7777 Franken [E1] und 9999 Einwohner [E2].", led, {}, entail=False
+    )
     assert "[E1]" not in out and "[E2]" not in out
     # a later check on the same sentence still applies after an earlier one rewrote it (E1 lacks 5555, E2 lacks 4500)
-    out = await agent._verify("Es waren 4500 Franken [E1] und 5555 Einwohner [E2] im Dorf.", led, {}, entail=False)
+    out = await PipelineEngine(agent.ctx)._verify(
+        "Es waren 4500 Franken [E1] und 5555 Einwohner [E2] im Dorf.", led, {}, entail=False
+    )
     assert "[E1]" not in out and "[E2]" not in out and out.startswith("Es waren 4500 Franken und 5555 Einwohner")
-    out = await agent._verify("Es waren 4500 Franken [E1] und mehr [E9].", led, {}, entail=False)
+    out = await PipelineEngine(agent.ctx)._verify("Es waren 4500 Franken [E1] und mehr [E9].", led, {}, entail=False)
     assert out == "Es waren 4500 Franken [E1] und mehr."
 
 
@@ -100,10 +105,12 @@ async def test_verify_keeps_a_citation_when_only_a_bare_year_is_missing():
         agent, "Die Verordnung wurde angepasst und die Frist beträgt 30 Tage.", "Im Jahr 2022 stimmte das Volk ab."
     )
     stats = {}
-    out = await agent._verify("Die Frist von 30 Tage wurde 2022 festgelegt [E1].", led, stats, entail=False)
+    out = await PipelineEngine(agent.ctx)._verify(
+        "Die Frist von 30 Tage wurde 2022 festgelegt [E1].", led, stats, entail=False
+    )
     assert "[E1]" in out and "[E2]" not in out and stats.get("years_only") == 1
     # a distinctive number still re-points
-    out = await agent._verify(
+    out = await PipelineEngine(agent.ctx)._verify(
         "Die Gebühr von 1250 Franken fiel 2022 an [E1].",
         add_cards(agent, "Frist 30 Tage", "Gebühr 1250 Franken seit 2022"),
         {},
@@ -139,10 +146,11 @@ async def test_web_stores_the_url_without_fragment_and_fetches_it_once():
     led = Ledger()
     sq = SubQ("Q1", "P1", "Frage?")
     plan = {"task_core": "k", "language": "de"}
+    engine = PipelineEngine(agent.ctx)
     # two sub-questions searching at the same time must not fetch the same page twice
     await asyncio.gather(
         *(
-            agent._web(s, plan, cfg.presets["web_survey"], cfg.budgets["quick"], led)
+            engine._web(s, plan, cfg.presets["web_survey"], cfg.budgets["quick"], led)
             for s in (sq, SubQ("Q2", "P1", "Andere?"))
         )
     )
@@ -168,13 +176,13 @@ async def test_a_failing_tools_list_drops_the_cached_mcp_client():
             raise RuntimeError("session gone")
 
     agent = agent_for(ScriptedLLM())
-    agent._mcp_client = ResearchAgent._mcp_client.__get__(agent)
-    agent._mcp_clients["grossrat"] = Dead()
+    del agent.ctx.mcp.client  # the real pool again
+    agent.ctx.mcp.clients["grossrat"] = Dead()
     led = Ledger()
-    n = await agent._mcp(
+    n = await PipelineEngine(agent.ctx)._mcp(
         SubQ("Q1", "P1", "F?"), "grossrat", {"task_core": "k", "language": "de"}, agent.cfg.presets["grossrat"], led
     )
-    assert n == 0 and "grossrat" not in agent._mcp_clients and "session gone" in agent._mcp_errors["grossrat"]
+    assert n == 0 and "grossrat" not in agent.ctx.mcp.clients and "session gone" in agent.ctx.mcp.errors["grossrat"]
     assert any(e["kind"] == "mcp_unavailable" for e in led.trail)
 
 

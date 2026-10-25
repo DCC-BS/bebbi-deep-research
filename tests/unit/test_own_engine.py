@@ -16,6 +16,7 @@ from bebbi_deep_research.engine.own import (
     read_upload,
     tool_specs,
 )
+from bebbi_deep_research.engine.pipeline import PipelineEngine
 from bebbi_deep_research.engine.sources import Registry
 
 from .scripted_llm import ScriptedLLM, say
@@ -87,7 +88,7 @@ def make_agent(llm, preset=None, own_sources=None):
     if own_sources:
         cfg.presets[preset].own_sources = own_sources
     agent = ResearchAgent(cfg, llm, FakeTools())
-    agent._mcp_client = lambda server, p: None  # no network: the MCP servers are "unreachable"
+    agent.ctx.mcp.client = lambda server, p: None  # no network: the MCP servers are "unreachable"
     return agent
 
 
@@ -274,7 +275,7 @@ async def test_focus_off_mode_ignores_attached_sources():
     llm = focus_llm(say("# B\n\n## Zusammenfassung\n\nText."))
     agent = make_agent(llm, "verwaltung_web", own_sources="off")
     await agent.run("Frage", "verwaltung_web", "quick", plan=PLAN, own=make_own())
-    assert llm.calls[0]["tools"] == ["web_search", "fetch_page"] and agent.own is None
+    assert llm.calls[0]["tools"] == ["web_search", "fetch_page"] and agent.ctx.own is None
     assert "OWN SOURCES" not in llm.calls[0]["instructions"]
 
 
@@ -328,7 +329,7 @@ async def test_pipeline_extracts_evidence_cards_from_uploads_and_knowledge():
     findings = {"findings": [{"quote": "Die Frist beträgt 28 Tage.", "finding": "Frist 28 Tage"}]}
     llm = FakeLLM(json_out={"extract": findings})
     agent = make_agent(llm)
-    agent.own = make_own(
+    agent.ctx.own = make_own(
         files=[
             OwnFile(
                 "f1", "merkblatt.pdf", "Allgemein. Die Frist beträgt 28 Tage. Ende.", "2026-10-09", "https://owui/f1"
@@ -337,7 +338,7 @@ async def test_pipeline_extracts_evidence_cards_from_uploads_and_knowledge():
     )
     led = Ledger()
     sq = SubQ("Q1", "P1", "Welche Frist gilt?")
-    n = await agent._own(sq, PLAN, led)
+    n = await PipelineEngine(agent.ctx)._own(sq, PLAN, led)
     cards = list(led.cards.values())
     assert (
         n == 1
@@ -349,8 +350,8 @@ async def test_pipeline_extracts_evidence_cards_from_uploads_and_knowledge():
     llm.json_out = {
         "extract": {"findings": [{"quote": "Homeoffice ist an zwei Tagen pro Woche möglich.", "finding": "2 Tage"}]}
     }
-    agent.own = make_own(files=[])
-    await agent._own(sq, PLAN, led)
+    agent.ctx.own = make_own(files=[])
+    await PipelineEngine(agent.ctx)._own(sq, PLAN, led)
     kb_card = [c for c in led.cards.values() if c.source_kind.startswith("knowledge")][0]
     assert (
         kb_card.source_kind == "knowledge:Personal" and kb_card.title == "Weisung-Homeoffice.txt" and kb_card.date == ""
@@ -361,11 +362,13 @@ async def test_pipeline_extracts_evidence_cards_from_uploads_and_knowledge():
 async def test_pipeline_sub_question_in_only_mode_skips_web_and_mcp():
     llm = FakeLLM(json_out={"extract": {"findings": []}})
     agent = make_agent(llm, "web_survey", own_sources="only")
-    agent.own = make_own()
-    agent.own.mode = "only"
+    agent.ctx.own = make_own()
+    agent.ctx.own.mode = "only"
     cfg = agent.cfg
     led = Ledger()
-    await agent._research_subq(SubQ("Q1", "P1", "Frage?"), PLAN, cfg.presets["web_survey"], cfg.budgets["quick"], led)
+    await PipelineEngine(agent.ctx)._research_subq(
+        SubQ("Q1", "P1", "Frage?"), PLAN, cfg.presets["web_survey"], cfg.budgets["quick"], led
+    )
     assert agent.tools.searched == [] and agent.tools.fetched == []
     assert [e["kind"] for e in led.trail] == ["own_sources", "extract", "extract"]  # no "search", no "mcp_call"
 

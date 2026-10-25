@@ -15,8 +15,9 @@ from pydantic_ai import UnexpectedModelBehavior
 
 from . import own as O
 from . import prompts as P
+from .chat import ChatTurns
 from .config import Budget, Preset
-from .context import Result, today
+from .context import EngineContext, Result, today
 from .house_style import report_house_style
 from .llm import ToolBudget, budgeted_tools
 from .sources import Registry, Source, mcp_to_sources, search_to_sources
@@ -67,28 +68,31 @@ _IDS = re.compile(r"\[S(\d+)(?:\s*[,;/]\s*S?(\d+))*\]")
 class FocusEngine:
     """Runs one focus research: tool loop, then citation check and source list in code."""
 
-    def __init__(self, agent):
-        """Use the LLM, tools, MCP clients and event callback of a ResearchAgent."""
-        self.agent = agent  # ResearchAgent: llm, tools, MCP clients, events, config
-        self.llm, self.tools, self.cfg = agent.llm, agent.tools, agent.cfg
+    name = "focus"
+    runs_by_day = True  # office hours: quick runs (about 20-50k tokens, 2-3 min) start right away
+
+    def __init__(self, ctx: EngineContext):
+        """Use the LLM, tools, MCP pool, own sources and event callback of `ctx`."""
+        self.ctx = ctx
+        self.llm, self.tools, self.cfg = ctx.llm, ctx.tools, ctx.cfg
         self._task_urls: set[str] = set()  # URLs the user or the plan named: fetch_page may read them
 
     # ---------------------------------------------------------------- tools
     async def _tool_specs(self, preset: Preset) -> tuple[list[dict], dict, list[str]]:
-        own = self.agent.own
+        own = self.ctx.own
         specs, routes, hints = ([] if own and own.mode == "only" else list(WEB_TOOLS)), {}, []
         if own:
             specs += O.tool_specs(own)
         servers = [] if own and own.mode == "only" else [sv for sv in preset.mcp if sv in self.cfg.mcp_servers]
         # own sources only: no data tool; a disabled or unknown server: the preset does without it
-        clients = await asyncio.gather(*(asyncio.to_thread(self.agent._mcp_client, sv, preset) for sv in servers))
+        clients = await asyncio.gather(*(asyncio.to_thread(self.ctx.mcp.client, sv, preset) for sv in servers))
         for server, client in zip(servers, clients, strict=True):
             if not client:
                 continue
             try:
                 tools = await asyncio.to_thread(client.tools)
             except Exception as e:
-                self.agent._mcp_drop(server, client, e)
+                self.ctx.mcp.drop(server, client, e)
                 continue
             prefix = server.replace("-", "_")
             for t in tools:
@@ -120,7 +124,7 @@ class FocusEngine:
                 q = str(args.get("query", "")).strip()
                 if not q:
                     return "error: empty query"
-                await self.agent._emit("status", f"Suche: {q[:80]}")
+                await self.ctx.emit("status", f"Suche: {q[:80]}")
                 hits = await self.tools.search(q, args.get("language") or lang, num=8)
                 out, added = search_to_sources(hits, reg)
             elif name == "fetch_page":
@@ -137,7 +141,7 @@ class FocusEngine:
                         "error: this URL did not appear in a search result or tool result; "
                         "search first and read a URL from the results"
                     )
-                await self.agent._emit("status", f"Lese: {url[:80]}")
+                await self.ctx.emit("status", f"Lese: {url[:80]}")
                 title, text, date = await self.tools.fetch_meta(url)
                 if len(text) < 200:
                     return f"could not read {url}"
@@ -145,16 +149,16 @@ class FocusEngine:
                 src = reg.add(url, title, "web", text, date)
                 added = [src]
                 out = f"[{src.id}] {src.title}{' (' + src.date + ')' if src.date else ''}\n{text}"
-            elif name in O.OWN_TOOLS and self.agent.own:
-                await self.agent._emit(
+            elif name in O.OWN_TOOLS and self.ctx.own:
+                await self.ctx.emit(
                     "status", "Lese eigene Quellen" if name == "read_upload" else "Durchsuche Wissensbasis"
                 )
-                out, added = await O.call(name, args, self.agent.own, reg, self.llm, question)
+                out, added = await O.call(name, args, self.ctx.own, reg, self.llm, question)
             elif name in routes:
                 server, client, tool = routes[name]
                 if tool in LIST_LIMITS and "limit" not in args:  # long candidate lists: the model sees ~30
                     args = {**args, "limit": LIST_LIMITS[tool]}
-                await self.agent._emit("status", f"{server}: {tool}")
+                await self.ctx.emit("status", f"{server}: {tool}")
                 raw = await client.acall(tool, args)
                 out, added = mcp_to_sources(server, tool, args, raw, reg, self.cfg.mcp_servers[server], ctx)
             else:
@@ -170,7 +174,7 @@ class FocusEngine:
         return out
 
     # ---------------------------------------------------------------- run
-    async def run(self, task: str, preset: Preset, budget: Budget, plan: dict | None, requirements: str):
+    async def run(self, task: str, preset: Preset, budget: Budget, plan: dict | None, requirements: str) -> Result:
         """Research a task and return the result with the checked report, sources, trail and usage.
 
         Raises:
@@ -178,13 +182,13 @@ class FocusEngine:
         """
         started = time.time()
         if plan is None and preset.plan_first:
-            await self.agent._emit("status", "Erstelle Rechercheplan")
-            plan = await self.agent.plan(task, preset, budget, own=self.agent.own)
+            await self.ctx.emit("status", "Erstelle Rechercheplan")
+            plan = await ChatTurns(self.llm, self.tools).plan(task, preset, budget, own=self.ctx.own)
         lang = (plan or {}).get("language") or (preset.language if preset.language != "auto" else "de")
         de = lang == "de"
         specs, routes, hints = await self._tool_specs(preset)
         reg, ctx, trail = Registry(), {}, []
-        own_system, own_first = O.prompt_block(self.agent.own, reg, de) if self.agent.own else ("", "")
+        own_system, own_first = O.prompt_block(self.ctx.own, reg, de) if self.ctx.own else ("", "")
         style = "\n\n" + report_house_style() if de and preset.house_style else ""
         system = (
             P.FOCUS_SYSTEM.format(
@@ -238,7 +242,7 @@ class FocusEngine:
             raise RuntimeError("focus engine: the model returned an empty final answer after the final prompt")
         calls = executed
 
-        await self.agent._emit("status", "Prüfe Belege")
+        await self.ctx.emit("status", "Prüfe Belege")
         stats: dict = {"tool_calls": calls, "sources": len(reg.sources)}
         logger.info("focus loop done", tool_calls=calls, sources=len(reg.sources), tokens=self.llm.usage.total)
         report = finalize(final, reg, task, de, stats)
@@ -247,12 +251,12 @@ class FocusEngine:
                 "runtime_s": round(time.time() - started, 1),
                 "engine": "focus",
                 "tools_used": _count(t["tool"] for t in trail),
-                "mcp_errors": dict(self.agent._mcp_errors),
+                "mcp_errors": dict(self.ctx.mcp.errors),
                 "tool_errors": dict(getattr(self.tools, "errors", {})),
             }
         )
         u = self.llm.usage
-        await self.agent._emit("status", "Bericht fertig")
+        await self.ctx.emit("status", "Bericht fertig")
         return Result(
             report=report,
             plan=plan or {},
