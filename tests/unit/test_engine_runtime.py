@@ -1,12 +1,16 @@
 """Runtime limits of the engine: LLM timeout, retries and the process-wide cap on concurrent LLM requests."""
 
 import asyncio
+import math
 
+import numpy as np
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from bebbi_deep_research.engine.llm import LLM, LlmSettings, llm_limiter
+from bebbi_deep_research.engine.own import PassageIndex
+from bebbi_deep_research.engine.vectors import scores
 from bebbi_deep_research.services.jobs import make_agent_factory
 from bebbi_deep_research.utils.app_config import AppConfig
 
@@ -88,3 +92,55 @@ async def test_embedding_batches_wait_for_the_limiter():
     await asyncio.gather(*(llm.embed(["x"] * 70) for _ in range(4)))  # 4 x 3 batches
     assert peak == 2
     await llm.aclose()
+
+
+# ------------------------------------------------------------------ embeddings as float32 matrices
+def test_scores_are_the_best_cosine_of_each_chunk():
+    queries = [[1.0, 0.0], [0.0, 2.0]]
+    chunks = [[3.0, 0.0], [1.0, 1.0], [0.0, 0.0], [-1.0, 0.0]]
+    got = scores(queries + chunks, len(queries))
+    assert got.dtype == np.float32
+    assert np.allclose(got, [1.0, math.sqrt(0.5), 0.0, 0.0])  # zero vector scores 0; opposite: best of (-1, 0)
+
+
+async def test_embed_returns_a_float32_matrix_in_batches():
+    batches = []
+
+    class Embedder:
+        async def embed(self, batch, input_type):
+            batches.append(len(batch))
+
+            class R:
+                embeddings = [[float(len(t)), 1.0] for t in batch]
+
+            return R()
+
+    llm = LLM(LlmSettings(base_url="http://llm/v1"))
+    llm.embedder = Embedder()  # ty: ignore[invalid-assignment]
+    m = await llm.embed(["a" * i for i in range(40)])
+    assert batches == [32, 8] and m.dtype == np.float32 and m.shape == (40, 2) and m[39, 0] == 39
+    assert (await llm.embed([])).shape[0] == 0
+    await llm.aclose()
+
+
+async def test_passage_index_keeps_unit_float32_rows_and_scores_off_the_event_loop(monkeypatch):
+    threads = []
+    real = asyncio.to_thread
+
+    async def spy(fn, *args, **kw):
+        threads.append(fn)
+        return await real(fn, *args, **kw)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+
+    class Emb:
+        async def embed(self, texts):
+            return [[t.count("frist"), t.count("gebühr") + 0.1] for t in texts]
+
+    text = "gebühr " * 2000 + "die frist beträgt 28 tage. " * 100 + "gebühr " * 2000
+    idx = PassageIndex(text)
+    passage, best = await idx.top(Emb(), ["frist"], budget_chars=1200)
+    assert idx._vecs is not None and idx._vecs.dtype == np.float32
+    assert np.allclose(np.linalg.norm(idx._vecs, axis=1), 1.0)
+    assert "frist" in passage and best > 0.9
+    assert len(threads) == 2  # normalising the index and scoring ran in worker threads

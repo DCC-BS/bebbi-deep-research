@@ -238,7 +238,9 @@ def test_prompt_block_inlines_small_files_and_lists_large_ones():
 # ------------------------------------------------------------------------------------------- focus engine
 async def test_focus_only_mode_has_no_web_and_no_data_tools_and_cites_the_sources():
     llm = focus_llm(
-        say(calls=[("read_upload", {"file": "U1", "query": "Frist"}), ("knowledge_search", {"query": "Homeoffice"})]),
+        # one tool per turn: parallel calls register their sources in completion order, the script needs S1 = upload
+        say(calls=[("read_upload", {"file": "U1", "query": "Frist"})]),
+        say(calls=[("knowledge_search", {"query": "Homeoffice"})]),
         say(
             "# Bericht\n\n## Zusammenfassung\n\nDie Frist beträgt 28 Tage [S1]. Homeoffice ist an zwei Tagen möglich [S2].\n\n"
             "## Offene Punkte und Grenzen der Recherche\n\nKeine."

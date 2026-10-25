@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, override
 
 import json_repair
+import numpy as np
 from dcc_backend_common.config import log_secret
 from dcc_backend_common.config.app_config import LlmConfig
 from dcc_backend_common.llm_agent import BaseAgent
@@ -305,15 +306,19 @@ class LLM:
         self.usage.add(step, usage)
         return output.strip()
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Return one embedding per text (texts cut at 4000 characters, batches of 32)."""
-        out: list[list[float]] = []
+    async def embed(self, texts: list[str]) -> np.ndarray:
+        """Return one embedding per text as a float32 matrix (texts cut at 4000 characters, batches of 32).
+
+        Each batch is converted to float32 right away: the client's Python float lists (about 80 KB per
+        2560-dimensional vector) live only for one batch.
+        """
+        out: list[np.ndarray] = []
         for i in range(0, len(texts), EMBED_BATCH):
             batch = [t[:EMBED_CHARS] for t in texts[i : i + EMBED_BATCH]]
             async with get_concurrency_context(self.limiter, "embed"):
                 result = await self.embedder.embed(batch, input_type="document")
-            out += [list(v) for v in result.embeddings]
-        return out
+            out.append(np.asarray(result.embeddings, dtype=np.float32))
+        return np.concatenate(out) if out else np.zeros((0, 0), dtype=np.float32)
 
 
 def budgeted_tools(

@@ -21,6 +21,7 @@ dependencies = [
     "dcc-backend-common[fastapi,pydantic-ai]>=0.1.23",
     "dependency-injector>=4.49.1",
     "rich>=15.0.0",
+    "numpy>=2.1",
 ]
 
 [project.scripts]

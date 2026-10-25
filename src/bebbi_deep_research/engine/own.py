@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from .sources import Registry, Source
+from .vectors import Matrix, best_scores, unit_rows
 
 INLINE_FILE_CHARS = 6000  # uploads up to this size go into the first message as a whole
 INLINE_TOTAL_CHARS = 18000  # ... as long as all inlined files together stay below this
@@ -82,7 +83,7 @@ class PassageIndex:
         self.text = text
         step = max(CHUNK - 150, math.ceil(len(text) / 1200))  # at most ~1200 chunks, however large the file is
         self.chunks = [text[i : i + step + 150] for i in range(0, len(text), step)] or [""]
-        self._vecs: list[list[float]] | None = None
+        self._vecs: Matrix | None = None  # float32, one unit-length row per chunk (1200 x 2560: 12 MB)
         self._lock = asyncio.Lock()
 
     async def top(self, llm, queries: list[str], budget_chars: int = PASSAGE_CHARS) -> tuple[str, float]:
@@ -91,9 +92,10 @@ class PassageIndex:
             return self.text, 1.0
         async with self._lock:
             if self._vecs is None:
-                self._vecs = await llm.embed(self.chunks)
+                self._vecs = await asyncio.to_thread(unit_rows, await llm.embed(self.chunks))
+        vecs = self._vecs
         qv = await llm.embed([q for q in queries if q.strip()] or [""])
-        score = [max(_cos(c, q) for q in qv) for c in self._vecs]
+        score = (await asyncio.to_thread(lambda: best_scores(vecs, unit_rows(qv)))).tolist()
         keep, used = [], 0
         for i in sorted(range(len(self.chunks)), key=lambda i: -score[i]):
             if used + len(self.chunks[i]) > budget_chars:
@@ -102,11 +104,6 @@ class PassageIndex:
             used += len(self.chunks[i])
         keep.sort()
         return "\n[...]\n".join(self.chunks[i] for i in keep), max(score[i] for i in keep) if keep else 0.0
-
-
-def _cos(a: list[float], b: list[float]) -> float:
-    norm = math.sqrt(sum(x * x for x in a) * sum(y * y for y in b)) or 1
-    return sum(x * y for x, y in zip(a, b, strict=True)) / norm
 
 
 def _index(own: OwnSources, f: OwnFile) -> PassageIndex:

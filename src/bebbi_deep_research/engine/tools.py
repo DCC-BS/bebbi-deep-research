@@ -3,13 +3,14 @@
 import asyncio
 import ipaddress
 import json
-import math
 import re
 import threading
 import time
 from urllib.parse import urlparse
 
 import httpx
+
+from .vectors import scores
 
 
 def domain(url: str) -> str:
@@ -136,13 +137,7 @@ async def focus(
     text = text[:max_chars]
     chunks = [text[i : i + chunk] for i in range(0, len(text), chunk - 150)]
     vecs = await llm.embed(queries + chunks)
-    qv, cv = vecs[: len(queries)], vecs[len(queries) :]
-
-    def cos(a, b):
-        norm = math.sqrt(sum(x * x for x in a) * sum(y * y for y in b)) or 1
-        return sum(x * y for x, y in zip(a, b, strict=True)) / norm
-
-    score = await asyncio.to_thread(lambda: [max(cos(c, q) for q in qv) for c in cv])
+    score = (await asyncio.to_thread(scores, vecs, len(queries))).tolist()
     keep, used = [], 0
     for i in sorted(range(len(chunks)), key=lambda i: -score[i]):
         if used + len(chunks[i]) > budget_chars:

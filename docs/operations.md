@@ -60,6 +60,10 @@ The embed role needs `/v1/embeddings` on the same endpoint, or its own endpoint 
 | `RA_OWN_MAX_FILE_CHARS` | `2000000` | extracted text per file; longer texts are cut (remark in the chat) |
 | `RA_OWN_MAX_COLLECTIONS` | `5` | knowledge bases per research |
 
+Long files are split into at most about 1,200 passages and embedded once per run; the vectors are kept as float32
+(about 12 MB per file of 2 million characters with Qwen3-Embedding-4B, so 10 such files take about 120 MB of the pod's
+memory for the duration of the run). Similarity scoring runs in a worker thread.
+
 File texts are stored with the job (`jobs.own_sources`; drafts keep a 1,500-character preview) and stay there with the finished job like the
 report; plan a retention job if documents must not stay in the database. Knowledge bases are read at run time through
 `OWUI_URL`/`OWUI_API_KEY` (`POST /api/v1/retrieval/query/collection`, one stored id at a time, logged as `knowledge query`); without both
