@@ -120,10 +120,20 @@ class Tools:
             return "", "", ""
 
 
-async def focus(llm, text: str, queries: list[str], budget_chars: int = 8000, chunk: int = 1200) -> str:
-    """Keep the passages most similar to the queries (document order), so long pages are not cut at the head."""
+FOCUS_MAX_CHARS = 200_000  # a fetched page is embedded up to here (about 190 chunks); the rest is dropped
+
+
+async def focus(
+    llm, text: str, queries: list[str], budget_chars: int = 8000, chunk: int = 1200, max_chars: int = FOCUS_MAX_CHARS
+) -> str:
+    """Keep the passages most similar to the queries (document order), so long pages are not cut at the head.
+
+    Only the first ``max_chars`` characters are embedded: a page of a few million characters (a parsed law or PDF)
+    would otherwise cost hundreds of MB of vectors and seconds of CPU on the event loop, on every read.
+    """
     if len(text) <= budget_chars:
         return text
+    text = text[:max_chars]
     chunks = [text[i : i + chunk] for i in range(0, len(text), chunk - 150)]
     vecs = await llm.embed(queries + chunks)
     qv, cv = vecs[: len(queries)], vecs[len(queries) :]
@@ -132,7 +142,7 @@ async def focus(llm, text: str, queries: list[str], budget_chars: int = 8000, ch
         norm = math.sqrt(sum(x * x for x in a) * sum(y * y for y in b)) or 1
         return sum(x * y for x, y in zip(a, b, strict=True)) / norm
 
-    score = [max(cos(c, q) for q in qv) for c in cv]
+    score = await asyncio.to_thread(lambda: [max(cos(c, q) for q in qv) for c in cv])
     keep, used = [], 0
     for i in sorted(range(len(chunks)), key=lambda i: -score[i]):
         if used + len(chunks[i]) > budget_chars:

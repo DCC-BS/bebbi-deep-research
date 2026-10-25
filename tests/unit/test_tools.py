@@ -273,3 +273,17 @@ def test_mcp_error_result_is_retried_once_then_raised(mcp):
     with pytest.raises(RuntimeError, match="overload"):
         mcp(handler).call("a", {"q": 1})
     assert len(n) == 2
+
+
+async def test_focus_embeds_only_the_head_of_a_huge_page():
+    """A page of millions of characters must not be embedded in full (memory and CPU on every read)."""
+    seen = []
+
+    class Emb:
+        async def embed(self, texts):
+            seen.append(len(texts))
+            return [[1.0, float(i % 3)] for i in range(len(texts))]
+
+    out = await T.focus(Emb(), "x" * 2_000_000, ["q"], budget_chars=6000)
+    assert seen[0] - 1 <= T.FOCUS_MAX_CHARS // (1200 - 150) + 1
+    assert 0 < len(out) < 10_000
