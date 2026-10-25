@@ -165,7 +165,10 @@ keep FastAPI's `detail`).
 CI (`.github/workflows/main.yml`, DCC-BS ci-workflows) runs `mise run ci-check` (lockfile, ruff format and lint, ty,
 varlock scan) and `mise run test:unit`. `tests/unit/test_packaging.py` fails if
 `deploy/helm/bebbi-deep-research/files/presets.yaml` differs from `config/presets.yaml`. The image is built and pushed
-to GHCR by `.github/workflows/docker-publish.yml` (manual trigger).
+to GHCR by `.github/workflows/docker-publish.yml` (manual trigger), tagged with the version in `pyproject.toml` and
+`latest`. A version is published once: the workflow stops if the tag already exists, so bump the version (and
+`Chart.yaml`) for every build. kdkp-kiw-k8s-config pins `<version>@sha256:<digest>`, and Renovate opens the PR for the
+next version. The image carries `org.opencontainers.image.revision` (the commit).
 
 Postgres: `mise run integration` with `RA_TEST_DATABASE_URL=postgresql://user:pw@localhost:5432/test` runs
 `tests/integration` (concurrent schema init, upgrade of a first-release database). The same variable runs the unit suite
