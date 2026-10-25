@@ -349,17 +349,29 @@ def _state(messages: list[dict]) -> dict:
     return {}
 
 
+_MD_SPECIAL = re.compile(r"([\\`*_\[\]<>!|~#])")
+
+
+def _plain(value, limit: int = 1000) -> str:
+    """LLM-written text (plan, clarifying questions) as plain text in the chat: one line, Markdown characters escaped.
+
+    The planner sees web snippets, so its text is untrusted: an image (`![](https://...)` loads without a click and
+    could carry the task away), a link or raw HTML must not render. Escaped, they show as the characters they are.
+    """
+    return _MD_SPECIAL.sub(r"\\\1", " ".join(str(value or "").split())[:limit])
+
+
 def _render_plan(plan: dict, depth: str, own: dict | None = None) -> str:
-    lines = [f"**Rechercheplan: {plan['title']}**", "", f"*Auftrag:* {plan['task_core']}", ""]
+    lines = [f"**Rechercheplan: {_plain(plan['title'], 200)}**", "", f"*Auftrag:* {_plain(plan['task_core'])}", ""]
     for p in plan["parts"]:
         lines += [
-            f"**{p['title']}**: {p['goal']}",
+            f"**{_plain(p['title'], 200)}**: {_plain(p['goal'])}",
             "",
         ]  # blank lines: else the next part title becomes part of the last list item
-        lines += [f"- {q['text']}" for q in plan["sub_questions"] if q["part"] == p["id"]]
+        lines += [f"- {_plain(q['text'])}" for q in plan["sub_questions"] if q["part"] == p["id"]]
         lines.append("")
     if plan.get("must_name"):
-        lines += ["", f"*Muss abgedeckt werden:* {', '.join(plan['must_name'])}"]
+        lines += ["", f"*Muss abgedeckt werden:* {', '.join(_plain(m, 200) for m in plan['must_name'])}"]
     own_lines = _own_lines(own)
     if own_lines:
         lines += [""] + [ln + "  " for ln in own_lines[:-1]] + own_lines[-1:]
@@ -489,8 +501,10 @@ class Pipe:
             )  # the chat history of the task carries our state marker (clarify state: the task)
             task_text = _decode(found.group(1)).get("task", "") if found else ""
             task_text = task_text if isinstance(task_text, str) else ""
-            plan_title = re.search(r"\*\*Rechercheplan: (.+?)\*\*", prompt)  # plan state: the title of the plan
-            title = " ".join((task_text or (plan_title.group(1) if plan_title else "")).split())[:50] or "Deep Research"
+            # plan state: the title of the plan (rendered escaped, see _plain)
+            plan_title = re.search(r"\*\*Rechercheplan: ((?:\\.|[^*])+?)\*\*", prompt)
+            shown = re.sub(r"\\(.)", r"\1", plan_title.group(1)) if plan_title else ""
+            title = " ".join((task_text or shown).split())[:50] or "Deep Research"
             return json.dumps({"title": title}, ensure_ascii=False)
         if task == "tags_generation":
             return json.dumps({"tags": ["Recherche"]}, ensure_ascii=False)
@@ -783,9 +797,9 @@ class Pipe:
                     preset = picked
                 if c["questions"]:
                     await status("Rückfragen", done=True)
-                    qs = "\n".join(f"{i}. {q}" for i, q in enumerate(c["questions"], 1))
+                    qs = "\n".join(f"{i}. {_plain(q)}" for i, q in enumerate(c["questions"], 1))
                     assume = (
-                        ("\n\nOhne Antwort gehe ich davon aus: " + "; ".join(c["assumptions"]))
+                        ("\n\nOhne Antwort gehe ich davon aus: " + "; ".join(_plain(a) for a in c["assumptions"]))
                         if c["assumptions"]
                         else ""
                     )

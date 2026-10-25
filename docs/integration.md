@@ -175,6 +175,10 @@ returns itself (later message, fallback above): it carries no marker either.
 
 ### How the pipe and the delivery fit Open WebUI v0.11.4 and v0.12.3 (found in the end-to-end test)
 
+* **Plan and clarifying questions are plain text**: the planner sees web snippets, so the pipe escapes the Markdown
+  characters of every LLM-written line (plan title, task, parts, goals, sub-questions, must-name items, questions,
+  assumptions; `_plain` in the pipe). An injected image, link or HTML tag shows as text and loads nothing. The report
+  itself goes through the service's `sanitize_markdown`.
 * **State marker**: a markdown link reference definition `[//]: # (research-agent:<base64>)`. It is valid markdown and
   never rendered. The first version used an HTML comment, which Open WebUI shows as text.
 * **`output` wins over `content`**: v0.11 stores the pipe answer as `output` items and the UI renders `output` in
