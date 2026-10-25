@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, override
 
+import httpx
 import json_repair
 import numpy as np
 from dcc_backend_common.config import log_secret
@@ -26,6 +27,9 @@ from pydantic_ai.models.concurrency import ConcurrencyLimitedModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
+from tenacity import RetryCallState
+
+from . import metrics
 
 logger = get_logger(__name__)
 
@@ -108,8 +112,28 @@ class LlmSettings:
 
 
 def llm_limiter(max_running: int) -> ConcurrencyLimiter:
-    """Return the limiter that caps concurrent requests to the LLM endpoint; share one per process."""
-    return ConcurrencyLimiter(max_running=max_running, name="llm")
+    """Return the limiter that caps concurrent requests to the LLM endpoint; share one per process.
+
+    Its running and waiting counts are exported as gauges in `metrics.render()`.
+    """
+    limiter = ConcurrencyLimiter(max_running=max_running, name="llm")
+    metrics.gauge("research_llm_requests_running", lambda: limiter.running_count)
+    metrics.gauge("research_llm_requests_waiting", lambda: limiter.waiting_count)
+    return limiter
+
+
+def _log_retry(model: str, state: RetryCallState) -> None:
+    """Log and count one retry of an LLM request (tenacity ``before_sleep`` hook of the HTTP transport)."""
+    error = state.outcome.exception() if state.outcome else None
+    wait = state.next_action.sleep if state.next_action else 0
+    metrics.inc("research_llm_retries_total", model=model)
+    logger.warning(
+        "llm request retry",
+        model=model,
+        attempt=state.attempt_number,
+        error=f"{type(error).__name__}: {str(error)[:200]}" if error else "",
+        wait_s=round(float(wait), 1),
+    )
 
 
 class RoleAgent(BaseAgent[None, str]):
@@ -130,6 +154,16 @@ class RoleAgent(BaseAgent[None, str]):
         self._limiter = limiter
         self.role_config = config
         super().__init__(config, deps_type=None, output_type=str, enable_thinking=config.enable_thinking)
+
+    @override
+    def _build_http_client(self) -> httpx.AsyncClient:
+        """backend-common's retrying client, plus a log line and a counter for every retry."""
+        client = super()._build_http_client()
+        config = getattr(getattr(client, "_transport", None), "config", None)
+        if isinstance(config, dict):
+            model = self.role_config.llm_model
+            config["before_sleep"] = lambda state: _log_retry(model, state)
+        return client
 
     @override
     def create_agent(self, model: Model) -> Agent[None, str]:

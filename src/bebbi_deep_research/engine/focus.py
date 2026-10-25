@@ -10,6 +10,7 @@ import asyncio
 import re
 import time
 
+from dcc_backend_common.logger import get_logger
 from pydantic_ai import UnexpectedModelBehavior
 
 from . import own as O
@@ -19,7 +20,9 @@ from .house_style import report_house_style
 from .llm import ToolBudget, budgeted_tools
 from .sources import Registry, Source, mcp_to_sources, search_to_sources
 from .text import Evidence, checked_numbers, distinctive, fix_sr_labels, split_units
-from .tools import focus
+from .tools import domain, focus
+
+logger = get_logger(__name__)
 
 WEB_TOOLS = [
     {
@@ -157,16 +160,12 @@ class FocusEngine:
                 return f"error: unknown tool {name}"
         except Exception as e:  # tool errors go back to the model
             trail.append({"tool": name, "args": args, "error": str(e)[:300]})
+            logger.warning("tool failed", tool=name, error=f"{type(e).__name__}: {str(e)[:200]}")
             return f"tool error: {str(e)[:300]}"
-        trail.append(
-            {
-                "tool": name,
-                "args": args,
-                "sources": [s.id for s in added],
-                "chars": len(out),
-                "s": round(time.time() - started, 1),
-            }
-        )
+        seconds = round(time.time() - started, 1)
+        trail.append({"tool": name, "args": args, "sources": [s.id for s in added], "chars": len(out), "s": seconds})
+        host = domain(str(args.get("url", ""))) if name == "fetch_page" else ""
+        logger.info("tool call", tool=name, host=host, sources=len(added), chars=len(out), seconds=seconds)
         return out
 
     # ---------------------------------------------------------------- run
@@ -242,6 +241,7 @@ class FocusEngine:
 
         await self.agent._emit("status", "Prüfe Belege")
         stats: dict = {"tool_calls": calls, "sources": len(reg.sources)}
+        logger.info("focus loop done", tool_calls=calls, sources=len(reg.sources), tokens=self.llm.usage.total)
         report = finalize(final, reg, task, de, stats)
         stats.update(
             {

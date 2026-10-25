@@ -66,7 +66,7 @@ memory for the duration of the run). Similarity scoring runs in a worker thread.
 
 File texts are stored with the job (`jobs.own_sources`; drafts keep a 1,500-character preview) and stay there with the finished job like the
 report; plan a retention job if documents must not stay in the database. Knowledge bases are read at run time through
-`OWUI_URL`/`OWUI_API_KEY` (`POST /api/v1/retrieval/query/collection`, one stored id at a time, logged as `knowledge query`); without both
+`OWUI_URL`/`OWUI_API_KEY` (`POST /api/v1/retrieval/query/collection`, one stored id at a time, logged as `knowledge query` at DEBUG level); without both
 variables a knowledge base cannot be used (the tool reports "not reachable" to the model and the report says so under open points).
 Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4).
 
@@ -101,8 +101,8 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 * Must bypass the proxy: vLLM, Firecrawl, Open WebUI, Postgres (all cluster-internal).
 * Depends on where they are reachable from: Serper (`google.serper.dev`) and the MCP servers (`mcp.opencaselaw.ch`
   external; `*.bs.ch` hosts may be internal). If a `*.bs.ch` MCP host is reachable only directly, add it to `NO_PROXY`;
-  if only via proxy, leave it out. A wrong choice shows up as connection errors in the MCP log lines of a run and the
-  engine silently falls back to web search.
+  if only via proxy, leave it out. A wrong choice shows up as `mcp request retry` and `mcp connect failed, web search
+  instead for 2 minutes` log lines (WARNING, with the server or host), and the run falls back to web search.
 
 ## Night window and daytime rule
 
@@ -193,6 +193,26 @@ backend-common logger (structlog): one JSON object per line on stdout with `time
 `job re-queued on shutdown`, `delivery ok` / `delivery failed`, `re-queued stale jobs`. Usage events (`app_event`)
 `research.plan` and `research.submit` carry a pseudonymised user id (HMAC), never the raw id. Token usage per run is
 also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and log shipping.
+
+Engine lines (written during a run; they carry the `job_id` the job runner binds to the log context). They name
+hosts, never search queries, page paths or document text:
+
+| Line | Level | Fields | Meaning |
+|---|---|---|---|
+| `llm request retry` | WARNING | `model`, `attempt`, `error`, `wait_s` | a chat request is retried (timeout, dropped connection, 5xx, 429) |
+| `empty LLM answer, retrying with a larger budget` | WARNING | `step`, `role` | thinking used up `max_completion_tokens` |
+| `search failed` / `fetch failed` | ERROR for 401/403, else WARNING | `tool`, `reason`, `host` | Serper or Firecrawl answered with another status than 200, failed, or sent unreadable JSON |
+| `tool call` / `tool failed` | INFO / WARNING | `tool`, `host` (fetch_page), `sources`, `chars`, `seconds` / `error` | one tool call of the focus engine |
+| `focus loop done` | INFO | `tool_calls`, `sources`, `tokens` | the focus engine's tool loop ended |
+| `research round done` | INFO | `round`, `subqs`, `new_cards`, `tokens` | one research round of the pipeline engine |
+| `research route failed` | WARNING | `route`, `subq`, `error` | a source route (web, MCP server, own sources) of a sub-question failed; the run goes on |
+| `mcp request retry` | WARNING | `host`, `method`, `attempt`, `reason` | an MCP request got a 5xx or a transport error and is repeated |
+| `mcp session re-opened` | INFO | `host`, `method` | the server forgot the session (404) |
+| `mcp tool error result` | WARNING | `host`, `tool`, `attempt` | the server answered with `isError` (retried once) |
+| `mcp tool failed` | WARNING | `server`, `tool`, `error` | a pipeline MCP call failed after its retries; the model gets the error |
+| `mcp connect failed, web search instead for 2 minutes` | WARNING | `server`, `error` | connecting failed; the server is skipped for 2 minutes |
+| `mcp tools/list failed, server dropped` | WARNING | `server`, `error` | a connected server stopped answering; it reconnects after 2 minutes |
+| `knowledge base not reachable` | WARNING | `collection`, `error` | the Open WebUI retrieval call for a knowledge base failed |
 
 ## Troubleshooting
 

@@ -13,8 +13,10 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from dcc_backend_common.logger import get_logger
 from pydantic_ai import UnexpectedModelBehavior
 
+from . import metrics
 from . import own as O
 from . import prompts as P
 from .config import Budget, Config, Preset
@@ -25,6 +27,7 @@ from .sources import Registry, mcp_to_sources
 from .text import Evidence, checked_numbers, distinctive, fix_sr_labels, split_units, unsupported
 from .tools import MCPClient, Tools, domain, domain_match, focus
 
+logger = get_logger(__name__)
 Event = Callable[[str, str], Awaitable[None] | None]
 INTENTS = ("primary", "data", "secondary")
 
@@ -42,6 +45,10 @@ class Result:
 
 def _today() -> str:
     return time.strftime("%Y-%m-%d")
+
+
+def _err(e: BaseException) -> str:
+    return f"{type(e).__name__}: {str(e)[:200]}"
 
 
 class ResearchAgent:
@@ -269,6 +276,12 @@ class ResearchAgent:
                         break
                     time.sleep(2 * (attempt + 1))
             self._mcp_failed[server] = time.time()
+            metrics.inc("research_mcp_errors_total", host=server, kind="connect")
+            logger.warning(
+                "mcp connect failed, web search instead for 2 minutes",
+                server=server,
+                error=self._mcp_errors.get(server),
+            )
             return None
 
     def _mcp_drop(self, server: str, client: MCPClient, error: Exception) -> None:
@@ -278,6 +291,8 @@ class ResearchAgent:
                 del self._mcp_clients[server]
             self._mcp_failed[server] = time.time()
             self._mcp_errors[server] = f"{type(error).__name__}: {str(error)[:200]}"
+        metrics.inc("research_mcp_errors_total", host=server, kind="tools_list")
+        logger.warning("mcp tools/list failed, server dropped", server=server, error=self._mcp_errors[server])
 
     async def _queries(
         self, sq: SubQ, plan: dict, preset: Preset, budget: Budget, led: Ledger
@@ -460,6 +475,7 @@ class ResearchAgent:
                 out = await client.acall(tool, args)
             except Exception as e:  # tool errors go back to the model
                 out = f"tool error: {e}"
+                logger.warning("mcp tool failed", server=server, tool=tool, error=f"{type(e).__name__}: {str(e)[:200]}")
             led.log("mcp_call", subq=sq.id, server=server, tool=tool, args=args, chars=len(out))
             if out.startswith("tool error"):
                 return out[:1000]
@@ -502,6 +518,7 @@ class ResearchAgent:
                     added += await self._own(sq, plan, led)
                 except Exception as e:
                     led.log("error", subq=sq.id, route="own", error=str(e)[:300])
+                    logger.warning("research route failed", route="own", subq=sq.id, error=_err(e))
                 if self.own.mode == "only":
                     return added
             for route in routes:
@@ -512,6 +529,7 @@ class ResearchAgent:
                         added += await self._web(sq, plan, preset, budget, led)
                 except Exception as e:  # one failing source must not stop the run
                     led.log("error", subq=sq.id, route=route, error=str(e)[:300])
+                    logger.warning("research route failed", route=route, subq=sq.id, error=_err(e))
             return added
 
     async def _reflect(self, rnd: int, plan: dict, budget: Budget, led: Ledger) -> list[SubQ]:
@@ -798,6 +816,7 @@ class ResearchAgent:
             rounds_done = rnd
             new = len(led.cards) - before
             led.log("round", round=rnd, new_cards=new, tokens=self.llm.usage.total)
+            logger.info("research round done", round=rnd, subqs=len(todo), new_cards=new, tokens=self.llm.usage.total)
             if rnd == budget.rounds or self.llm.usage.total > budget.max_tokens * 0.8:
                 break
             if all(led.coverage(s.id) >= 2 for s in led.subqs.values()) and budget.max_follow_up == 0:

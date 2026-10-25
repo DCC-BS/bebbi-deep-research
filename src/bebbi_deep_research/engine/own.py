@@ -22,6 +22,9 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from dcc_backend_common.logger import get_logger
+
+from . import metrics
 from .sources import Registry, Source
 from .vectors import Matrix, best_scores, unit_rows
 
@@ -32,6 +35,8 @@ OUT_CHARS = 9000  # cap of one knowledge_search result
 CHUNK = 1200
 OWN_TOOLS = ("read_upload", "knowledge_search")
 MODES = ("prefer", "only", "off")
+
+logger = get_logger(__name__)
 
 Retrieve = Callable[[str, "OwnCollection"], Awaitable[list[dict]]]
 
@@ -108,6 +113,11 @@ class PassageIndex:
 
 def _index(own: OwnSources, f: OwnFile) -> PassageIndex:
     return own._index.setdefault(f.id, PassageIndex(f.text))
+
+
+def _unreachable(c: OwnCollection, error: BaseException) -> None:
+    metrics.inc("research_tool_errors_total", tool="knowledge", reason=type(error).__name__)
+    logger.warning("knowledge base not reachable", collection=c.id, error=f"{type(error).__name__}: {str(error)[:200]}")
 
 
 def kind_of(collection: OwnCollection | None) -> str:
@@ -235,6 +245,7 @@ async def knowledge_search(own: OwnSources, args: dict, reg: Registry) -> tuple[
     for c, res in zip(own.collections, results, strict=True):
         if isinstance(res, BaseException):
             errors.append(f'knowledge base "{c.name}" not reachable ({type(res).__name__})')
+            _unreachable(c, res)
             continue
         for h in res:
             g = groups.setdefault((c.id, h.get("file_id") or h.get("name")), {"c": c, "hit": h, "texts": []})
@@ -292,6 +303,7 @@ async def evidence_items(own: OwnSources, llm, queries: list[str], max_files: in
         results = await asyncio.gather(*(own.retrieve(queries[0], c) for c in own.collections), return_exceptions=True)
         for c, res in zip(own.collections, results, strict=True):
             if isinstance(res, BaseException):
+                _unreachable(c, res)
                 continue
             by_file: dict[str, dict] = {}
             for h in res:

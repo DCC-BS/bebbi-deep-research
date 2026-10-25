@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import httpx
 from dcc_backend_common.logger import get_logger
 
+from . import metrics
 from .vectors import scores
 
 logger = get_logger(__name__)
@@ -77,6 +78,7 @@ class Tools:
         401 and 403 mean a wrong key or a blocked account and are logged as errors; the rest as warnings.
         """
         self.errors[f"{tool}:{reason}"] += 1
+        metrics.inc("research_tool_errors_total", tool=tool, reason=reason)
         log = logger.error if reason in ("401", "403") else logger.warning
         log(f"{tool} failed", tool=tool, reason=reason, host=urlparse(url).hostname or "")
 
@@ -219,6 +221,7 @@ class MCPClient:
                 must not take minutes).
         """
         self.url, self.allow = url, set(allow or [])
+        self.host = urlparse(url).hostname or ""
         self.retries, self.deadline = retries or self.RETRIES, deadline
         self._lock = threading.RLock()  # request ids and the session are shared by the threads of one job
         self.http = httpx.Client(
@@ -246,6 +249,10 @@ class MCPClient:
                 self.http.headers["mcp-session-id"] = sid
             self.http.post(self.url, json={"jsonrpc": "2.0", "method": "notifications/initialized"}).raise_for_status()
 
+    def _retrying(self, method: str, attempt: int, reason: str) -> None:
+        metrics.inc("research_mcp_errors_total", host=self.host, kind="retry")
+        logger.warning("mcp request retry", host=self.host, method=method, attempt=attempt + 1, reason=reason)
+
     def _post(self, method: str, params: dict, reopen: bool = True):
         for attempt in range(self.retries):
             with self._lock:
@@ -260,17 +267,20 @@ class MCPClient:
                     json={"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
                     headers={"mcp-session-id": sid} if sid else None,
                 )
-            except httpx.TransportError:
+            except httpx.TransportError as e:
                 if last:
                     raise
+                self._retrying(method, attempt, type(e).__name__)
                 time.sleep(3 * (attempt + 1))
                 continue
             if r.status_code == 404 and reopen and sid:
+                logger.info("mcp session re-opened", host=self.host, method=method)
                 with self._lock:
                     if self.http.headers.get("mcp-session-id") == sid:  # not re-opened by another thread meanwhile
                         self._open()
                 continue
             if r.status_code >= 500 and not last:
+                self._retrying(method, attempt, str(r.status_code))
                 time.sleep(3 * (attempt + 1))  # 3+6+...: rides out a container restart
                 continue
             r.raise_for_status()
@@ -306,6 +316,8 @@ class MCPClient:
             text = "\n".join(c.get("text", "") for c in res.get("content", []) if c.get("type") == "text")
             if not res.get("isError"):
                 return text
+            metrics.inc("research_mcp_errors_total", host=self.host, kind="tool_error")
+            logger.warning("mcp tool error result", host=self.host, tool=name, attempt=attempt + 1)
             if attempt == 0:
                 time.sleep(3)
         raise RuntimeError(f"{name}: {text[:300]}")

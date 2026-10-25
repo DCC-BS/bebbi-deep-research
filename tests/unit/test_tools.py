@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from bebbi_deep_research.engine import metrics
 from bebbi_deep_research.engine import tools as T
 from bebbi_deep_research.engine.tools import MCPClient, Tools, fetchable
 
@@ -68,6 +69,7 @@ async def test_search_http_errors_are_counted_and_logged_with_the_host_only(logs
     t = make_tools(lambda r: httpx.Response(status, json={"message": "quota"}))
     assert await t.search("geheime frage") == []
     assert t.errors == {f"search:{status}": 1}
+    assert metrics.value("research_tool_errors_total", tool="search", reason=str(status)) >= 1
     assert logs.lines == [(level, "search failed", {"tool": "search", "reason": str(status), "host": "s"})]
     assert "geheime" not in repr(logs.lines)
 
@@ -251,6 +253,30 @@ def test_mcp_retries_5xx_then_succeeds(mcp):
         return standard(req)
 
     assert mcp(handler).call("a", {"q": 1}) == "ergebnis" and n["fails"] == 0
+
+
+def test_mcp_retries_and_error_results_are_logged_and_counted(mcp, logs):
+    n = {"fails": 1}
+
+    def handler(req):
+        body = rpc(req)
+        if body.get("method") == "tools/call" and n["fails"]:
+            n["fails"] -= 1
+            return httpx.Response(503)
+        if body.get("method") == "tools/call":
+            return jsonrpc(req, {"isError": True, "content": [{"type": "text", "text": "overload"}]})
+        return standard(req)
+
+    before = metrics.value("research_mcp_errors_total", host="mcp", kind="retry")
+    with pytest.raises(RuntimeError):
+        mcp(handler).call("a", {"q": 1})
+    assert metrics.value("research_mcp_errors_total", host="mcp", kind="retry") == before + 1
+    assert [(level, event) for level, event, _ in logs.lines] == [
+        ("warning", "mcp request retry"),
+        ("warning", "mcp tool error result"),
+        ("warning", "mcp tool error result"),
+    ]
+    assert logs.lines[0][2] == {"host": "mcp", "method": "tools/call", "attempt": 1, "reason": "503"}
 
 
 def test_mcp_gives_up_after_the_configured_attempts(mcp):

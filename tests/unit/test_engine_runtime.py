@@ -1,14 +1,21 @@
 """Runtime limits of the engine: LLM timeout, retries and the process-wide cap on concurrent LLM requests."""
 
 import asyncio
+import logging
 import math
 
+import httpx
 import numpy as np
 import pytest
+import structlog
+from dcc_backend_common.logger import init_logger
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from bebbi_deep_research.engine.llm import LLM, LlmSettings, llm_limiter
+from bebbi_deep_research.engine import llm as L
+from bebbi_deep_research.engine import metrics
+from bebbi_deep_research.engine import tools as T
+from bebbi_deep_research.engine.llm import LLM, LlmSettings, RoleAgent, llm_limiter
 from bebbi_deep_research.engine.own import PassageIndex
 from bebbi_deep_research.engine.vectors import scores
 from bebbi_deep_research.services.jobs import make_agent_factory
@@ -144,3 +151,62 @@ async def test_passage_index_keeps_unit_float32_rows_and_scores_off_the_event_lo
     assert np.allclose(np.linalg.norm(idx._vecs, axis=1), 1.0)
     assert "frist" in passage and best > 0.9
     assert len(threads) == 2  # normalising the index and scoring ran in worker threads
+
+
+# ------------------------------------------------------------------ logs and counters
+def completion(content):
+    return {
+        "id": "x",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+async def test_llm_retries_are_logged_and_counted(monkeypatch):
+    from tenacity import wait_none
+
+    lines = []
+    monkeypatch.setattr(L, "logger", type("Rec", (), {"warning": lambda self, e, **f: lines.append((e, f))})())
+    replies = [httpx.Response(503), httpx.Response(200, json=completion("ok"))]
+    agent = RoleAgent(
+        LlmSettings(base_url="http://llm/v1", models={"think": "m1", "fast": "m2", "embed": "e"}).role("fast")
+    )
+    transport = agent._openai_client._client._transport
+    transport.wrapped = httpx.MockTransport(lambda r: replies.pop(0))
+    transport.config["wait"] = wait_none()
+    before = metrics.value("research_llm_retries_total", model="m2")
+    out, _ = await agent.complete("u", "s")
+    assert out == "ok"
+    assert metrics.value("research_llm_retries_total", model="m2") == before + 1
+    assert (
+        lines[0][0] == "llm request retry" and lines[0][1]["attempt"] == 1 and "HTTPStatusError" in lines[0][1]["error"]
+    )
+    await agent._openai_client.close()
+
+
+def test_metrics_render_prometheus_text():
+    metrics.inc("research_tool_errors_total", tool="search", reason="429")
+    llm_limiter(4)
+    text = metrics.render()
+    assert "# TYPE research_tool_errors_total counter" in text
+    assert 'research_tool_errors_total{reason="429",tool="search"}' in text
+    assert "# TYPE research_llm_requests_running gauge\nresearch_llm_requests_running 0" in text
+    assert "research_llm_requests_waiting 0" in text
+
+
+def test_engine_log_lines_carry_the_job_id_from_the_context(caplog, monkeypatch):
+    """The service binds job_id with structlog contextvars; engine loggers pick it up through backend-common."""
+    monkeypatch.setenv("IS_PROD", "true")
+    init_logger(app_name="test")
+    logging.getLogger().addHandler(caplog.handler)
+    caplog.set_level(logging.INFO)
+    structlog.contextvars.bind_contextvars(job_id="job42")
+    try:
+        T.logger.warning("search failed", tool="search", reason="429", host="s")
+    finally:
+        structlog.contextvars.unbind_contextvars("job_id")
+    events = [r.msg for r in caplog.records if isinstance(r.msg, dict)]
+    assert any(e.get("job_id") == "job42" and "search failed" in str(e) for e in events)
