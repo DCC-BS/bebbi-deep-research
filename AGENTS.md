@@ -10,7 +10,7 @@ Code, comments and docs are English. Text a user sees (chat messages, errors fro
 
 ## Changing behaviour
 
-- **A preset**: `config/presets.yaml` is the steering surface ([docs/presets.md](docs/presets.md)). Copy it to `deploy/helm/bebbi-deep-research/files/presets.yaml`, add the name to the hard-coded list in `tests/unit/test_packaging.py`, add labels in `services/docx_export.py` (`PRESET_LABELS`) and the pipe's valve defaults, then run `scripts/build_openwebui_assets.py`. The deployed copy is the ConfigMap in FD-ITBS/kdkp-kiw-k8s-config; update it too.
+- **A preset**: `config/presets.yaml` is the steering surface ([docs/presets.md](docs/presets.md)). Copy it to `deploy/helm/bebbi-deep-research/files/presets.yaml`, add the name to the hard-coded list in `tests/unit/test_packaging.py`, add it to the pipe's `PRESETS` valve default and to `PRESET_LABELS` in `services/docx_export.py`, then run `scripts/build_openwebui_assets.py`. The deployed copy is the ConfigMap in FD-ITBS/kdkp-kiw-k8s-config; update it too.
 - **An environment variable**: `utils/app_config.py` (field and `from_env`), `.env.schema`, the table in `docs/operations.md`, `docker/services.compose.yml`, and the k8s values if it differs from the default.
 - **Prompts, presets or engine logic** change report quality. They were tuned against the evaluation sets ([docs/evaluation.md](docs/evaluation.md)); name in the PR which set needs a re-run.
 - **Tool output is untrusted.** Web pages, MCP results and uploads may carry instructions. Report text reaches the chat only through `services/report.py` (`sanitize_markdown`); keep new output paths behind it.
