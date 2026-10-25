@@ -12,6 +12,9 @@
       -> creates a knowledge base (as the test user, or as admin), prints its id
   scripts/e2e_owui.py upload doc.pdf
       -> uploads a file like the chat input, prints the file id
+  scripts/e2e_owui.py deliver CHAT_ID MESSAGE_ID JOB_ID USER_ID
+      -> what the job service sends when a night run finishes: a sample report with 3 sources, built with the service's
+         own report functions, POSTed to the delivery route of the image with OWUI_DELIVERY_SECRET. Prints the status.
 Own sources (A4): a file is uploaded with POST /api/v1/files/ (processing runs in the background; the browser polls
 /files/{id}/process/status) and attached to the turn as {"type": "file", "id", "name", "file": <record>, ...}; a
 knowledge base as {"type": "collection", "id", "name", ...}. Both go into the `files` of the completion request and of
@@ -23,6 +26,7 @@ Assistant message ids are printed so a later `show` can be compared with what th
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -143,9 +147,10 @@ class Client:
         return {"type": "collection", **{k: kb[k] for k in ("id", "name", "description")}, "status": "processed"}
 
     def open_session(self, choice: int = 0):
-        """Websocket session like the browser's: joins the user's room and answers the ask-user card of the pipe.
+        """Websocket session like the browser's: joins the user's room and answers the ask-user cards of the pipe.
 
-        `choice` is the index of the option to click (0 = Freigeben). Returns the socket; its `session_id` goes into the
+        `choice` is the index of the option of the plan card to click (0 = Freigeben); the preset card gets the
+        suggested preset. Returns the socket; its `session_id` goes into the
         completion request, which is how the pipe's event call finds the browser.
         """
         import socketio  # dev dependency (python-socketio[client])
@@ -158,8 +163,12 @@ class Client:
             event = data.get("data") or {}
             print("[event] " + str(event.get("type")), file=sys.stderr)
             if event.get("type") == "request:user_input":
-                print("[card] " + event["data"]["questions"][0]["question"], file=sys.stderr)
-                return {"status": "answered", "answers": {"plan": {"type": "option", "option_index": choice}}}
+                question = event["data"]["questions"][0]
+                print("[card] " + question["question"], file=sys.stderr)
+                # the preset card of the model "Deep Research" (id "preset": the suggested preset is option 0) and the
+                # plan card (id "plan": `choice`, 0 = Freigeben)
+                index = 0 if question["id"] == "preset" else choice
+                return {"status": "answered", "answers": {question["id"]: {"type": "option", "option_index": index}}}
             return None
 
         sio.connect(str(self.http.base_url), socketio_path="/ws/socket.io", transports=["websocket"])
@@ -176,6 +185,7 @@ class Client:
         timeout: float = 900,
         files: list[dict] | None = None,
         session_id: str | None = None,
+        params: dict | None = None,
     ) -> tuple[str, str]:
         """One user turn exactly as the UI does it. Returns (assistant message id, answer text)."""
         chat = self.get_chat(chat_id)
@@ -206,7 +216,7 @@ class Client:
             "user_message": user,
             "background_tasks": {"title_generation": True, "tags_generation": True, "follow_up_generation": True},
             "features": {},
-            "params": {},
+            "params": params or {},
             **({"files": files} if files else {}),
         }
         # With chat_id + message id Open WebUI runs the completion as a background task and the browser receives the
@@ -227,9 +237,41 @@ class Client:
         return aid, answer
 
 
+SAMPLE_REPORT = """# Stadtklima im Grossen Rat
+
+## Vorstösse
+
+Der Grosse Rat hat Vorstösse behandelt [1]. Ein Anzug verlangt Hitzeschutz [2]. Die Statistik zeigt Hitzetage [3].
+
+## Quellen
+
+[1] Anzug Stadtklima. https://example.ch/anzug-stadtklima (Stand 2024-03-01, abgerufen am 2026-10-25)
+[2] Motion Hitzeschutz. https://example.ch/motion-hitzeschutz (Stand 2025-06-10, abgerufen am 2026-10-25)
+[3] Statistik Hitzetage. https://example.ch/hitzetage (Stand 2025-12-01, abgerufen am 2026-10-25)
+"""
+
+
+def delivery_body(chat_id: str, message_id: str, job_id: str, user_id: str) -> dict:
+    """The body of the service's delivery request (services/jobs.py: deliver), built with its own functions."""
+    from bebbi_deep_research.services.report import (
+        build_sources,
+        fit_delivery,
+        limit_sources,
+        owui_source_events,
+        ui_markdown,
+    )
+
+    report, sources = limit_sources(SAMPLE_REPORT, build_sources(SAMPLE_REPORT))
+    envelope = {"chat_id": chat_id, "message_id": message_id, "job_id": job_id, "user_id": user_id}
+    content, payloads = fit_delivery(
+        ui_markdown(report, sources), [e["data"] for e in owui_source_events(sources)], envelope
+    )
+    return {**envelope, "content": content, "sources": payloads}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["new", "say", "show", "upload", "kb-create"])
+    ap.add_argument("cmd", choices=["new", "say", "show", "upload", "kb-create", "deliver"])
     ap.add_argument("chat_id", nargs="?", help="chat id; for upload the file, for kb-create the name")
     ap.add_argument("text", nargs="*")
     ap.add_argument("--file", action="append", default=[], help="file to upload and attach to the turn")
@@ -240,6 +282,9 @@ def main() -> int:
     ap.add_argument("--admin", action="store_true", help="act as the admin (kb-create)")
     ap.add_argument("--model", default="bebbi_deep_research.grossrat")
     ap.add_argument("--raw", action="store_true")
+    ap.add_argument(
+        "--params", help="chat parameters as JSON, e.g. '{\"compact_token_threshold\": 100}' (context compaction)"
+    )
     ap.add_argument("--approve", action="store_true", help="answer the plan card with Freigeben (needs a websocket)")
     a = ap.parse_args()
     cl = Client(admin=a.admin)
@@ -249,6 +294,15 @@ def main() -> int:
         print(cl.upload(a.chat_id)["id"])
     elif a.cmd == "kb-create":
         print(cl.create_kb(a.chat_id, a.text)["id"])
+    elif a.cmd == "deliver":
+        chat_id, message_id, job_id, user_id = a.chat_id, *a.text
+        r = cl.http.post(
+            "/api/v1/dcc/deep-research/deliver",
+            json=delivery_body(chat_id, message_id, job_id, user_id),
+            headers={"Authorization": "Bearer " + load_env()["OWUI_DELIVERY_SECRET"]},
+        )
+        print(r.status_code, r.text)
+        return 0 if r.status_code == 200 else 1
     elif a.cmd == "say":
         files = [cl.upload(f) for f in a.file] + [cl.file_item(i) for i in a.file_id]
         for kb in a.kb:
@@ -265,7 +319,12 @@ def main() -> int:
         sio = cl.open_session() if a.approve else None
         try:
             aid, ans = cl.say(
-                a.chat_id, " ".join(a.text), a.model, files=files or None, session_id=sio.session_id if sio else None
+                a.chat_id,
+                " ".join(a.text),
+                a.model,
+                files=files or None,
+                session_id=sio.session_id if sio else None,
+                params=json.loads(a.params) if a.params else None,
             )
         finally:
             if sio:
