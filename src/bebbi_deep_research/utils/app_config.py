@@ -97,6 +97,7 @@ class AppConfig(AbstractAppConfig):
     quota_per_day: int = Field(default=0, ge=0)
     poll_seconds: float = Field(default=5.0, gt=0)
     stale_seconds: float = Field(default=120.0, gt=0)
+    job_timeout_seconds: float = Field(default=3600.0, gt=0, description="A run that takes longer is stopped")
     owui_url: str = ""
     owui_api_key: str = ""
     owui_delivery_url: str = ""
@@ -159,6 +160,7 @@ class AppConfig(AbstractAppConfig):
             "quota_per_day": env.get("RA_QUOTA_PER_DAY"),
             "poll_seconds": env.get("RA_POLL_SECONDS"),
             "stale_seconds": env.get("RA_STALE_SECONDS"),
+            "job_timeout_seconds": env.get("RA_JOB_TIMEOUT_SECONDS"),
             "own_max_files": env.get("RA_OWN_MAX_FILES"),
             "own_max_file_chars": env.get("RA_OWN_MAX_FILE_CHARS"),
             "own_max_collections": env.get("RA_OWN_MAX_COLLECTIONS"),

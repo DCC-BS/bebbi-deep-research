@@ -121,6 +121,21 @@ async def test_setup_failure_ends_in_error_not_a_dead_task(tmp_path):
         assert "Unerwarteter Fehler" in j["error"]
 
 
+async def test_hung_run_is_stopped_by_the_job_timeout(tmp_path):
+    """A hung LLM or MCP call keeps the heartbeat alive (worker tick), so only the timeout frees the worker."""
+
+    class Hung(FakeAgent):
+        async def run(self, *a, **kw):
+            await asyncio.sleep(3600)
+
+    async with running(tmp_path, night_window=utc_window(True), job_timeout_seconds=0.3) as (c, app):
+        app.state.container.job_runner().make_agent = Hung
+        job = await submit(c)
+        j = await wait_status(c, job["job_id"], {"error"})
+        assert "Zeitlimit" in j["error"]
+        assert (await row(app, job["job_id"]))["owner"]  # stopped by this run, not re-queued as stale
+
+
 # ------------------------------------------------------------ M3: progress write must not abort the run
 async def test_progress_write_failure_does_not_abort_job(tmp_path):
     async with running(tmp_path, night_window=utc_window(True)) as (c, app):

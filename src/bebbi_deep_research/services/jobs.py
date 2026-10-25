@@ -44,6 +44,8 @@ def describe_error(e: BaseException) -> str:
         reason = "Das Sprachmodell ist nicht erreichbar."
     elif isinstance(e, UnexpectedModelBehavior):
         reason = "Das Sprachmodell hat keine verwertbare Antwort geliefert."
+    elif isinstance(e, TimeoutError):
+        reason = "Die Recherche hat das Zeitlimit überschritten."
     elif isinstance(e, httpx.HTTPError):
         reason = "Ein Dienst der Recherche (Suche oder Seitenabruf) ist nicht erreichbar."
     else:
@@ -310,9 +312,14 @@ class JobRunner:
             logger.info("job started", job=job_id, preset=job["preset"], depth=job["depth"])
             agent = self.make_agent(job_id, on_event)
             own = to_engine(json.loads(job.get("own_sources") or "null"), self.settings, self.http_factory)
-            res = await agent.run(
-                job["task"], job["preset"], job["depth"], plan=json.loads(job["plan"]), **({"own": own} if own else {})
-            )
+            async with asyncio.timeout(self.settings.job_timeout_seconds):
+                res = await agent.run(
+                    job["task"],
+                    job["preset"],
+                    job["depth"],
+                    plan=json.loads(job["plan"]),
+                    **({"own": own} if own else {}),
+                )
             stats = {**res.stats, "usage": res.usage}
             if not await self.db.execute(
                 "update jobs set status='done', finished=:t, report=:r, stats=:s, evidence=:e where " + guard,

@@ -74,6 +74,7 @@ Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded
 | `RA_QUOTA_PER_DAY` | `0` | jobs per user and 24 h, `0` = off (decision 2026-10-09). Exceeding returns HTTP 429 |
 | `RA_POLL_SECONDS` | `5` | worker loop interval |
 | `RA_STALE_SECONDS` | `120` | a running job without heartbeat for this long is re-queued (dead replica) |
+| `RA_JOB_TIMEOUT_SECONDS` | `3600` | a run that takes longer is stopped and reported as failed in the chat; a hung LLM or MCP call cannot block the queue |
 
 ### Delivery
 
