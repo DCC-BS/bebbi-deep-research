@@ -57,8 +57,9 @@ The embed role needs `/v1/embeddings` on the same endpoint, or its own endpoint 
 | `RA_OWN_MAX_FILE_CHARS` | `2000000` | extracted text per file; longer texts are cut (remark in the chat) |
 | `RA_OWN_MAX_COLLECTIONS` | `5` | knowledge bases per research |
 
-File texts are stored with the job (`jobs.own_sources`; drafts keep a 1,500-character preview) and stay there with the finished job like the
-report; plan a retention job if documents must not stay in the database. Knowledge bases are read at run time through
+File texts are stored with the job (`jobs.own_sources`; drafts keep a 1,500-character preview) only until the run ends: when the job
+becomes `done` or `error` the texts are removed and only names, sizes, links and knowledge base ids stay (enough for `GET /jobs/{id}`,
+delivery and the Word file). See [Retention](#job-lifecycle-and-restarts). Knowledge bases are read at run time through
 `OWUI_URL`/`OWUI_API_KEY` (`POST /api/v1/retrieval/query/collection`, one stored id at a time, logged as `knowledge query`); without both
 variables a knowledge base cannot be used (the tool reports "not reachable" to the model and the report says so under open points).
 Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded-files-and-knowledge-bases-requirement-a4).
@@ -75,6 +76,7 @@ Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded
 | `RA_POLL_SECONDS` | `5` | worker loop interval |
 | `RA_STALE_SECONDS` | `120` | a running job without heartbeat for this long is re-queued (dead replica) |
 | `RA_JOB_TIMEOUT_SECONDS` | `3600` | a run that takes longer is stopped and reported as failed in the chat; a hung LLM or MCP call cannot block the queue |
+| `RA_JOB_RETENTION_DAYS` | `365` | finished jobs (report, evidence, own-source names) are deleted this many days after they finished; matches the 365-day chat retention of Bebbi Bot |
 
 ### Delivery
 
@@ -125,7 +127,10 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
   the next start (no partial resume). uvicorn waits up to 20 s (`--timeout-graceful-shutdown` in the Dockerfile entrypoint); the chart sets `terminationGracePeriodSeconds: 45`, keep it above that plus the re-queue.
 * **Crash / OOM kill:** the heartbeat (every worker tick) stops; after `RA_STALE_SECONDS` any replica re-queues the job.
 * **Failure:** the job becomes `error` with the message; the message is also written into the chat.
-* Drafts older than 14 days are deleted; jobs and reports are kept (add a retention job if needed).
+* **Retention** (hourly, in the worker loop): drafts older than 14 days are deleted; finished jobs (`done`, `error`) with
+  their report, evidence and own-source metadata are deleted `RA_JOB_RETENTION_DAYS` (365) days after they finished.
+  Uploaded file texts are removed from a job as soon as it ends (they are needed only by the run; jobs of older
+  versions are cleaned by the same hourly pass). Queued and running jobs are never deleted.
 
 ## API
 
@@ -203,4 +208,4 @@ also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and lo
 | Own sources: "wird noch verarbeitet" / "keinen lesbaren Text" | Open WebUI (Docling) has not finished extracting the file, or extraction failed for it: check the Docling service and the file's processing status in Open WebUI |
 | Own sources: no upload button, or Open WebUI rewrites the question | the model entries need `capabilities.file_upload: true` and `file_context: false` (`deploy/openwebui/models.json`, re-import after upgrading the repo) |
 | Own sources: knowledge base "not reachable" in the report | `OWUI_URL` / `OWUI_API_KEY` of the service, `POST /api/v1/retrieval/query/collection` needs an admin key; log lines `knowledge query` show the ids queried |
-| Database | tables `drafts` and `jobs` are created on start; the column `own_sources` of both is added automatically to older databases; other schema changes still need a manual `alter table` |
+| Database | tables `drafts` and `jobs` and their indexes are created on start; new columns (`own_sources`, `owner`, ...) and indexes are added automatically to older databases; other schema changes still need a manual `alter table` |

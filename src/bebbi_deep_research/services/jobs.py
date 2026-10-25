@@ -12,7 +12,7 @@ from dcc_backend_common.logger import get_logger
 from bebbi_deep_research.engine import LLM, ResearchAgent, Tools
 from bebbi_deep_research.engine.llm import LlmSettings
 from bebbi_deep_research.services.db import DB
-from bebbi_deep_research.services.own_sources import to_engine
+from bebbi_deep_research.services.own_sources import to_engine, without_texts
 from bebbi_deep_research.services.policy import describe_error, in_window, runs_by_day
 from bebbi_deep_research.services.report import build_sources, owui_source_events, ui_markdown
 from bebbi_deep_research.utils.app_config import AppConfig
@@ -20,6 +20,14 @@ from bebbi_deep_research.utils.app_config import AppConfig
 logger = get_logger(__name__)
 LIVE = ("starting", "running")
 MAX_ATTEMPTS = 3  # a job that was interrupted (pod killed, stalled) this often is given up with an error
+FINISHED = ("done", "error")
+DRAFT_DAYS = 14
+
+
+def _no_texts(raw: str | None) -> str | None:
+    """The stored own sources of a job (JSON) without the file texts."""
+    stored = without_texts(json.loads(raw or "null"))
+    return json.dumps(stored, ensure_ascii=False) if stored else None
 
 
 def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]:
@@ -126,12 +134,39 @@ class JobRunner:
                 await self.tick()
                 if time.time() - last_purge > 3600:
                     last_purge = time.time()
-                    await self.db.execute("delete from drafts where created < :t", t=time.time() - 14 * 86400)
+                    await self.purge(last_purge)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.error("worker loop error", error=repr(e))
             await asyncio.sleep(self.settings.poll_seconds)
+
+    async def purge(self, now: float) -> None:
+        """Apply the retention rules (run hourly by the worker loop).
+
+        Drafts are deleted after 14 days, finished jobs (report, evidence, own sources) after RA_JOB_RETENTION_DAYS.
+        File texts that finished jobs of older versions still carry are removed.
+        """
+        await self.db.execute("delete from drafts where created < :t", t=now - DRAFT_DAYS * 86400)
+        finished = ", ".join(f"'{s}'" for s in FINISHED)
+        n = await self.db.execute(
+            f"delete from jobs where status in ({finished}) and coalesce(finished, created) < :t",
+            t=now - self.settings.job_retention_days * 86400,
+        )
+        if n:
+            logger.info("finished jobs deleted", count=n, retention_days=self.settings.job_retention_days)
+        rows = await self.db.run(
+            f"select id, own_sources from jobs where status in ({finished}) and own_sources like :p limit 100",
+            p='%"text":%',
+        )
+        for r in rows:
+            await self.db.execute(
+                f"update jobs set own_sources=:o where id=:i and status in ({finished})",
+                o=_no_texts(r["own_sources"]),
+                i=r["id"],
+            )
+        if rows:
+            logger.info("file texts of finished jobs removed", count=len(rows))
 
     async def tick(self) -> None:
         """Run one loop step: heartbeats, stale jobs, claiming new jobs, the delivery sweep."""
@@ -147,7 +182,8 @@ class JobRunner:
             )
         stale = "status in ('starting','running') and coalesce(heartbeat, created) < :t"
         for r in await self.db.run(
-            f"select id, user_id, chat_id, message_id from jobs where {stale} and coalesce(attempts,0) >= :m",
+            f"select id, user_id, chat_id, message_id, own_sources from jobs where {stale} "
+            "and coalesce(attempts,0) >= :m",
             t=now - s.stale_seconds,
             m=MAX_ATTEMPTS,
         ):
@@ -156,9 +192,11 @@ class JobRunner:
                 "Bitte versuchen Sie es erneut oder wenden Sie sich an den Betrieb."
             )
             if await self.db.execute(
-                "update jobs set status='error', finished=:f, error=:e, owner=null where id=:i and " + stale,
+                "update jobs set status='error', finished=:f, error=:e, owner=null, own_sources=:o where id=:i and "
+                + stale,
                 f=now,
                 e=msg,
+                o=_no_texts(r["own_sources"]),
                 i=r["id"],
                 t=now - s.stale_seconds,
             ):
@@ -275,8 +313,10 @@ class JobRunner:
                 )
             stats = {**res.stats, "usage": res.usage}
             if not await self.db.execute(
-                "update jobs set status='done', finished=:t, report=:r, stats=:s, evidence=:e where " + guard,
+                "update jobs set status='done', finished=:t, report=:r, stats=:s, evidence=:e, own_sources=:os "
+                "where " + guard,
                 t=time.time(),
+                os=_no_texts(job.get("own_sources")),
                 r=res.report,
                 s=json.dumps(stats, ensure_ascii=False),
                 e=json.dumps(res.ledger, ensure_ascii=False),
@@ -310,9 +350,10 @@ class JobRunner:
             message = describe_error(e)
             try:
                 mine = await self.db.execute(
-                    "update jobs set status='error', finished=:t, error=:e where " + guard,
+                    "update jobs set status='error', finished=:t, error=:e, own_sources=:os where " + guard,
                     t=time.time(),
                     e=message,
+                    os=_no_texts((job or {}).get("own_sources")),
                     i=job_id,
                     o=owner,
                 )

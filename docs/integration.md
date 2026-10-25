@@ -275,6 +275,7 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
 2. **Service** (`services/own_sources.py`). Applies the limits (`RA_OWN_MAX_FILES` 10, `RA_OWN_MAX_FILE_CHARS` 2,000,000, `RA_OWN_MAX_COLLECTIONS` 5) and
    reports what it cut, in German, back to the pipe (shown in the plan and in the "queued" message). The plan step stores previews with the
    draft; the job stores the full texts and the knowledge base ids (`jobs.own_sources`), so a night run does not depend on the user's session.
+   The texts are removed when the job ends (`done` or `error`); the job is deleted after `RA_JOB_RETENTION_DAYS` (365).
    Old databases get the column added on start. `GET /jobs/{id}` returns names and sizes (`own_sources`), never texts.
 3. **Knowledge bases at run time**: the engine tool `knowledge_search(query)` asks `OwuiRetriever`, which POSTs to
    `/api/v1/retrieval/query/collection` with the service's admin key for **one stored id at a time**. The tool has no collection argument, the

@@ -25,6 +25,13 @@ MIGRATIONS = [
     ("jobs", "attempts", "integer"),
     ("jobs", "delivery_tries", "integer"),
 ]
+# indexes after the columns exist; `create index if not exists` is a no-op on a database that has them
+INDEXES = [
+    "create index if not exists jobs_user_idx on jobs (user_id)",
+    "create index if not exists jobs_message_idx on jobs (chat_id, message_id)",
+    "create index if not exists jobs_draft_idx on jobs (draft)",
+    "create index if not exists drafts_created_idx on drafts (created)",
+]
 INIT_LOCK = 727274  # pg_advisory_xact_lock key: several pods starting at once must not race on the schema
 
 
@@ -46,7 +53,7 @@ class DB:
         self.engine: AsyncEngine = create_async_engine(url, **kw)
 
     async def init(self) -> None:
-        """Create the tables and add columns of later versions (Postgres: under an advisory lock)."""
+        """Create the tables, add columns of later versions and the indexes (Postgres: under an advisory lock)."""
         async with self.engine.begin() as con:
             pg = con.dialect.name == "postgresql"
             if pg:
@@ -60,6 +67,8 @@ class DB:
                 have = await con.run_sync(lambda c, t=table: {col["name"] for col in inspect(c).get_columns(t)})
                 if column not in have:
                     await con.execute(text(f"alter table {table} add column {column} {kind}"))
+            for stmt in INDEXES:
+                await con.execute(text(stmt))
 
     async def run(self, sql: str, **params) -> list[dict]:
         """Run one statement in its own transaction; returns rows as dicts (empty for writes)."""
