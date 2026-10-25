@@ -163,7 +163,7 @@ keep FastAPI's `detail`).
 ## Tests and packaging
 
 CI (`.github/workflows/main.yml`, DCC-BS ci-workflows) runs `mise run ci-check` (lockfile, ruff format and lint, ty,
-varlock scan) and `mise run test:unit`. `tests/unit/test_packaging.py` fails if
+varlock scan) and `mise run test:unit`; a second job runs `tests/integration` and the unit suite against a Postgres service container. `tests/unit/test_packaging.py` fails if
 `deploy/helm/bebbi-deep-research/files/presets.yaml` differs from `config/presets.yaml`. The image is built and pushed
 to GHCR by `.github/workflows/docker-publish.yml` (manual trigger), tagged with the version in `pyproject.toml` and
 `latest`. A version is published once: the workflow stops if the tag already exists, so bump the version (and
