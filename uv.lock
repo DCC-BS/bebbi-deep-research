@@ -327,7 +327,7 @@ wheels = [
 
 [[package]]
 name = "bebbi-deep-research"
-version = "1.1.0"
+version = "1.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -345,6 +345,7 @@ dependencies = [
     { name = "rapidfuzz" },
     { name = "rich" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "structlog" },
     { name = "tzdata" },
     { name = "uvicorn" },
 ]
@@ -376,6 +377,7 @@ requires-dist = [
     { name = "rapidfuzz", specifier = ">=3.13" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
+    { name = "structlog", specifier = ">=26.1.0" },
     { name = "tzdata", specifier = ">=2024.2" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
