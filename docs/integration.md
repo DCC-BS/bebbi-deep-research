@@ -1,6 +1,6 @@
 # Integration into Open WebUI
 
-Target: `ghcr.io/fd-itbs/open-webui` v0.12.3 (fork of Open WebUI v0.12.3; verified on v0.11.4 before), Kubernetes, GitOps. The integration uses
+Target: `ghcr.io/fd-itbs/open-webui` v0.12.4 (fork of Open WebUI v0.12.4; verified on v0.12.3 and v0.11.4 before), Kubernetes, GitOps. The integration uses
 only extension points: two functions (the pipe and the Word download action), model entries, one API key, and one delivery route that the image adds (section 3).
 
 ```mermaid
@@ -111,7 +111,7 @@ Setup:
 
 The **admin API key** (`OWUI_API_KEY`) is still used, read-only, for own sources: `POST /api/v1/retrieval/query/collection`
 (knowledge bases of the user, only ids the pipe approved for the job) and `GET /api/v1/files/{id}` (date of a document).
-Both still accept an admin key at v0.12.3 (`BYPASS_ADMIN_ACCESS_CONTROL` default true, section 7). Create a user
+Both still accept an admin key at v0.12.4 (`BYPASS_ADMIN_ACCESS_CONTROL` default true, section 7). Create a user
 "deep-research-service" with role admin, enable API keys (`ENABLE_API_KEYS=true`; with `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` allow
 `/api/v1/retrieval` and `/api/v1/files`), create the key in Settings, Account, API keys, store it as `OWUI_API_KEY`. The key no longer
 needs `/api/v1/chats`.
@@ -179,7 +179,7 @@ users should use a normal model for that. Making the delivered message carry a "
 pipe answer the next message with the same report again, so we left it out. The same holds for a report that the pipe
 returns itself (later message, fallback above): it carries no marker either.
 
-### How the pipe and the delivery fit Open WebUI v0.11.4 and v0.12.3 (found in the end-to-end test)
+### How the pipe and the delivery fit Open WebUI v0.11.4, v0.12.3 and v0.12.4 (found in the end-to-end test)
 
 * **Plan and clarifying questions are plain text**: the planner sees web snippets, so the pipe escapes the Markdown
   characters of every LLM-written line (plan title, task, parts, goals, sub-questions, must-name items, questions,
@@ -202,7 +202,7 @@ returns itself (later message, fallback above): it carries no marker either.
 * **Model list cache**: after installing a function or model, open Open WebUI once (`GET /api/models`) before sending
   completions with the new model id; the first completion otherwise answers "Model not found".
 
-## 5a. Citations and Word download (how Open WebUI v0.11.4 and v0.12.3 do it)
+## 5a. Citations and Word download (how Open WebUI v0.11.4, v0.12.3 and v0.12.4 do it)
 
 **What Open WebUI expects** (read in the image: backend `/app/backend/open_webui`, frontend from the source maps of
 `/app/build/_app/immutable`):
@@ -390,6 +390,19 @@ processing, `files` in the completion request, test user "tester" without admin 
 | 18 | Own sources: file `.txt` and a knowledge base of the tester, preset dokumente (job `4aa5e24ccb6b`) | passed. Both sources cited with the right figures (28 days, CHF 135; CHF 15 000), kinds `upload` and `knowledge:Test KB 5`, links 200 for the tester. The admin key still reads the foreign knowledge base (`/retrieval/query/collection`, same response shape) and `GET /files/{id}` (`created_at`) |
 | 19 | Job queued, user writes again before it ran; then the job runs and the user writes again (chat `b260441c…`, job `b40ade3da0a1`) | passed. The state marker came back in the status answer (so the second message is a new message, marker intact); the delivery went into the **first** message (19 sources, no marker) and left the status message alone; the next user message returned the report with the Word file attached by the pipe. (That message carries no `source` events, because the service delivered them already: its `[n]` are plain text; unchanged from v0.11.4) |
 
+**Re-run on Open WebUI v0.12.4** (2026-10-25, image `open-webui:v0.12.4-kdkp-local` with the `dr_delivery` hook, `ENABLE_ADMIN_CHAT_ACCESS=false`, context compaction on, pgvector; the job service is a mock that records the calls, because the GPUs were busy: **no real model, no research run**; the real-model daytime and night runs are still open). Setup: a compose project outside this repository (open-webui, pgvector, the mock), the pipe and models installed with `scripts/install_pipe.py --models`, a normal user "tester"; `scripts/e2e_owui.py` as the browser:
+
+| # | Scenario | Result |
+|---|---|---|
+| 20 | Pipe on Python 3.12 (the image moved from 3.11): both functions load and every import resolves (`check_dr_functions.py` of the image repository with its Python check set to 3.12), `scripts/check_owui_internals.py` | passed |
+| 21 | Preset card, plan card ("Freigeben"), job queued (`say --approve`, model `bebbi_deep_research.auto`) | passed. Marker in the stored text, `output` empty |
+| 22 | Delivery as the service sends it (`e2e_owui.py deliver`, body built with the service's report functions), browser session open | passed. Wrong secret and no header 401; other `user_id`, other job 403; unknown message or chat 404; admin `POST /chats/{id}/messages/{mid}` and `GET /chats/{id}` 401; then 200: events `source` x3 and `chat:message` reached the open session, stored message has text, 3 `sources`, `output` `[]`, marker gone; same text again 200, other text 403. Rendered in a browser (Chromium, as the user): badges, "3 Sources", Word chip, download icon, marker invisible, state intact after reload |
+| 23 | Word action as the user, twice | passed. One file, the second call attached nothing; download as the user 200, other user 404, admin 200; opens with python-docx |
+| 24 | Pipe path (job done, no delivery): next message returns the report | passed. 3 sources, one Word file, download 200 |
+| 25 | Admin key: `POST /retrieval/query/collection` on a knowledge base of the tester, `GET /files/{id}` (embeddings from the mock) | passed. Admin key 200 with `documents`, `metadatas` (`file_id`, `name`), `distances`; other user 403; the service's `OwuiRetriever` parses it; `created_at` present |
+| 26 | Own sources through the pipe: file and knowledge base of the tester; a foreign knowledge base | passed. File text and the knowledge base id reach `/plans` and `/jobs`; the foreign one is refused with the note "für Sie nicht lesbar" |
+| 27 | Context compaction on a short chat (user, assistant with marker, user), `compact_token_threshold` set per chat | **failed, fixed.** 0.12.4 summarizes the assistant message away; the pipe then started a new research. The pipe now reads the parent message from the chat (section 9). Re-run: the queued job is reported |
+
 Known limitations:
 
 * The rendered chat (badges, source popup, file chip, action button) was **not** looked at in the browser pane in this
@@ -405,7 +418,7 @@ Known limitations:
   installed, the file is still available from the service (`/jobs/{id}/report.docx`).
 * The native source list shows URLs only; the Markdown list under the report keeps title, Stand and retrieval date, so the
   list is visible twice (one collapsed).
-* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (checked on v0.12.3); re-test it on upgrades (checklist in section 9).
+* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (checked on v0.12.4); re-test it on upgrades (checklist in section 9).
 * Own sources were exercised through the API the way the browser sends them; the attach menu and the `#` picker were not clicked in the browser pane.
 * The delivery secret can write the text of any message that the pipe queued and that is still waiting (and nothing else); keep it in the Secret and restrict ingress with the NetworkPolicy. The admin key can read every knowledge base and file.
 * A message that carries a status text (job still running when the user writes again) is a new assistant message; the
@@ -434,7 +447,7 @@ file).
 
 ## 9. Upgrade checklist: Open WebUI internals we depend on
 
-Re-test these when the Open WebUI version changes (checked: v0.12.3). Unit tests fake them (`tests/unit/test_pipe_own.py:
+Re-test these when the Open WebUI version changes (checked: v0.12.4). Unit tests fake them (`tests/unit/test_pipe_own.py:
 test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not if Open WebUI changes); the end-to-end check is
 `scripts/e2e_owui.py` (section 7); `scripts/check_owui_internals.py` runs the helpers of the pipe against the real modules inside the container.
 
@@ -444,6 +457,8 @@ test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not
 | `open_webui.models.chats.Chats`: `get_chat_by_id`, `get_message_by_id_and_message_id`, `upsert_message_to_chat_by_id_and_message_id`, `get_message_metadata`; `open_webui.socket.main.get_event_emitter(info, update_db)` and what it stores for `source`, `files`, `replace` | the delivery route of the image (`dr_delivery` hook), the Word action | section 3; kdkp-open-web-ui README |
 | `output` vs `content` of a message (UI renders `output` first), `replace` event stores `content` | queued-message `replace` event, delivery shown live | sections 3 and 5 |
 | `__task__` values of background requests (`title_generation`, `tags_generation`, `follow_up_generation`, and since 0.12 `memory_review`, `context_compaction`) | the pipe answers every task locally | `functions.py`, `utils/memory.py`, `utils/context_compaction.py` |
+| Context compaction (`utils/context_compaction.py`: `_find_compaction_boundary`; `utils/middleware.py`, `compact_messages_for_request`) | since 0.12.4 it also compacts a chat of three messages (user, assistant, user) over the threshold and drops the assistant message with our state marker from `body["messages"]`; `_state_of_chat` then reads it from the stored chat through `__metadata__["user_message"]["parentId"]` and `Chats.get_message_by_id_and_message_id`. `CONTEXT_COMPACTION_MODEL` empty sends the summary task to the pipe, which answers it with an empty text (Open WebUI falls back to excerpts) | `tests/unit/test_pipe.py: test_state_survives_context_compaction...`; `scripts/e2e_owui.py say --params '{"compact_token_threshold": 20}'` |
+| Pipe Valves button (`has_user_valves` from `UserValves` in `functions.py`; `MessageInput.svelte` since 0.12.4 also needs the permission `chat.valves`) | the pipe has no `UserValves`: users never edit valves, the valves are admin valves (Admin, Functions) | `functions.py` |
 | `source` events, `metadata.source` / `metadata.name` unique per source | citation badges | section 5a |
 | `open_webui.routers.files.upload_file_handler`, `open_webui.models.users.Users` | Word file as the user's file | section 5a |
 | `__files__` / `__metadata__["files"]` and `["user_message"]` of a pipe; item types `file`, `collection` | which attachments the chat has (own sources) | `functions.py`, `utils/middleware.py` |

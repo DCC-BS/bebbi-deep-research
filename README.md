@@ -13,7 +13,7 @@ tuning history) lives in the evaluation repository, see [docs/evaluation.md](doc
 
 ```mermaid
 flowchart LR
-    user([User]) --> owui["Open WebUI v0.12.3<br/>model: Deep Research"]
+    user([User]) --> owui["Open WebUI v0.12.4<br/>model: Deep Research"]
     owui --> pipe["pipe/deep_research.py<br/>OWUI function (manifold)"]
     pipe -- "clarify · plan · edit · approve (ask-user card) · status<br/>HTTP + bearer token" --> svc
     svc -- "report and sources<br/>POST /api/v1/dcc/deep-research/deliver<br/>(shared secret)" --> owui
@@ -71,7 +71,7 @@ mise run check                           # lockfile, ruff format + lint, ty, var
 mise run test:unit                       # unit tests (CI runs `mise run ci`)
 mise run dev                             # service with auto-reload on :8088 (secrets via varlock / Proton Pass)
 
-mise run docker:up                       # service + Postgres + Open WebUI v0.12.3 (docker-compose.dev.yml)
+mise run docker:up                       # service + Postgres + Open WebUI v0.12.4 (docker-compose.dev.yml)
 curl localhost:8088/health/liveness      # {"status":"up",...}; /health/readiness checks the database, /health/dependencies the LLM and Open WebUI
 uv run python scripts/install_pipe.py --service-url http://service:8088 --models   # pipe + valves (docs/integration.md)
 ```
