@@ -11,6 +11,7 @@ from dcc_backend_common.logger import get_logger
 from dcc_backend_common.usage_tracking import UsageTrackingService
 from structlog.contextvars import get_contextvars
 
+from bebbi_deep_research.engine import metrics as engine_metrics
 from bebbi_deep_research.engine.config import Config
 from bebbi_deep_research.models.own_sources import OwnSourcesRequest
 from bebbi_deep_research.models.research import (
@@ -372,4 +373,4 @@ class ResearchService:
             for s in ("queued", "starting", "running", "done", "error", "cancelled")
         ]
         lines += ["# TYPE research_in_night_window gauge", f"research_in_night_window {int(in_window(self.settings))}"]
-        return "\n".join(lines) + "\n"
+        return "\n".join(lines) + "\n" + engine_metrics.render()

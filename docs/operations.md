@@ -180,7 +180,7 @@ response changes in a way the other side cannot handle; additive response fields
 | `GET /health/liveness`, `/health/startup` | process up / started |
 | `GET /health/readiness` | 200 if the database answers within 3 s, else 503 with `checks`. Nothing else: job status and reports need only the database, so an LLM or Open WebUI outage does not take the pod out of the Service |
 | `GET /health/dependencies` | status of the LLM endpoint (`/models`) and Open WebUI (`/health`, if `OWUI_URL` is set): `{"status": "ok" \| "degraded", "checks"}`, always 200 (unauthenticated, no content) |
-| `GET /metrics` | Prometheus text: `research_jobs{status}`, `research_in_night_window` (unauthenticated, no content) |
+| `GET /metrics` | Prometheus text: `research_jobs{status}`, `research_in_night_window`, `research_llm_retries_total{model}`, `research_tool_errors_total{tool,reason}`, `research_mcp_errors_total{host,kind}`, `research_llm_requests_running`, `research_llm_requests_waiting` (unauthenticated, no content) |
 | `GET /presets` | preset names, descriptions, engine |
 | `POST /clarify` `{task, preset?, own_sources?}` | clarifying questions and assumptions (knows the attached sources) |
 | `POST /plans` `{task, preset, depth, own_sources?}` | plan draft: `{draft_id, plan, own_sources}` (HTTP 422 with a user message if the preset is `own_sources: only` and nothing readable is attached) |
