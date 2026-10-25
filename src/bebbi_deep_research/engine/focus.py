@@ -16,6 +16,7 @@ from pydantic_ai import UnexpectedModelBehavior
 from . import own as O
 from . import prompts as P
 from .config import Budget, Preset
+from .context import Result, today
 from .house_style import report_house_style
 from .llm import ToolBudget, budgeted_tools
 from .sources import Registry, Source, mcp_to_sources, search_to_sources
@@ -175,8 +176,6 @@ class FocusEngine:
         Raises:
             RuntimeError: If the model gives no final answer.
         """
-        from .agent import Result, _today  # late import: agent imports this module
-
         started = time.time()
         if plan is None and preset.plan_first:
             await self.agent._emit("status", "Erstelle Rechercheplan")
@@ -189,7 +188,7 @@ class FocusEngine:
         style = "\n\n" + report_house_style() if de and preset.house_style else ""
         system = (
             P.FOCUS_SYSTEM.format(
-                today=_today(),
+                today=today(),
                 language_name="German" if de else "English",
                 spelling="Use Swiss Standard German spelling: never write ß, always ss." if de else "",
                 max_calls=budget.focus_calls,

@@ -8,43 +8,26 @@ import asyncio
 import dataclasses
 import json
 import re
-import threading
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 
 from dcc_backend_common.logger import get_logger
 from pydantic_ai import UnexpectedModelBehavior
 
-from . import metrics
 from . import own as O
 from . import prompts as P
+from .chat import INTENTS, ChatTurns, own_for
 from .config import Budget, Config, Preset
+from .context import Event, Result, today
 from .house_style import report_house_style
 from .ledger import Card, Ledger, SubQ, quote_in_page
 from .llm import LLM, ToolBudget, budgeted_tools
+from .mcp import McpPool
 from .sources import Registry, mcp_to_sources
 from .text import Evidence, checked_numbers, distinctive, fix_sr_labels, split_units, unsupported
 from .tools import MCPClient, Tools, domain, domain_match, focus
 
 logger = get_logger(__name__)
-Event = Callable[[str, str], Awaitable[None] | None]
-INTENTS = ("primary", "data", "secondary")
-
-
-@dataclass
-class Result:
-    """Outcome of one research: report, plan, evidence ledger, token usage and statistics."""
-
-    report: str
-    plan: dict
-    ledger: dict
-    usage: dict
-    stats: dict = field(default_factory=dict)
-
-
-def _today() -> str:
-    return time.strftime("%Y-%m-%d")
+__all__ = ["INTENTS", "Event", "ResearchAgent", "Result"]
 
 
 def _err(e: BaseException) -> str:
@@ -67,11 +50,8 @@ class ResearchAgent:
         self.cfg, self.llm, self.tools = cfg, llm, tools
         self.on_event = on_event
         self.sem = asyncio.Semaphore(concurrency)
-        self._mcp_clients: dict[str, MCPClient] = {}
-        self._mcp_failed: dict[str, float] = {}
-        self._mcp_errors: dict[str, str] = {}
-        self._mcp_lock = threading.Lock()
-        self._mcp_locks: dict[str, threading.Lock] = {}
+        self.chat = ChatTurns(llm, tools)
+        self.mcp = McpPool(cfg)
         self._de = False
         self._evs: dict[str, Evidence] = {}  # card id -> number forms (verify)
         self._task_ev = Evidence()  # numbers of the task itself need no evidence
@@ -90,210 +70,33 @@ class ResearchAgent:
     async def clarify(
         self, task: str, own: "O.OwnSources | None" = None, presets: dict[str, str] | None = None
     ) -> dict:
-        """At most 2 clarifying questions; none for detailed tasks (they already state their scope).
-
-        With `presets` (name -> description) the answer also has "preset": the profile that fits the task best, or
-        None if the model named none of them. Detailed tasks then still get a suggestion, but no questions.
-        """
-        detailed = len(task) > 600
-        if detailed and not presets:
-            return {"questions": [], "assumptions": []}
-        if own and (own.files or own.collections):
-            task += (
-                "\n\n(The user has ALREADY ATTACHED these own sources: "
-                + "; ".join(
-                    [f'file "{f.name}"' for f in own.files] + [f'knowledge base "{c.name}"' for c in own.collections]
-                )
-                + ". Phrases like 'my document' or 'the attached file' mean them. Never ask the user to upload or "
-                "provide them again.)"
-            )
-        prompt = P.CLARIFY.format(task=task)
-        if presets:
-            prompt += P.CLARIFY_PRESET.format(presets="\n".join(f"- {n}: {d}" for n, d in presets.items()))
-        data = (
-            await self.llm.json(
-                "fast",
-                "You decide whether a research task needs clarification. Output JSON only.",
-                prompt,
-                step="clarify",
-                default={},
-            )
-            or {}
-        )
-        if not isinstance(data, dict):
-            data = {}
-        out = {
-            "questions": [] if detailed else [str(q) for q in data.get("questions") or []][:2],
-            "assumptions": [] if detailed else [str(a) for a in data.get("assumptions") or []][:5],
-        }
-        if presets:
-            out["preset"] = data.get("preset") if data.get("preset") in presets else None
-        return out
+        """At most 2 clarifying questions (see `ChatTurns.clarify`)."""
+        return await self.chat.clarify(task, own=own, presets=presets)
 
     async def edit_plan(self, plan: dict, instruction: str, task: str, preset: Preset, budget: Budget) -> dict:
-        """Change a plan as the user asked; keep the old plan if the answer is not a valid plan."""
-        raw = await self.llm.json(
-            "fast",
-            "You edit research plans. Output JSON only.",
-            P.EDIT_PLAN.format(
-                plan=json.dumps(plan, ensure_ascii=False), instruction=instruction, max_subq=budget.max_subq
-            ),
-            step="edit_plan",
-            default=None,
-        )
-        return self._validate_plan(raw, task, preset, budget) if isinstance(raw, dict) else plan
-
-    # ------------------------------------------------------------------ plan
-    @staticmethod
-    def _own_for(own: "O.OwnSources | None", preset: Preset) -> "O.OwnSources | None":
-        """The user's own sources as the preset wants them: ignored for own_sources: off, web-less for `only`."""
-        if own is None or preset.own_sources == "off" or not (own.files or own.collections):
-            return None
-        own.mode = "only" if preset.own_sources == "only" else "prefer"
-        return own
+        """Change a plan as the user asked (see `ChatTurns.edit_plan`)."""
+        return await self.chat.edit_plan(plan, instruction, task, preset, budget)
 
     async def plan(self, task: str, preset: Preset, budget: Budget, own: "O.OwnSources | None" = None) -> dict:
-        """Plan a research: parts, sub-questions with intents, must-name items, language."""
-        hint = ""
-        if preset.report.get("parts_hint"):
-            parts = ", ".join(preset.report["parts_hint"])
-            hint = f"Typical parts for this kind of research: {parts} (adapt to the task)."
-        own = self._own_for(own, preset)
-        if own:
-            hint += (
-                " The user supplied own sources: "
-                + "; ".join(
-                    [f'file "{f.name}"' + (f" (begins: {f.text[:300]!r})" if f.text else "") for f in own.files]
-                    + [f'knowledge base "{c.name}"' for c in own.collections]
-                )
-                + (
-                    ". Answer ONLY from these; plan sub-questions the documents can answer."
-                    if own.mode == "only"
-                    else ". Plan sub-questions so that these sources are used wherever they are relevant."
-                )
-            )
-        hits = (
-            []
-            if own and own.mode == "only"
-            else await self.tools.search(task[:200], "de" if preset.language == "de" else "en", num=8)
-        )
-        discovery = "\n".join(f"- {h['title']} ({domain(h['url'])}): {h['snippet'][:180]}" for h in hits) or "-"
-        raw = (
-            await self.llm.json(
-                "think",
-                "You are a careful research planner. Output JSON only.",
-                P.PLAN.format(
-                    today=_today(),
-                    task=task,
-                    discovery=discovery,
-                    parts_hint=hint,
-                    max_subq=budget.max_subq,
-                    min_parts=budget.parts[0],
-                    max_parts=budget.parts[1],
-                ),
-                step="plan",
-                default={},
-            )
-            or {}
-        )
-        return self._validate_plan(raw if isinstance(raw, dict) else {}, task, preset, budget)
+        """Plan a research (see `ChatTurns.plan`)."""
+        return await self.chat.plan(task, preset, budget, own=own)
 
-    def _validate_plan(self, raw: dict, task: str, preset: Preset, budget: Budget) -> dict:
-        raw_parts = [p for p in raw.get("parts") or [] if isinstance(p, dict) and p.get("title")]
-        raw_parts = [
-            p
-            for p in raw_parts
-            if not re.search(r"summary|zusammenfassung|fazit|limitation|offene punkte|grenzen", p["title"], re.I)
-        ]
-        parts = raw_parts or [{"title": "Findings", "goal": task}]
-        raw_ids = {}  # the model's part ids -> ours, from the parts that were kept
-        for i, p in enumerate(parts, 1):
-            if p in raw_parts:
-                raw_ids[str(p.get("id"))] = f"P{i}"
-            p["id"] = f"P{i}"
-            p.setdefault("goal", p["title"])
-        part_ids = {p["id"] for p in parts}
-        subqs = []
-        for q in raw.get("sub_questions") or []:
-            if not isinstance(q, dict) or not q.get("text"):
-                continue
-            part = raw_ids.get(str(q.get("part")), q.get("part"))
-            subqs.append(
-                {
-                    "id": f"Q{len(subqs) + 1}",
-                    "part": part if part in part_ids else parts[0]["id"],
-                    "text": str(q["text"]).strip(),
-                    "intent": q.get("intent") if q.get("intent") in INTENTS else "secondary",
-                }
-            )
-        subqs = subqs[: budget.max_subq] or [
-            {"id": "Q1", "part": parts[0]["id"], "text": task[:300], "intent": "secondary"}
-        ]
-        lang = (
-            preset.language
-            if preset.language != "auto"
-            else (raw.get("language") if raw.get("language") in ("de", "en") else "en")
-        )
-        return {
-            "title": str(raw.get("title") or task[:80]),
-            "task_core": str(raw.get("task_core") or task[:400]),
-            "language": lang,
-            "parts": parts,
-            "sub_questions": subqs,
-            "must_name": [str(x) for x in raw.get("must_name") or [] if str(x).strip()][:25],
-            "constraints": [str(x) for x in raw.get("constraints") or [] if str(x).strip()][:15],
-        }
-
-    # ------------------------------------------------------------- research
-    CONNECT_DEADLINE = 45  # seconds per server for the whole connect (all attempts)
-
+    # ------------------------------------------------------------- MCP pool
     def _mcp_client(self, server: str, preset: Preset) -> MCPClient | None:
-        """Return a connected MCP client for a server, or None if it is unavailable.
-
-        Connects with 2 attempts within an overall deadline; a failure is remembered for 2 minutes only (transient
-        outages happen), and callers fall back to web search meanwhile. One lock per server, so several servers
-        connect concurrently when callers use threads.
-        """
-        with self._mcp_lock:
-            lock = self._mcp_locks.setdefault(server, threading.Lock())
-        with lock:
-            client = self._mcp_clients.get(server)
-            if client is not None:
-                return client
-            if time.time() - self._mcp_failed.get(server, 0) < 120:
-                return None
-            url = self.cfg.mcp_servers.get(server)
-            if not url:
-                return None
-            deadline = time.monotonic() + self.CONNECT_DEADLINE
-            for attempt in range(2):
-                try:
-                    self._mcp_clients[server] = MCPClient(url, preset.mcp.get(server), retries=3, deadline=deadline)
-                    return self._mcp_clients[server]
-                except Exception as e:
-                    self._mcp_errors[server] = f"{type(e).__name__}: {str(e)[:200]}"
-                    if time.monotonic() + 2 > deadline:
-                        break
-                    time.sleep(2 * (attempt + 1))
-            self._mcp_failed[server] = time.time()
-            metrics.inc("research_mcp_errors_total", host=server, kind="connect")
-            logger.warning(
-                "mcp connect failed, web search instead for 2 minutes",
-                server=server,
-                error=self._mcp_errors.get(server),
-            )
-            return None
+        return self.mcp.client(server, preset)
 
     def _mcp_drop(self, server: str, client: MCPClient, error: Exception) -> None:
-        """A client whose tools/list failed is dead: forget it so the next call reconnects (after the back-off)."""
-        with self._mcp_lock:
-            if self._mcp_clients.get(server) is client:
-                del self._mcp_clients[server]
-            self._mcp_failed[server] = time.time()
-            self._mcp_errors[server] = f"{type(error).__name__}: {str(error)[:200]}"
-        metrics.inc("research_mcp_errors_total", host=server, kind="tools_list")
-        logger.warning("mcp tools/list failed, server dropped", server=server, error=self._mcp_errors[server])
+        self.mcp.drop(server, client, error)
 
+    @property
+    def _mcp_clients(self) -> dict[str, MCPClient]:
+        return self.mcp.clients
+
+    @property
+    def _mcp_errors(self) -> dict[str, str]:
+        return self.mcp.errors
+
+    # ------------------------------------------------------------- research
     async def _queries(
         self, sq: SubQ, plan: dict, preset: Preset, budget: Budget, led: Ledger
     ) -> list[tuple[str, str]]:
@@ -302,7 +105,7 @@ class ResearchAgent:
             "fast",
             "You write precise web search queries. Output only the requested lines.",
             P.QUERIES.format(
-                today=_today(),
+                today=today(),
                 task_core=plan["task_core"],
                 intent=sq.intent,
                 subq=sq.text,
@@ -462,7 +265,7 @@ class ResearchAgent:
             }
             for t in mcp_tools
         ]
-        system = P.MCP_AGENT.format(today=_today(), task_core=plan["task_core"], subq=sq.text, max_calls=max_calls)
+        system = P.MCP_AGENT.format(today=today(), task_core=plan["task_core"], subq=sq.text, max_calls=max_calls)
         added = 0
 
         async def dispatch(tool: str, args: dict) -> str:
@@ -792,7 +595,7 @@ class ResearchAgent:
             own: The user's files and knowledge bases.
         """
         preset, budget = self.cfg.presets[preset_name], self.cfg.budgets[depth]
-        self.own = self._own_for(own, preset)
+        self.own = own_for(own, preset)
         if preset.budget:  # per-preset budget overrides (e.g. more pages for surveys)
             budget = dataclasses.replace(budget, **preset.budget)
         if preset.engine == "focus":

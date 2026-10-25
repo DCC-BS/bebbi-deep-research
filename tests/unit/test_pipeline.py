@@ -64,7 +64,7 @@ def test_validate_plan_maps_part_ids_through_the_kept_parts_and_skips_non_dicts(
         ],
         "sub_questions": [{"part": "b", "text": "x?"}, {"part": "c", "text": "y?"}, {"part": "a", "text": "z?"}],
     }
-    plan = agent._validate_plan(raw, "Aufgabe", preset, budget)
+    plan = agent.chat.validate_plan(raw, "Aufgabe", preset, budget)
     assert [p["title"] for p in plan["parts"]] == ["Erstens", "Zweitens"]
     assert [(q["text"], q["part"]) for q in plan["sub_questions"]] == [("x?", "P1"), ("y?", "P2"), ("z?", "P1")]
 
