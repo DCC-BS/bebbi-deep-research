@@ -96,8 +96,8 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 * Must bypass the proxy: vLLM, Firecrawl, Open WebUI, Postgres (all cluster-internal).
 * Depends on where they are reachable from: Serper (`google.serper.dev`) and the MCP servers (`mcp.opencaselaw.ch`
   external; `*.bs.ch` hosts may be internal). If a `*.bs.ch` MCP host is reachable only directly, add it to `NO_PROXY`;
-  if only via proxy, leave it out. A wrong choice shows up as connection errors in the MCP log lines of a run and the
-  engine silently falls back to web search.
+  if only via proxy, leave it out. A wrong choice shows up as connection errors in `stats.mcp_errors` of the job
+  (`GET /jobs/{id}`) and in its evidence trail, and the engine falls back to web search.
 
 ## Night window and daytime rule
 
@@ -111,12 +111,17 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 
 ## Scaling and GPU load
 
-* Load on vLLM = `workers x` the calls of one run. Each run issues LLM calls in parallel (the engine uses a
-  semaphore of 3 per job). Raise `RA_WORKERS` only after watching vLLM queue time (`vllm:num_requests_waiting`)
-  during the night.
+* Load on vLLM = `workers x` the calls of one run. Each run issues LLM calls in parallel: the pipeline engine works on
+  up to 3 sub-questions at once, each reading up to `fetch_per_subq` pages with embedding and extraction calls, so a
+  run can have about 15-20 LLM and embedding calls in flight. Clarify and plan calls of the chat come on top. Raise
+  `RA_WORKERS` only after watching vLLM queue time (`vllm:num_requests_waiting`) during the night.
 * More replicas multiply the worker counts. Jobs are claimed with an atomic `update ... where status='queued'`, so replicas
-  do not run the same job twice. One replica is the recommended setup; run more only after job claims carry an owner token (until then a stale re-queue can let two replicas work on the same job). The chart uses the `Recreate` strategy so that a rollout never runs two pods at once.
-* Token budgets per run are set by depth in `presets.yaml` (`quick` 200k, `standard` 450k, `deep` 900k tokens, hard stop).
+  do not run the same job twice, and every write of a run is guarded by its claim token (`owner`), so a run whose job was
+  re-queued by another replica cannot overwrite the result. One replica is still the recommended setup (worker counts
+  multiply with replicas). The chart uses the `Recreate` strategy so that a rollout never runs two pods at once.
+* Token budgets per run are set by depth in `presets.yaml` (`quick` 200k, `standard` 450k, `deep` 900k tokens). They are
+  not a hard stop: the pipeline engine starts no new research round above 80 % of the budget and the focus engine
+  withdraws its tools there, but writing the report is not capped. `RA_JOB_TIMEOUT_SECONDS` is the hard limit of a run.
 * Measure before allowing more daytime runs: `RA_DAY_WORKERS` is the only knob that moves load into office hours.
 
 ## Job lifecycle and restarts
@@ -228,5 +233,5 @@ also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and lo
 | Own sources: plan says "nicht lesbar" for a file or knowledge base the user can read in Open WebUI | the pipe checks with the chat user's rights inside Open WebUI; check the share settings of the knowledge base (read grant for the user or group) or whether the file belongs to the user or to a knowledge base they can read |
 | Own sources: "wird noch verarbeitet" / "keinen lesbaren Text" | Open WebUI (Docling) has not finished extracting the file, or extraction failed for it: check the Docling service and the file's processing status in Open WebUI |
 | Own sources: no upload button, or Open WebUI rewrites the question | the model entries need `capabilities.file_upload: true` and `file_context: false` (`deploy/openwebui/models.json`, re-import after upgrading the repo) |
-| Own sources: knowledge base "not reachable" in the report | `OWUI_URL` / `OWUI_API_KEY` of the service, `POST /api/v1/retrieval/query/collection` needs an admin key; log lines `knowledge query` show the ids queried |
+| Own sources: knowledge base "not reachable" in the report | `OWUI_URL` / `OWUI_API_KEY` of the service, `POST /api/v1/retrieval/query/collection` needs an admin key; log lines `knowledge query` (INFO, with `job_id`) show the ids queried |
 | Database | tables `drafts` and `jobs` and their indexes are created on start; new columns (`own_sources`, `owner`, ...) and indexes are added automatically to older databases; other schema changes still need a manual `alter table` |

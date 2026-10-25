@@ -1,8 +1,8 @@
 # Helm values of the bebbi-deep-research job service. Everything is configured here (GitOps, no click-ops).
 # Reference of all variables: docs/operations.md.
 
-replicaCount: 1            # 1 recommended (docs/operations.md). >1 only once job claims carry an owner token (stale re-queue
-                           # can otherwise let two replicas finish the same job); RA_WORKERS / RA_DAY_WORKERS are per replica.
+replicaCount: 1            # 1 recommended (docs/operations.md). Job claims carry an owner token, so more replicas do not
+                           # run a job twice; RA_WORKERS / RA_DAY_WORKERS are per replica (load on vLLM multiplies).
 
 image:
   repository: ghcr.io/dcc-bs/bebbi-deep-research

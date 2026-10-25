@@ -24,7 +24,7 @@ Daytime rule: only `quick` runs of a `focus` preset may start outside the night 
 ## Budgets (depth)
 
 `quick`, `standard`, `deep` in `budgets:`. Fields: `rounds`, `max_subq`, `queries_per_subq`, `fetch_per_subq`,
-`max_follow_up`, `max_tokens` (hard stop), `words_per_part`, `parts` (min, max parts), `focus_calls` (tool calls of the
+`max_follow_up`, `max_tokens` (research budget: no new round or tool call above 80 %; writing is not capped), `words_per_part`, `parts` (min, max parts), `focus_calls` (tool calls of the
 focus engine), `focus_words` (typical report length). A preset may override single fields with `budget:`.
 
 ## Preset fields

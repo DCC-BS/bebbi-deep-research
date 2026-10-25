@@ -1,4 +1,7 @@
-"""Job queue: night window, daytime rule, workers, delivery into the Open WebUI chat."""
+"""Job runner: claims queued jobs, runs them, re-queues stale ones, applies retention, delivers into the chat.
+
+The night window and the daytime rule are in `services/policy.py`.
+"""
 
 import asyncio
 import json
@@ -129,7 +132,6 @@ class JobRunner:
         self._loop_task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
-        """Stop the loop and cancel running jobs (they are re-queued for the next start)."""
         """Graceful shutdown: stop claiming, cancel running jobs and put them back into the queue."""
         self._stopping = True
         if self._loop_task:

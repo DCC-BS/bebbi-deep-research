@@ -142,7 +142,7 @@ class OwuiRetriever:
         s = self.settings
         if not (s.owui_url and s.owui_api_key):
             raise RuntimeError("OWUI_URL / OWUI_API_KEY not configured")
-        logger.debug("knowledge query", collection=collection.id, name=collection.name, query=query[:80])
+        logger.info("knowledge query", collection=collection.id, name=collection.name)  # never the query text
         async with self.http_factory() as http:
             r = await http.post(
                 f"{s.owui_url}/api/v1/retrieval/query/collection",
