@@ -16,3 +16,36 @@ jobs:
         uses: DCC-BS/ci-workflows/.github/workflows/ci.yml@2bfad28c27c02b4fe13dbadeb2b8ae970b2fae15
         with:
             check-command: "mise run ci-check"
+
+    # The queue (atomic claim, owner token, requeue, schema upgrade) runs on Postgres in Kubernetes; the shared
+    # backend-ci job above tests it on SQLite only. Same suites against a throwaway Postgres.
+    postgres:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        services:
+            postgres:
+                image: postgres:16-alpine
+                env:
+                    POSTGRES_PASSWORD: ci
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd "pg_isready -U postgres"
+                    --health-interval 3s
+                    --health-retries 20
+        env:
+            RA_TEST_DATABASE_URL: postgresql://postgres:ci@localhost:5432/postgres
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+            - name: Setup uv
+              uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8
+
+            - name: Integration tests (Postgres only)
+              run: uv run --locked python -m pytest tests/integration
+
+            - name: Unit tests on Postgres
+              env:
+                  APP_MODE: ci
+              run: uv run --locked python -m pytest tests/unit
