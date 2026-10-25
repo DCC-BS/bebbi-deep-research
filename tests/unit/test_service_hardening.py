@@ -121,6 +121,21 @@ async def test_setup_failure_ends_in_error_not_a_dead_task(tmp_path):
         assert "Unerwarteter Fehler" in j["error"]
 
 
+async def test_hung_run_is_stopped_by_the_job_timeout(tmp_path):
+    """A hung LLM or MCP call keeps the heartbeat alive (worker tick), so only the timeout frees the worker."""
+
+    class Hung(FakeAgent):
+        async def run(self, *a, **kw):
+            await asyncio.sleep(3600)
+
+    async with running(tmp_path, night_window=utc_window(True), job_timeout_seconds=0.3) as (c, app):
+        app.state.container.job_runner().make_agent = Hung
+        job = await submit(c)
+        j = await wait_status(c, job["job_id"], {"error"})
+        assert "Zeitlimit" in j["error"]
+        assert (await row(app, job["job_id"]))["owner"]  # stopped by this run, not re-queued as stale
+
+
 # ------------------------------------------------------------ M3: progress write must not abort the run
 async def test_progress_write_failure_does_not_abort_job(tmp_path):
     async with running(tmp_path, night_window=utc_window(True)) as (c, app):
@@ -274,3 +289,19 @@ def test_real_agent_factory_with_empty_api_key():
     s = AppConfig(token="t", hmac_secret="h", llm_base_url="http://llm/v1", search_url="u", firecrawl_url="u")
     agent = make_agent_factory(load_config(s.presets_path), s)("job1")
     assert agent is not None
+
+
+def test_agent_factory_passes_the_embedding_endpoint():
+    from bebbi_deep_research.engine import load_config
+    from bebbi_deep_research.services.jobs import make_agent_factory
+
+    env = {"RA_TOKEN": "t", "HMAC_SECRET": "h", "RA_LLM_BASE_URL": "http://llm/v1", "RA_LLM_API_KEY": "k-{job}"}
+    env |= {"RA_SEARCH_URL": "u", "RA_FIRECRAWL_URL": "u"}
+    s = AppConfig.from_env(env)
+    assert s.llm_embed_base_url == "" and s.llm_embed_api_key == ""
+    agent = make_agent_factory(load_config(s.presets_path), s)("job1")
+    assert str(agent.llm._embed_client.base_url) == "http://llm/v1/" and agent.llm._embed_client.api_key == "k-job1"
+    s = AppConfig.from_env(env | {"RA_LLM_EMBED_BASE_URL": "http://emb/v1", "RA_LLM_EMBED_API_KEY": "e-{job}"})
+    assert "e-{job}" not in str(s)  # masked in the log line like the other keys
+    agent = make_agent_factory(load_config(s.presets_path), s)("job2")
+    assert str(agent.llm._embed_client.base_url) == "http://emb/v1/" and agent.llm._embed_client.api_key == "e-job2"

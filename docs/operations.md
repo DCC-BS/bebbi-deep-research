@@ -30,6 +30,8 @@ The engine uses three roles: `think` (planning, research, writing), `fast` (deci
 |---|---|---|
 | `RA_LLM_BASE_URL` | required | e.g. `http://vllm.llm.svc:8000/v1` |
 | `RA_LLM_API_KEY` **S** | empty | `{job}` is replaced by the job id (per-job metering at the evaluation gateway) |
+| `RA_LLM_EMBED_BASE_URL` | empty | embeddings endpoint when a gateway serves them under another path than the chat models (KDKP: `.../kis/embeddings/v1` next to `.../kis/gemma4/v1`); empty: `RA_LLM_BASE_URL` |
+| `RA_LLM_EMBED_API_KEY` **S** | empty | key for `RA_LLM_EMBED_BASE_URL` (`{job}` as above); used only when that is set |
 | `RA_LLM_MODEL_THINK` / `_FAST` / `_EMBED` | `gemma-think` / `gemma-fast` / `qwen-embed` | real model names. Production: `RedHatAI/gemma-4-31B-it-NVFP4` for think and fast, `Qwen/Qwen3-Embedding-4B` for embed |
 | `RA_LLM_EXTRA_BODY_THINK` / `_FAST` | empty | JSON merged into every chat request of that role, over backend-common's thinking switch (`chat_template_kwargs.enable_thinking`: `true` for think, `false` for fast, always sent). Verify the key name against the model's chat template |
 
@@ -37,7 +39,7 @@ The LLM layer is backend-common's pydantic-ai `BaseAgent` (one per role): retrie
 (not of refused connections), `max_completion_tokens` per role (think 16000, fast 4000; an empty answer is retried once
 with twice the budget), one `llm_call` usage event per call, `ß` replaced by `ss` in every answer.
 
-The embed role needs `/v1/embeddings` on the same endpoint.
+The embed role needs `/v1/embeddings` on the same endpoint, or its own endpoint in `RA_LLM_EMBED_BASE_URL`.
 
 ### Search, fetch, MCP
 
@@ -72,6 +74,7 @@ Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded
 | `RA_QUOTA_PER_DAY` | `0` | jobs per user and 24 h, `0` = off (decision 2026-10-09). Exceeding returns HTTP 429 |
 | `RA_POLL_SECONDS` | `5` | worker loop interval |
 | `RA_STALE_SECONDS` | `120` | a running job without heartbeat for this long is re-queued (dead replica) |
+| `RA_JOB_TIMEOUT_SECONDS` | `3600` | a run that takes longer is stopped and reported as failed in the chat; a hung LLM or MCP call cannot block the queue |
 
 ### Delivery
 

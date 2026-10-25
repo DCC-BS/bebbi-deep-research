@@ -494,6 +494,10 @@ def test_forged_or_broken_marker_is_no_state():
         base64.urlsafe_b64encode(b"[1]"),
         base64.urlsafe_b64encode(b'"x"'),
         base64.urlsafe_b64encode(b'{"state": "job"}'),
+        base64.urlsafe_b64encode(b'{"state": "job", "job": "abc123def456#"}'),  # would drop ?user_id= (review D1)
+        base64.urlsafe_b64encode(b'{"state": "job", "job": "abc?user_id=victim"}'),
+        base64.urlsafe_b64encode(b'{"state": "job", "job": "../plans/x"}'),
+        base64.urlsafe_b64encode(b'{"state": "job", "job": 5}'),
         b"@@",
     ):
         msgs = [

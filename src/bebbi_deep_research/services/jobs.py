@@ -44,6 +44,8 @@ def describe_error(e: BaseException) -> str:
         reason = "Das Sprachmodell ist nicht erreichbar."
     elif isinstance(e, UnexpectedModelBehavior):
         reason = "Das Sprachmodell hat keine verwertbare Antwort geliefert."
+    elif isinstance(e, TimeoutError):
+        reason = "Die Recherche hat das Zeitlimit überschritten."
     elif isinstance(e, httpx.HTTPError):
         reason = "Ein Dienst der Recherche (Suche oder Seitenabruf) ist nicht erreichbar."
     else:
@@ -78,6 +80,8 @@ def make_agent_factory(cfg, settings: AppConfig) -> Callable[..., ResearchAgent]
             LlmSettings(
                 base_url=settings.llm_base_url,
                 api_key=settings.llm_api_key.replace("{job}", job_id),
+                embed_base_url=settings.llm_embed_base_url,
+                embed_api_key=settings.llm_embed_api_key.replace("{job}", job_id),
                 models={"think": settings.model_think, "fast": settings.model_fast, "embed": settings.model_embed},
                 extra_body={
                     r: b for r, b in (("think", settings.extra_body_think), ("fast", settings.extra_body_fast)) if b
@@ -308,9 +312,14 @@ class JobRunner:
             logger.info("job started", job=job_id, preset=job["preset"], depth=job["depth"])
             agent = self.make_agent(job_id, on_event)
             own = to_engine(json.loads(job.get("own_sources") or "null"), self.settings, self.http_factory)
-            res = await agent.run(
-                job["task"], job["preset"], job["depth"], plan=json.loads(job["plan"]), **({"own": own} if own else {})
-            )
+            async with asyncio.timeout(self.settings.job_timeout_seconds):
+                res = await agent.run(
+                    job["task"],
+                    job["preset"],
+                    job["depth"],
+                    plan=json.loads(job["plan"]),
+                    **({"own": own} if own else {}),
+                )
             stats = {**res.stats, "usage": res.usage}
             if not await self.db.execute(
                 "update jobs set status='done', finished=:t, report=:r, stats=:s, evidence=:e where " + guard,

@@ -58,6 +58,7 @@ _AUTOLINK = re.compile(r"<(https?://[^>\s]+)>")
 _HTML = re.compile(r"</?[A-Za-z][^>]*>|<!--.*?-->|<![A-Za-z][^>]*>|<\?[^>]*\?>", re.S)
 _MD_LINK = re.compile(r"\[(?P<t>[^\]]*)\]\(\s*<?(?P<u>[^)\s>]*)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
 _REF_DEF = re.compile(r"^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S.*$", re.M)
+_LINK_TARGET = re.compile(r"\]\(\s*<?(?P<u>[^)\s>]*)")
 
 
 def clean_text(text: str) -> str:
@@ -76,7 +77,12 @@ def sanitize_markdown(text: str, allowed_urls: set[str] | frozenset[str] = froze
     text = _AUTOLINK.sub(lambda m: m.group(0) if m.group(1) in allowed_urls else "", text)
     text = _HTML.sub("", text)
     text = _REF_DEF.sub("", text)
-    return _MD_LINK.sub(lambda m: m.group(0) if m.group("u") in allowed_urls else m.group("t"), text)
+    text = _MD_LINK.sub(lambda m: m.group(0) if m.group("u") in allowed_urls else m.group("t"), text)
+    # The patterns above miss nested or escaped brackets (`![a[b]c](url)`, `![a\]b](url)`), which Markdown still
+    # renders as an image or link. Escaping breaks that syntax: `![` never starts an image, and `](` only starts a
+    # link target when the target is a registered source.
+    text = text.replace("![", "!\\[")
+    return _LINK_TARGET.sub(lambda m: m.group(0) if m.group("u") in allowed_urls else "]\\(" + m.group(0)[2:], text)
 
 
 def split_report(report: str) -> tuple[str, str, list[str]]:

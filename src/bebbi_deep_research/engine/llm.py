@@ -79,6 +79,9 @@ class LlmSettings:
 
     base_url: str
     api_key: str = ""
+    # Embeddings from another endpoint when the gateway serves them under their own path; empty: base_url / api_key.
+    embed_base_url: str = ""
+    embed_api_key: str = ""
     models: dict[str, str] = field(
         default_factory=lambda: {"think": "gemma-think", "fast": "gemma-fast", "embed": "qwen-embed"}
     )
@@ -194,7 +197,9 @@ class LLM:
         self.settings = settings
         self.agents = {role: RoleAgent(settings.role(role), model) for role in ROLES}
         self._embed_client = AsyncOpenAI(
-            base_url=settings.base_url, api_key=settings.api_key or "none", timeout=settings.timeout
+            base_url=settings.embed_base_url or settings.base_url,
+            api_key=(settings.embed_api_key if settings.embed_base_url else settings.api_key) or "none",
+            timeout=settings.timeout,
         )
         self.embedder = Embedder(
             OpenAIEmbeddingModel(settings.models["embed"], provider=OpenAIProvider(openai_client=self._embed_client))
