@@ -780,3 +780,49 @@ def test_stored_parent_reads_the_chat_through_open_webui(monkeypatch):
         asyncio.run(mod._stored_parent(None, meta("a1"))) is None and asyncio.run(mod._stored_parent("c1", {})) is None
     )
     assert seen == [("c1", "a1"), ("c1", "u0")]
+
+
+def test_stored_parent_after_regenerate_uses_user_message_id_of_the_same_chat(monkeypatch):
+    """Regenerating a reply: the browser sends no `user_message`; Open WebUI sets `metadata["user_message_id"]`. Its
+    parent is the assistant message with the marker."""
+    import sys
+    import types
+
+    mod = load_pipe()
+    seen = []
+    store = {
+        "u2": {"role": "user", "parentId": "a1"},
+        "a1": {"role": "assistant", "content": "x", "parentId": "u1"},
+        "u0": {"role": "user"},  # a user message without parent: first message of the chat
+    }
+
+    class Chats:
+        @staticmethod
+        async def get_message_by_id_and_message_id(chat_id, message_id):
+            seen.append((chat_id, message_id))
+            return store.get(message_id)
+
+    pkg, models, chats = (types.ModuleType(n) for n in ("open_webui", "open_webui.models", "open_webui.models.chats"))
+    chats.Chats = Chats
+    for name, module in (("open_webui", pkg), ("open_webui.models", models), ("open_webui.models.chats", chats)):
+        monkeypatch.setitem(sys.modules, name, module)
+    assert asyncio.run(mod._stored_parent("c1", {"user_message_id": "u2"}))["role"] == "assistant"
+    assert seen == [("c1", "u2"), ("c1", "a1")]  # always the chat of the request
+    assert asyncio.run(mod._stored_parent("c1", {"user_message": None, "user_message_id": "u0"})) is None
+    assert asyncio.run(mod._stored_parent("c1", {"user_message_id": "missing"})) is None
+    # `user_message` with a parent wins, no second lookup
+    seen.clear()
+    assert asyncio.run(mod._stored_parent("c1", {"user_message": {"parentId": "a1"}, "user_message_id": "u2"}))
+    assert seen == [("c1", "a1")]
+
+
+def test_a_failed_state_lookup_is_logged(monkeypatch, caplog):
+    mod = load_pipe()
+
+    async def fails(chat_id, metadata):
+        raise ImportError("moved")
+
+    monkeypatch.setattr(mod, "_stored_parent", fails)
+    with caplog.at_level("WARNING"):
+        assert asyncio.run(mod._state_of_chat([{"role": "user", "content": "x"}], "c1", {})) == {}
+    assert "ImportError" in caplog.text and "moved" in caplog.text

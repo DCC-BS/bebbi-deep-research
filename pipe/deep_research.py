@@ -22,6 +22,7 @@ import base64
 import contextvars
 import io
 import json
+import logging
 import re
 import time
 from urllib.parse import quote
@@ -32,6 +33,7 @@ from pydantic import BaseModel, Field
 # The state marker is a markdown link reference definition with a comment label: valid markdown, never rendered.
 # (An HTML comment is shown as text by the Open WebUI renderer.) The payload is base64 so no markdown syntax can
 # break it.
+logger = logging.getLogger(__name__)
 MARK = re.compile(r"^\[//\]: # \(research-agent:([A-Za-z0-9_=-]+)\)[ \t]*$", re.M)
 ATTACHED = re.compile(
     r"\A\s*<attached_files>.*?</attached_files>\s*", re.S
@@ -354,9 +356,20 @@ async def _stored_parent(chat_id: str | None, metadata: dict | None) -> dict | N
 
     Since Open WebUI 0.12.4 context compaction also runs in short chats (user, assistant, user) that are over the token
     threshold, and it summarizes the assistant message away, together with our state marker. The chat in the database
-    still has it."""
-    parent = ((metadata or {}).get("user_message") or {}).get("parentId")
-    if not (chat_id and isinstance(parent, str) and parent):
+    still has it. The user message comes from `__metadata__["user_message"]`; when a reply is regenerated the browser
+    sends none and Open WebUI sets `__metadata__["user_message_id"]` itself (main.py), so that message is read from the
+    same chat to find its parent."""
+    if not chat_id:
+        return None
+    metadata = metadata or {}
+    parent = (metadata.get("user_message") or {}).get("parentId")
+    uid = metadata.get("user_message_id")
+    if not (isinstance(parent, str) and parent) and isinstance(uid, str) and uid:
+        from open_webui.models.chats import Chats
+
+        user_message = await Chats.get_message_by_id_and_message_id(chat_id, uid)
+        parent = (user_message or {}).get("parentId")
+    if not (isinstance(parent, str) and parent):
         return None
     from open_webui.models.chats import Chats
 
@@ -372,7 +385,8 @@ async def _state_of_chat(messages: list[dict], chat_id: str | None, metadata: di
         return {}
     try:
         stored = await _stored_parent(chat_id, metadata)
-    except Exception:  # no Open WebUI around (script), or the lookup failed: as before, no state
+    except Exception as e:  # no Open WebUI around (script), or the lookup failed: as before, no state
+        logger.warning("chat state not read from the stored chat (%s: %s)", type(e).__name__, e)
         return {}
     return _state([{"role": "assistant", "content": stored.get("content") or ""}, {}]) if stored else {}
 
