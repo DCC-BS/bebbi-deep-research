@@ -138,6 +138,14 @@ Bearer token on all except probes and metrics. Errors use backend-common's forma
 `{"errorId", "status", "debugMessage"}`; `debugMessage` is German text the pipe shows as it is (request validation errors
 keep FastAPI's `detail`).
 
+**API version.** The pipe and the Word action send `X-DR-API-Version: 1` with every call; every answer carries the
+service's version in the same header. A caller with another major version gets HTTP 409 with a German `debugMessage`
+("... passt nicht zur Version des Recherche-Dienstes ..."), which the pipe shows in the chat; a header that is not a
+number gets 400. Calls without the header (n8n, scripts) are not checked. Request bodies refuse unknown fields (HTTP
+422), so a field one side renamed fails visibly instead of being ignored. Raise `API_VERSION` in
+`routers/contract.py`, `pipe/deep_research.py` and `pipe/deep_research_download.py` together when a request or
+response changes in a way the other side cannot handle; additive response fields need no new version.
+
 | Method, path | Purpose |
 |---|---|
 | `GET /health/liveness`, `/health/startup` | process up / started (backend-common probes) |

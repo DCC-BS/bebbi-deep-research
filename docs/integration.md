@@ -115,6 +115,10 @@ Both still accept an admin key at v0.12.3 (`BYPASS_ADMIN_ACCESS_CONTROL` default
 `/api/v1/retrieval` and `/api/v1/files`), create the key in Settings, Account, API keys, store it as `OWUI_API_KEY`. The key no longer
 needs `/api/v1/chats`.
 
+Pipe, action and service share an API version (`X-DR-API-Version`, now `1`; [operations.md](operations.md#api)). Deploy
+the pipe from the same release as the service: a pipe of another version gets a German message in the chat ("Pipe und
+Dienst müssen gemeinsam aktualisiert werden") instead of a silently degraded answer.
+
 The pipe sends the chat user's id (`user_id`) on `POST /plans`, `POST /plans/{id}/edit`, `POST /jobs` and as `?user_id=` on `GET /jobs/{id}`
 (and the other job reads). When both the stored draft/job and the request carry a user id and they differ, the service answers 404. Calls
 without `user_id` (n8n, scripts) are not checked.

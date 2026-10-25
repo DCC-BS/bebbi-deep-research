@@ -8,9 +8,10 @@ from fastapi import APIRouter, Depends
 from bebbi_deep_research.container import Container
 from bebbi_deep_research.models.research import ClarifyRequest, CreatePlanRequest, EditPlanRequest
 from bebbi_deep_research.routers.auth import require_token
+from bebbi_deep_research.routers.contract import require_api_version
 from bebbi_deep_research.services.research_service import ResearchService
 
-router = APIRouter(tags=["research"], dependencies=[Depends(require_token)])
+router = APIRouter(tags=["research"], dependencies=[Depends(require_token), Depends(require_api_version)])
 
 
 @router.get("/presets")

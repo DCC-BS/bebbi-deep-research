@@ -2,7 +2,7 @@
 
 import os
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 try:
     # request size limit for one file text: twice RA_OWN_MAX_FILE_CHARS, so that longer files are still cut with a note
@@ -14,6 +14,8 @@ PREVIEW_CHARS = 1500  # what the plan step keeps of a file (the job gets the who
 
 class OwnFileRequest(BaseModel):
     """An uploaded file the chat user may read: its extracted text and where it can be opened."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str = Field(max_length=200)
     name: str = Field(max_length=500)
@@ -28,12 +30,16 @@ class OwnFileRequest(BaseModel):
 class OwnCollectionRequest(BaseModel):
     """A knowledge base the chat user may read."""
 
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(max_length=200)
     name: str = Field("", max_length=500)
 
 
 class OwnSourcesRequest(BaseModel):
     """The user's own sources as the pipe checked them (files, knowledge bases, remarks)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     files: list[OwnFileRequest] = Field(default_factory=list, max_length=50)
     collections: list[OwnCollectionRequest] = Field(default_factory=list, max_length=50)

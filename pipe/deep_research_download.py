@@ -18,6 +18,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+API_VERSION = "1"  # version of the service API, as in pipe/deep_research.py
 
 
 async def store_user_file(request, user_id: str, filename: str, data: bytes, content_type: str) -> dict:
@@ -65,7 +66,7 @@ class Action:
             return await http.get(
                 self.valves.SERVICE_URL.rstrip("/") + path,
                 params=params,
-                headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}"},
+                headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}", "X-DR-API-Version": API_VERSION},
             )
 
     async def action(self, body: dict, __user__: dict | None = None, __event_emitter__=None, __request__=None):
@@ -80,6 +81,8 @@ class Action:
             found = await self._get("/jobs/lookup", {"chat_id": chat_id, "message_id": message_id, "user_id": user_id})
             if found.status_code == 404:
                 return await toast("warning", "Zu dieser Nachricht gehört keine Recherche.")
+            if found.status_code == 409:  # another API version: the service says so in German
+                return await toast("error", str(found.json().get("debugMessage") or found.text)[:300])
             found.raise_for_status()
             job = found.json()
             if job["status"] != "done":

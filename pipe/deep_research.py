@@ -39,6 +39,9 @@ ATTACHED = re.compile(
 # (card closed or timed out, browser gone, no browser session) counts as "no": nothing runs, a new message starts over.
 APPROVE, CHANGE, DISCARD = "Freigeben", "Ändern", "Verwerfen"
 AUTO = "auto"  # id of the one model that lets the user choose the preset per task
+# Version of the service API this pipe speaks (service: routers/contract.py). Sent with every call; the service refuses
+# another version with a German message, so a pipe and a service that do not fit together fail visibly.
+API_VERSION = "1"
 DEPTH_WORDS = {
     "quick": re.compile(r"\b(schnell|kurz|quick)\b", re.I),
     "deep": re.compile(r"\b(gründlich|gruendlich|tief|deep)\b", re.I),
@@ -412,14 +415,14 @@ class Pipe:
             out += [{"id": name, "name": f"Deep Research · {label}"} for name, label in self._labels().items()]
         return out
 
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}", "X-DR-API-Version": API_VERSION}
+
     async def _api(self, method: str, path: str, body: dict | None = None) -> dict:
         try:
             async with httpx.AsyncClient(timeout=300) as http:
                 r = await http.request(
-                    method,
-                    self.valves.SERVICE_URL.rstrip("/") + path,
-                    json=body,
-                    headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}"},
+                    method, self.valves.SERVICE_URL.rstrip("/") + path, json=body, headers=self._headers()
                 )
         except httpx.TransportError as e:
             raise RuntimeError(
@@ -433,16 +436,19 @@ class Pipe:
             detail = body.get("debugMessage") or body.get("detail") or r.text
             if r.status_code == 404:
                 raise NotFound(detail)
-            raise (UserError if r.status_code == 422 and isinstance(detail, str) else RuntimeError)(detail)
+            if r.status_code == 422 and not isinstance(detail, str):  # request validation: the API does not fit
+                raise RuntimeError(
+                    "Der Recherche-Dienst versteht die Anfrage nicht (die Versionen von Pipe und Dienst passen "
+                    "nicht zusammen). Bitte wenden Sie sich an den Betrieb."
+                )
+            # 422: a refusal meant for the user; 409: another API version (German text of the service)
+            raise (UserError if r.status_code in (409, 422) and isinstance(detail, str) else RuntimeError)(detail)
         return r.json()
 
     async def _download(self, path: str) -> bytes:
         try:
             async with httpx.AsyncClient(timeout=120) as http:
-                r = await http.get(
-                    self.valves.SERVICE_URL.rstrip("/") + path,
-                    headers={"Authorization": f"Bearer {self.valves.SERVICE_TOKEN}"},
-                )
+                r = await http.get(self.valves.SERVICE_URL.rstrip("/") + path, headers=self._headers())
         except httpx.TransportError as e:
             raise RuntimeError(f"Der Recherche-Dienst ist nicht erreichbar ({type(e).__name__})") from e
         if r.status_code >= 400:

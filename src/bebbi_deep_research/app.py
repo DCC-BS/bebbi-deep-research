@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from bebbi_deep_research.container import Container
 from bebbi_deep_research.routers import jobs, monitoring, research
+from bebbi_deep_research.routers.contract import API_VERSION, HEADER
 from bebbi_deep_research.services.policy import describe_error
 from bebbi_deep_research.utils.app_config import AppConfig
 
@@ -81,6 +82,14 @@ def create_app(container: Container | None = None) -> FastAPI:
     inject_api_error_handler(app)
     app.add_exception_handler(Exception, unexpected_error)
     add_logging_middleware(app)
+
+    @app.middleware("http")
+    async def api_version_header(request: Request, call_next):
+        """Name the API version in every answer (the pipe and other callers can check what they talk to)."""
+        response = await call_next(request)
+        response.headers[HEADER] = str(API_VERSION)
+        return response
+
     app.include_router(health_probe_router(service_dependencies(config)))
     app.include_router(monitoring.router)
     app.include_router(research.router)
