@@ -1,4 +1,4 @@
-"""Job endpoints: submit, status and report, Word file, evidence."""
+"""Job endpoints: submit, status and report, Word file, evidence, cancel."""
 
 from typing import Any
 
@@ -59,6 +59,17 @@ async def get_word_file(
     return Response(
         word.data, media_type=MIME, headers={"Content-Disposition": f'attachment; filename="{word.filename}"'}
     )
+
+
+@router.post("/{job_id}/cancel")
+@inject
+async def cancel_job(
+    job_id: str,
+    user_id: str | None = None,
+    service: ResearchService = Depends(Provide[Container.research_service]),
+) -> dict[str, str]:
+    """Cancel a queued or running job (409 if it has already ended)."""
+    return await service.cancel(job_id, user_id)
 
 
 @router.get("/{job_id}/evidence")

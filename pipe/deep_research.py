@@ -40,6 +40,8 @@ ATTACHED = re.compile(
 # (card closed or timed out, browser gone, no browser session) counts as "no": nothing runs, a new message starts over.
 APPROVE, CHANGE, DISCARD = "Freigeben", "Ändern", "Verwerfen"
 AUTO = "auto"  # id of the one model that lets the user choose the preset per task
+CANCEL_WORDS = {"abbrechen", "recherche abbrechen", "stopp"}  # the whole message, nothing else, cancels a queued job
+CANCELLED = "Die Recherche wurde abgebrochen. Es wird kein Bericht erstellt."
 # Version of the service API this pipe speaks (service: routers/contract.py). Sent with every call; the service refuses
 # another version with a German message, so a pipe and a service that do not fit together fail visibly.
 API_VERSION = "1"
@@ -729,15 +731,23 @@ class Pipe:
             st = _state(messages)
             # --- running / finished job: report status or result
             if st.get("state") == "job":
+                if text.strip().strip(".!").lower() in CANCEL_WORDS:
+                    try:
+                        await self._api("POST", _jpath(f"/jobs/{quote(st['job'], safe='')}/cancel", uid))
+                        return CANCELLED
+                    except UserError:
+                        pass  # it has ended already: show what there is
                 job = await self._api("GET", _jpath(f"/jobs/{quote(st['job'], safe='')}", uid))
                 if job["status"] == "done":
                     return await self._publish(job, __event_emitter__, __user__, __request__)
                 if job["status"] == "error":
                     return f"Die Recherche ist fehlgeschlagen: {job.get('error')}"
+                if job["status"] == "cancelled":
+                    return CANCELLED
                 last = job["events"][-1]["text"] if job["events"] else "wartet in der Warteschlange"
                 return (
-                    f"Die Recherche läuft noch ({job['status']}: {last}). Der Bericht erscheint in diesem Chat."
-                    + _marker(st)
+                    f"Die Recherche läuft noch ({job['status']}: {last}). Der Bericht erscheint in diesem Chat. "
+                    "Schreiben Sie **abbrechen**, um sie abzubrechen." + _marker(st)
                 )
 
             # --- new task (or answers to clarifying questions)

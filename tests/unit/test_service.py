@@ -27,7 +27,7 @@ async def test_probes_and_auth(tmp_path):
         anonymous = httpx.AsyncClient(transport=c._transport, base_url="http://t")
         r = await anonymous.post("/clarify", json={"task": "x"})
         assert r.status_code == 401 and r.json()["errorId"] == "authentication_failed"
-        assert (await c.get("/metrics")).text.count("research_jobs{") == 5
+        assert (await c.get("/metrics")).text.count("research_jobs{") == 6
 
 
 async def test_readiness_fails_without_the_database(tmp_path):

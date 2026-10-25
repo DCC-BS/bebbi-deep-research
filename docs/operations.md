@@ -58,7 +58,7 @@ The embed role needs `/v1/embeddings` on the same endpoint, or its own endpoint 
 | `RA_OWN_MAX_COLLECTIONS` | `5` | knowledge bases per research |
 
 File texts are stored with the job (`jobs.own_sources`; drafts keep a 1,500-character preview) only until the run ends: when the job
-becomes `done` or `error` the texts are removed and only names, sizes, links and knowledge base ids stay (enough for `GET /jobs/{id}`,
+becomes `done`, `error` or `cancelled` the texts are removed and only names, sizes, links and knowledge base ids stay (enough for `GET /jobs/{id}`,
 delivery and the Word file). See [Retention](#job-lifecycle-and-restarts). Knowledge bases are read at run time through
 `OWUI_URL`/`OWUI_API_KEY` (`POST /api/v1/retrieval/query/collection`, one stored id at a time, logged as `knowledge query`); without both
 variables a knowledge base cannot be used (the tool reports "not reachable" to the model and the report says so under open points).
@@ -121,13 +121,19 @@ All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and
 
 ## Job lifecycle and restarts
 
-`queued` to `starting` to `running` to `done` or `error`. Events (status lines) are stored with the job (last 50).
+`queued` to `starting` to `running` to `done` or `error`; `cancelled` from `queued`, `starting` or `running`. Events
+(status lines) are stored with the job (last 50).
+
+* **Cancel:** `POST /jobs/{id}/cancel?user_id=` (the pipe: the user writes **abbrechen** in the chat while the job
+  waits or runs). The job becomes `cancelled`, a run on this replica stops at once, a run on another replica at its
+  next heartbeat (`RA_POLL_SECONDS`); the chat message of the job gets "Die Recherche wurde abgebrochen. Es wird kein
+  Bericht erstellt." through the delivery route.
 
 * **Graceful shutdown (SIGTERM):** running jobs are cancelled and put back to `queued`; they restart from the beginning on
   the next start (no partial resume). uvicorn waits up to 20 s (`--timeout-graceful-shutdown` in the Dockerfile entrypoint); the chart sets `terminationGracePeriodSeconds: 45`, keep it above that plus the re-queue.
 * **Crash / OOM kill:** the heartbeat (every worker tick) stops; after `RA_STALE_SECONDS` any replica re-queues the job.
 * **Failure:** the job becomes `error` with the message; the message is also written into the chat.
-* **Retention** (hourly, in the worker loop): drafts older than 14 days are deleted; finished jobs (`done`, `error`) with
+* **Retention** (hourly, in the worker loop): drafts older than 14 days are deleted; finished jobs (`done`, `error`, `cancelled`) with
   their report, evidence and own-source metadata are deleted `RA_JOB_RETENTION_DAYS` (365) days after they finished.
   Uploaded file texts are removed from a job as soon as it ends (they are needed only by the run; jobs of older
   versions are cleaned by the same hourly pass). Queued and running jobs are never deleted.
@@ -161,6 +167,7 @@ response changes in a way the other side cannot handle; additive response fields
 | `GET /jobs/{id}/report.docx` | the report as Word file (409 while the job runs) |
 | `GET /jobs/lookup?chat_id&message_id&user_id` | job that delivers into a chat message (used by the download action) |
 | `GET /jobs/{id}/evidence` | evidence trail: sources, queries, pages, quotes |
+| `POST /jobs/{id}/cancel?user_id` | cancel a queued or running job: `{job_id, status: "cancelled"}`; 404 for an unknown or foreign job, 409 (German message) if it has ended |
 
 ## NetworkPolicy
 
@@ -198,7 +205,8 @@ the pipe and the Word action set to `<chat_id>:<message_id>` of the Open WebUI c
 the `request_id` of its submit (`jobs.request_id`), and every line of its run (engine, delivery, errors, re-delivery)
 carries `job_id` and that `request_id`, so `request_id` finds a chat's requests and its night run. Job messages: `job queued`,
 `job started`, `job done` (with `runtime_s`, `calls`, `prompt_tokens`, `completion_tokens`), `job failed`,
-`job re-queued on shutdown`, `delivery ok` / `delivery failed`, `re-queued stale jobs`. Usage events (`app_event`)
+`job re-queued on shutdown`, `job cancelled` / `run stopped: job cancelled`, `delivery ok` / `delivery failed`,
+`re-queued stale jobs`. Usage events (`app_event`)
 `research.plan` and `research.submit` carry a pseudonymised user id (HMAC), never the raw id. Token usage per run is
 also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and log shipping.
 

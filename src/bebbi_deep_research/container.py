@@ -22,4 +22,4 @@ class Container(containers.DeclarativeContainer):
     http_factory = providers.Object(None)
     usage = providers.Singleton(UsageTrackingService, config.provided.hmac_secret)
     job_runner = providers.Singleton(JobRunner, config, db, presets, agent_factory, http_factory)
-    research_service = providers.Singleton(ResearchService, config, presets, db, agent_factory, usage)
+    research_service = providers.Singleton(ResearchService, config, presets, db, agent_factory, usage, job_runner)

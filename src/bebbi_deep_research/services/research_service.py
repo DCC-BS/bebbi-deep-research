@@ -70,6 +70,7 @@ class ResearchService:
         db: DB,
         agent_factory: Callable[..., Any],
         usage: UsageTrackingService,
+        runner: Any = None,
     ) -> None:
         """Initialize the service.
 
@@ -79,12 +80,14 @@ class ResearchService:
             db: The jobs and drafts database.
             agent_factory: ``agent_factory(job_id, on_event=None)`` returns an object with clarify, plan, edit_plan.
             usage: Usage events with pseudonymised user ids.
+            runner: The job runner (cancels runs and tells the chat).
         """
         self.settings = settings
         self.presets = presets
         self.db = db
         self.agent_factory = agent_factory
         self.usage = usage
+        self.runner = runner
 
     def _own_for(
         self, preset: str, own: OwnSourcesRequest | None, preview: bool
@@ -342,6 +345,18 @@ class ResearchService:
         )
         return WordFile(data, docx_filename(report_title(job["report"]), job["finished"], self.settings.timezone))
 
+    async def cancel(self, job_id: str, user_id: str | None) -> dict[str, str]:
+        """Cancel a queued or running job; the chat message of the job says so.
+
+        Raises:
+            ApiErrorException: 404 for an unknown or foreign job, 409 if the job has already ended.
+        """
+        job = await self._job(job_id, user_id, "id, user_id, chat_id, message_id, status, own_sources, request_id")
+        if job["status"] not in ("queued", "starting", "running") or not await self.runner.cancel(job):
+            raise conflict("Die Recherche ist bereits beendet und kann nicht mehr abgebrochen werden.")
+        self.usage.log_event("research.cancel", user_id)
+        return {"job_id": job_id, "status": "cancelled"}
+
     async def evidence(self, job_id: str, user_id: str | None) -> dict[str, Any]:
         """Return the evidence ledger of a job (cards with quotes and URLs)."""
         job = await self._job(job_id, user_id, "user_id, evidence")
@@ -354,7 +369,7 @@ class ResearchService:
         lines = ["# TYPE research_jobs gauge"]
         lines += [
             f'research_jobs{{status="{s}"}} {counts.get(s, 0)}'
-            for s in ("queued", "starting", "running", "done", "error")
+            for s in ("queued", "starting", "running", "done", "error", "cancelled")
         ]
         lines += ["# TYPE research_in_night_window gauge", f"research_in_night_window {int(in_window(self.settings))}"]
         return "\n".join(lines) + "\n"

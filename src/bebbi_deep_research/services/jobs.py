@@ -21,7 +21,8 @@ from bebbi_deep_research.utils.app_config import AppConfig
 logger = get_logger(__name__)
 LIVE = ("starting", "running")
 MAX_ATTEMPTS = 3  # a job that was interrupted (pod killed, stalled) this often is given up with an error
-FINISHED = ("done", "error")
+FINISHED = ("done", "error", "cancelled")
+CANCELLED_TEXT = "Die Recherche wurde abgebrochen. Es wird kein Bericht erstellt."
 DRAFT_DAYS = 14
 
 
@@ -108,7 +109,8 @@ class JobRunner:
         # job id -> claim token of this run (only the claiming run may write the final status)
         self.owners: dict[str, str] = {}
         self.day: set[str] = set()  # running jobs that took a daytime slot
-        self._bg: set[asyncio.Task] = set()  # re-deliveries
+        self._bg: set[asyncio.Task] = set()  # re-deliveries, cancel notices
+        self._cancelled: set[str] = set()  # local runs stopped because their job was cancelled
         self._loop_task: asyncio.Task | None = None
         self._stopping = False
         self._last_sweep = 0.0
@@ -180,12 +182,16 @@ class JobRunner:
         now = time.time()
         # heartbeat for our jobs; jobs of dead replicas (no heartbeat) go back to the queue
         for jid in list(self.tasks):
-            await self.db.execute(
+            alive = await self.db.execute(
                 "update jobs set heartbeat=:h where id=:i and owner=:o and status in ('starting','running')",
                 h=now,
                 i=jid,
                 o=self.owners.get(jid, ""),
             )
+            if not alive and not self.tasks[jid].done():  # cancelled through another replica: stop our run
+                rows = await self.db.run("select status from jobs where id=:i", i=jid)
+                if rows and rows[0]["status"] == "cancelled":
+                    self._stop_run(jid)
         stale = "status in ('starting','running') and coalesce(heartbeat, created) < :t"
         for r in await self.db.run(
             f"select id, user_id, chat_id, message_id, own_sources, request_id from jobs where {stale} "
@@ -252,6 +258,34 @@ class JobRunner:
         if now - self._last_sweep > 60:
             self._last_sweep = now
             await self._sweep_deliveries(now)
+
+    def _stop_run(self, job_id: str) -> None:
+        task = self.tasks.get(job_id)
+        if task is not None and not task.done():
+            self._cancelled.add(job_id)
+            task.cancel()
+
+    async def cancel(self, job: dict) -> bool:
+        """Cancel a queued or running job: status `cancelled`, the run stops, the chat is told in German.
+
+        `job` is the job's row (id, own_sources and the delivery fields). Returns False if the job had already ended.
+        """
+        if not await self.db.execute(
+            "update jobs set status='cancelled', finished=:f, error=:e, owner=null, own_sources=:o "
+            "where id=:i and status in ('queued','starting','running')",
+            f=time.time(),
+            e=CANCELLED_TEXT,
+            o=_no_texts(job.get("own_sources")),
+            i=job["id"],
+        ):
+            return False
+        with log_context(job):
+            logger.info("job cancelled")
+            self._stop_run(job["id"])  # a run on another replica stops at its next heartbeat
+            t = asyncio.create_task(self._safe_deliver(job, CANCELLED_TEXT))
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+        return True
 
     async def _sweep_deliveries(self, now: float) -> None:
         """Deliver finished jobs again whose delivery failed or was cut off by a shutdown (up to 3 times)."""
@@ -358,7 +392,11 @@ class JobRunner:
                     o=owner,
                 )
             )
-            logger.warning("job re-queued on shutdown")
+            if job_id in self._cancelled:
+                self._cancelled.discard(job_id)
+                logger.info("run stopped: job cancelled")
+            else:
+                logger.warning("job re-queued on shutdown")
             raise
         except Exception as e:
             logger.error("job failed", error=repr(e)[:500])

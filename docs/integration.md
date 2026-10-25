@@ -159,7 +159,10 @@ The manifold creates the model "Deep Research" (`bebbi_deep_research.auto`) auto
 3. For now every job runs in the night window; starting right away is not offered (the service still accepts
    `when=now` for its own API). The message says the job is queued. When the job finishes, the service replaces the
    assistant message content with the report.
-4. **Fallback:** the queued message carries a hidden state marker (`[//]: # (research-agent:...)`). If the user writes
+4. **Cancel:** while the job waits or runs, a message that is only **abbrechen** (or "Recherche abbrechen", "stopp")
+   cancels it (`POST /jobs/{id}/cancel`); the status answer says so. The queued message then gets "Die Recherche wurde
+   abgebrochen" from the service.
+5. **Fallback:** the queued message carries a hidden state marker (`[//]: # (research-agent:...)`). If the user writes
    again in that chat before the delivery, the pipe asks the service for the job and returns the report (or status) in the
    new reply. If the delivery failed, the report is retrievable this way and via `GET /jobs/{id}`.
 
@@ -282,7 +285,7 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
 2. **Service** (`services/own_sources.py`). Applies the limits (`RA_OWN_MAX_FILES` 10, `RA_OWN_MAX_FILE_CHARS` 2,000,000, `RA_OWN_MAX_COLLECTIONS` 5) and
    reports what it cut, in German, back to the pipe (shown in the plan and in the "queued" message). The plan step stores previews with the
    draft; the job stores the full texts and the knowledge base ids (`jobs.own_sources`), so a night run does not depend on the user's session.
-   The texts are removed when the job ends (`done` or `error`); the job is deleted after `RA_JOB_RETENTION_DAYS` (365).
+   The texts are removed when the job ends (`done`, `error` or `cancelled`); the job is deleted after `RA_JOB_RETENTION_DAYS` (365).
    Old databases get the column added on start. `GET /jobs/{id}` returns names and sizes (`own_sources`), never texts.
 3. **Knowledge bases at run time**: the engine tool `knowledge_search(query)` asks `OwuiRetriever`, which POSTs to
    `/api/v1/retrieval/query/collection` with the service's admin key for **one stored id at a time**. The tool has no collection argument, the
@@ -309,7 +312,7 @@ Verified against Open WebUI v0.11.4, see section 7, scenarios 9 to 13.
   running does the pipe say so ("enthält keinen lesbaren Text" / "wird noch verarbeitet") and leave the file out.
 * Attachments of the type `url`, `note`, `chat`, `folder` are reported and not used. Images are ignored.
 * A knowledge base is approved when the plan is approved. If the user loses access before a night run starts, the run still reads it with
-  the service key (the content was approved by the system at approval time). Delete or re-share in Open WebUI and cancel the job if that matters.
+  the service key (the content was approved by the system at approval time). Delete or re-share in Open WebUI and cancel the job (`POST /jobs/{id}/cancel`, or "abbrechen" in the chat) if that matters.
 * The service trusts the pipe (shared bearer token). Anyone who can call the service with that token can name any knowledge base id; keep
   the NetworkPolicy and the token as described in section 3.
 * Retrieval quality for knowledge bases is Open WebUI's (its embedding model, hybrid search and `k` settings, here `k` = 6 chunks per query).
