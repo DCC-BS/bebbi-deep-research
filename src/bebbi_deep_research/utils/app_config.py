@@ -98,6 +98,7 @@ class AppConfig(AbstractAppConfig):
     poll_seconds: float = Field(default=5.0, gt=0)
     stale_seconds: float = Field(default=120.0, gt=0)
     job_timeout_seconds: float = Field(default=3600.0, gt=0, description="A run that takes longer is stopped")
+    job_retention_days: int = Field(default=365, ge=1, description="Finished jobs are deleted after this many days")
     owui_url: str = ""
     owui_api_key: str = ""
     owui_delivery_url: str = ""
@@ -161,6 +162,7 @@ class AppConfig(AbstractAppConfig):
             "poll_seconds": env.get("RA_POLL_SECONDS"),
             "stale_seconds": env.get("RA_STALE_SECONDS"),
             "job_timeout_seconds": env.get("RA_JOB_TIMEOUT_SECONDS"),
+            "job_retention_days": env.get("RA_JOB_RETENTION_DAYS"),
             "own_max_files": env.get("RA_OWN_MAX_FILES"),
             "own_max_file_chars": env.get("RA_OWN_MAX_FILE_CHARS"),
             "own_max_collections": env.get("RA_OWN_MAX_COLLECTIONS"),
