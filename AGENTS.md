@@ -22,7 +22,7 @@ Code, comments and docs are English. Text a user sees (chat messages, errors fro
 
 ## Database
 
-Postgres in Kubernetes, SQLite locally. Schema changes add columns only (see `services/db.py`). `RA_TEST_DATABASE_URL=postgresql://… mise run integration` runs the queue tests on Postgres; CI runs them on SQLite only.
+Postgres in Kubernetes, SQLite locally. Schema changes add columns only (see `services/db.py`). `RA_TEST_DATABASE_URL=postgresql://… mise run integration` runs the queue tests on Postgres.
 
 ## Releases
 
