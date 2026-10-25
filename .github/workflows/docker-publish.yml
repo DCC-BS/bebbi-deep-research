@@ -7,7 +7,37 @@ permissions:
     packages: write
 
 jobs:
+    # The image tag is the version in pyproject.toml. kdkp-kiw-k8s-config pins it with its digest and Renovate
+    # proposes the next version, so a version is pushed once: bump the version for a new build.
+    version-is-new:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: read
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+            - name: Log in to GHCR
+              uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Refuse a version that is already published
+              shell: bash
+              run: |
+                  VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+                  IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION"
+                  if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+                      echo "::error::$IMAGE already exists. Bump the version in pyproject.toml (and Chart.yaml) for a new build."
+                      exit 1
+                  fi
+                  echo "$IMAGE is new"
+
     publish:
+        needs: version-is-new
         uses: DCC-BS/ci-workflows/.github/workflows/publish-docker.yml@2d9a1d861a5cc27f571e7a9d6227cf9943c0ba6d
         secrets: inherit
         with:
