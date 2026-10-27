@@ -8,7 +8,8 @@ permissions:
 
 jobs:
     # The image tag is the version in pyproject.toml. kdkp-kiw-k8s-config pins it with its digest and Renovate
-    # proposes the next version, so a version is pushed once: bump the version for a new build.
+    # proposes the next version, so a version is pushed once: bump the version for a new build. The git tag
+    # v<version> marks the published commit; kdkp-open-web-ui syncs pipe/ from the newest one.
     version-is-new:
         runs-on: ubuntu-latest
         permissions:
@@ -34,6 +35,10 @@ jobs:
                       echo "::error::$IMAGE already exists. Bump the version in pyproject.toml (and Chart.yaml) for a new build."
                       exit 1
                   fi
+                  if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null; then
+                      echo "::error::Tag v$VERSION already exists. Bump the version in pyproject.toml (and Chart.yaml) for a new build."
+                      exit 1
+                  fi
                   echo "$IMAGE is new"
 
     publish:
@@ -49,3 +54,22 @@ jobs:
             platforms: linux/amd64
             push: true
             inject_github_token: true
+
+    # Lightweight tag on the commit that was just published.
+    tag:
+        needs: publish
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+            - name: Tag v<version>
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+                  gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$GITHUB_SHA"
+                  echo "Tagged $GITHUB_SHA as v$VERSION"

@@ -19,7 +19,7 @@ Code, comments and docs are English. Text a user sees (chat messages, errors fro
 
 ## The pipe (`pipe/`)
 
-`pipe/deep_research.py` and `pipe/deep_research_download.py` run inside Open WebUI (Python 3.11, only `httpx` and `pydantic`). The state marker lives in a message the user can edit, so ids from it are validated before they go into a URL. After a change: run `scripts/build_openwebui_assets.py`, then copy the file into `seeder/content/functions/` of FD-ITBS/kdkp-open-web-ui and keep its three header lines (`global`, `requires_env`, `valves`). Open WebUI internals the pipe uses: `scripts/check_owui_internals.py`.
+`pipe/deep_research.py` and `pipe/deep_research_download.py` run inside Open WebUI (Python 3.11, only `httpx` and `pydantic`). The state marker lives in a message the user can edit, so ids from it are validated before they go into a URL. After a change: run `scripts/build_openwebui_assets.py` and bump the version (CI fails a pull request that changes `pipe/` without one). Publishing tags `v<version>`; FD-ITBS/kdkp-open-web-ui copies `pipe/` from a tag into `seeder/content/functions/` (steps in its README, "Updating the Deep Research pipe"). Open WebUI internals the pipe uses: `scripts/check_owui_internals.py`.
 
 ## Database
 
@@ -27,7 +27,7 @@ Postgres in Kubernetes, SQLite locally. Schema changes add columns only (see `se
 
 ## Releases
 
-The image tag is the version in `pyproject.toml`; each version is published once (Actions → Build and Publish Docker Image stops on an existing tag). For a release, bump `pyproject.toml`, `deploy/helm/bebbi-deep-research/Chart.yaml` (`version`, `appVersion`) and run `uv lock`. Kubernetes pins `<version>@sha256:<digest>`.
+The image tag is the version in `pyproject.toml`; each version is published once (Actions → Build and Publish Docker Image stops on an existing image or git tag, and tags the published commit `v<version>`). For a release, bump `pyproject.toml`, `deploy/helm/bebbi-deep-research/Chart.yaml` (`version`, `appVersion`) and run `uv lock`. Kubernetes pins `<version>@sha256:<digest>`.
 
 ## Git
 
