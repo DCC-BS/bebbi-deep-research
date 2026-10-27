@@ -17,6 +17,36 @@ jobs:
         with:
             check-command: "mise run ci-check"
 
+    # kdkp-open-web-ui ships pipe/ from the newest v<version> tag, and the publish workflow tags only a new version.
+    # A pull request that changes pipe/ therefore bumps the version in pyproject.toml, or the change never ships.
+    version-bump:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+              with:
+                  fetch-depth: 0
+
+            - name: pipe/ changes bump the version
+              shell: bash
+              env:
+                  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              run: |
+                  version() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])'; }
+                  BASE=$(git merge-base "$BASE_SHA" HEAD)
+                  if git diff --quiet "$BASE" HEAD -- pipe/; then
+                      echo "pipe/ unchanged"
+                      exit 0
+                  fi
+                  OLD=$(git show "$BASE:pyproject.toml" | version)
+                  NEW=$(version < pyproject.toml)
+                  if [ "$OLD" = "$NEW" ]; then
+                      echo "::error file=pyproject.toml::pipe/ changed but the version is still $OLD. Bump pyproject.toml and deploy/helm/bebbi-deep-research/Chart.yaml (version, appVersion), then run uv lock."
+                      exit 1
+                  fi
+                  echo "pipe/ changed, version $OLD -> $NEW"
+
     # The queue (atomic claim, owner token, requeue, schema upgrade) runs on Postgres in Kubernetes; the shared
     # backend-ci job above tests it on SQLite only. Same suites against a throwaway Postgres.
     postgres:
