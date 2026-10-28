@@ -2,7 +2,7 @@
 "github:dmno-dev/varlock" = "1.16.0"
 pass-cli = "latest"
 usage = "6.12.1"
-uv = "0.13.0"
+uv = "0.13.1"
 
 [plugins]
 pass-cli = "https://github.com/DCC-BS/mise-proton-pass-cli"
