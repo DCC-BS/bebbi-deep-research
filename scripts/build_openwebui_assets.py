@@ -66,7 +66,9 @@ def build() -> dict[str, str]:
             "meta": {"description": "Hängt den Recherchebericht als Word-Datei an die Antwort an."},
             "valves": valves,
             "is_active": True,
-            "is_global": True,
+            # not global: only the Deep Research model lists it (meta.actionIds below). Open WebUI's frontend sends
+            # every action of the chosen model, icon included, in the body of each chat request.
+            "is_global": False,
             "user_id": None,
             "updated_at": 0,
             "created_at": 0,
@@ -91,6 +93,7 @@ def build() -> dict[str, str]:
                 # for the pipe
                 "capabilities": {"vision": False, "file_upload": True, "file_context": False, "citations": True},
                 "suggestion_prompts": [{"content": s} for name in cfg["presets"] for s in SUGGESTIONS.get(name, [])],
+                "actionIds": [ACTION_ID],
             },
         }
     ]

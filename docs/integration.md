@@ -37,13 +37,14 @@ Open WebUI imports a function as Python source. The source is `pipe/deep_researc
 
 **Seeder (GitOps).** `deploy/openwebui/function.json` holds two entries in the format of `POST /api/v1/functions/sync`
 (id, name, type `pipe` and `action`, content, valves, `is_active`, `is_global`): `bebbi_deep_research` and
-`bebbi_deep_research_download` (section 5a). Both have the valves `SERVICE_URL` and `SERVICE_TOKEN`. Let the seeder post it with an admin key, with
+`bebbi_deep_research_download` (section 5a). Both have the valves `SERVICE_URL` and `SERVICE_TOKEN`. The pipe is global,
+the action is not: the Deep Research model lists it in `meta.actionIds` (`models.json`), so the button shows only there. Let the seeder post it with an admin key, with
 `SERVICE_TOKEN` filled in from the seeder's secret store (the file contains an empty token on purpose).
 Regenerate after changing the pipe or presets: `uv run python scripts/build_openwebui_assets.py`
 (`--check` fails if the files are stale; a unit test does the same).
 
 **By hand / local.** `scripts/install_pipe.py` calls `functions/create` (or `update` if it exists) for both functions,
-activates them globally and sets the valves:
+activates them, makes the pipe global (the action stays off: the model lists it) and sets the valves:
 
 ```bash
 OWUI_URL=http://localhost:3000 OWUI_API_KEY=sk-... RA_TOKEN=... uv run python scripts/install_pipe.py --models \
@@ -54,7 +55,7 @@ Pass `--service-url` explicitly: the default `http://service:8088` is the compos
 stack. In a cluster use the Kubernetes service URL (the default of the `SERVICE_URL` valve, `http://bebbi-deep-research:8088`, add the
 namespace if Open WebUI runs in another one: `http://bebbi-deep-research.<ns>.svc:8088`). The URL is what Open WebUI (the pipe) reaches, not what your shell reaches.
 
-Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py` (and `pipe/deep_research_download.py`), save, enable, set "global". The gear icon opens the valves.
+Or in the UI: Admin Panel, Functions, "+", paste `pipe/deep_research.py` (and `pipe/deep_research_download.py`), save, enable, set "global" on the pipe only. Add the action to the Deep Research model (Workspace, Models, Actions). The gear icon opens the valves.
 
 ### Valves
 
@@ -240,7 +241,11 @@ returns itself (later message, fallback above): it carries no marker either.
   of Open WebUI called in-process with the chat user) and emits a `files` event.
 * **Delivery path** (night run): the service posts text and sources to the delivery route (section 3), which stores the `source` events, then the text; after a reload the
   message carries `sources`, badges and list work. The Word file cannot be attached by the service (ownership, see above).
-  The action function `bebbi_deep_research_download` adds a button ("Word-Datei") under every Deep Research answer; it runs as
+  The action function `bebbi_deep_research_download` adds a button ("Word-Datei") under every Deep Research answer (the
+  model lists it in `meta.actionIds`; it is not global). The file sets no `icon_url`: Open WebUI's frontend sends the
+  model's actions with their icons in the body of every chat request, and an inline `data:image/svg+xml` icon there is
+  blocked by WAFs as an XSS pattern. A deployment that wants an icon adds `icon_url` with a URL it serves (an image path,
+  not a data URI); without one Open WebUI draws its default icon. The action runs as
   the user inside Open WebUI, looks up the job by chat and message id (`GET /jobs/lookup`, checks the user), fetches the
   `.docx` and attaches it. A second click does not attach it again.
 * The pipe (fallback reply) and the service may both write a report. The service skips the source events if the message
