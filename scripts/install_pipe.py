@@ -72,7 +72,9 @@ def main() -> int:
         fn = r.json()
         if not fn["is_active"]:
             http.post(f"/api/v1/functions/id/{function_id}/toggle").raise_for_status()
-        if not fn["is_global"]:
+        # The pipe is global; the download action is not (the Deep Research model lists it in meta.actionIds). The
+        # endpoint flips the flag, so compare first. An install made before 1.2.2 has the action global: this undoes it.
+        if fn["is_global"] != (function_id == FUNCTION_ID):
             http.post(f"/api/v1/functions/id/{function_id}/toggle/global").raise_for_status()
         cur = http.get(
             f"/api/v1/functions/id/{function_id}/valves"

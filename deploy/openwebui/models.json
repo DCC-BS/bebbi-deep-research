@@ -39,6 +39,9 @@
         {
           "content": "Fasse die wichtigsten Aussagen der angehängten Dokumente zusammen und nenne offene Fragen."
         }
+      ],
+      "actionIds": [
+        "bebbi_deep_research_download"
       ]
     }
   }
