@@ -1,6 +1,6 @@
 [project]
 name = "bebbi-deep-research"
-version = "1.2.2"
+version = "1.2.3"
 description = "Deep-research agent and job service for Bebbi Bot (Open WebUI, Kanton Basel-Stadt)"
 readme = "README.md"
 requires-python = ">=3.13"
