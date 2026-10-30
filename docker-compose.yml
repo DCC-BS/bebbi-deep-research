@@ -1,4 +1,4 @@
-# Integration stack: job service + Postgres + Open WebUI (v0.12.4, as in production), with restart policies.
+# Integration stack: job service + Postgres + Open WebUI (v0.12.5, as in production), with restart policies.
 # LLM, search and Firecrawl are external: set RA_LLM_BASE_URL, RA_SEARCH_URL and RA_FIRECRAWL_URL (.env.schema).
 #   varlock run -- docker compose up -d
 name: bebbi-dr

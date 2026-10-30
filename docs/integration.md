@@ -112,7 +112,7 @@ Setup:
 
 The **admin API key** (`OWUI_API_KEY`) is still used, read-only, for own sources: `POST /api/v1/retrieval/query/collection`
 (knowledge bases of the user, only ids the pipe approved for the job) and `GET /api/v1/files/{id}` (date of a document).
-Both still accept an admin key at v0.12.4 (`BYPASS_ADMIN_ACCESS_CONTROL` default true, section 7). Create a user
+Both still accept an admin key at v0.12.5 (`BYPASS_ADMIN_ACCESS_CONTROL` default true, section 7). Create a user
 "deep-research-service" with role admin, enable API keys (`ENABLE_API_KEYS=true`; with `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` allow
 `/api/v1/retrieval` and `/api/v1/files`), create the key in Settings, Account, API keys, store it as `OWUI_API_KEY`. The key no longer
 needs `/api/v1/chats`.
@@ -180,7 +180,7 @@ users should use a normal model for that. Making the delivered message carry a "
 pipe answer the next message with the same report again, so we left it out. The same holds for a report that the pipe
 returns itself (later message, fallback above): it carries no marker either.
 
-### How the pipe and the delivery fit Open WebUI v0.11.4, v0.12.3 and v0.12.4 (found in the end-to-end test)
+### How the pipe and the delivery fit Open WebUI v0.11.4, v0.12.3, v0.12.4 and v0.12.5 (found in the end-to-end test)
 
 * **Plan and clarifying questions are plain text**: the planner sees web snippets, so the pipe escapes the Markdown
   characters of every LLM-written line (plan title, task, parts, goals, sub-questions, must-name items, questions,
@@ -203,7 +203,7 @@ returns itself (later message, fallback above): it carries no marker either.
 * **Model list cache**: after installing a function or model, open Open WebUI once (`GET /api/models`) before sending
   completions with the new model id; the first completion otherwise answers "Model not found".
 
-## 5a. Citations and Word download (how Open WebUI v0.11.4, v0.12.3 and v0.12.4 do it)
+## 5a. Citations and Word download (how Open WebUI v0.11.4, v0.12.3, v0.12.4 and v0.12.5 do it)
 
 **What Open WebUI expects** (read in the image: backend `/app/backend/open_webui`, frontend from the source maps of
 `/app/build/_app/immutable`):
@@ -408,6 +408,20 @@ processing, `files` in the completion request, test user "tester" without admin 
 | 26 | Own sources through the pipe: file and knowledge base of the tester; a foreign knowledge base | passed. File text and the knowledge base id reach `/plans` and `/jobs`; the foreign one is refused with the note "für Sie nicht lesbar" |
 | 27 | Context compaction on a short chat (user, assistant with marker, user), `compact_token_threshold` set per chat | **failed, fixed.** 0.12.4 summarizes the assistant message away; the pipe then started a new research. The pipe now reads the parent message from the chat (section 9). Re-run: the queued job is reported |
 
+**Re-run on Open WebUI v0.12.5** (2026-10-29, image `open-webui:v0.12.5-kdkp-local` with the `dr_delivery` hook, rebuilt build `sha256:4787305...`, `ENABLE_ADMIN_CHAT_ACCESS=false`, pgvector, real Gemma 4 31B through the evaluation gateway; compose project `owui-dr`; the UI part in the browser pane as the test user):
+
+| # | Scenario | Result |
+|---|---|---|
+| 28 | Night run (preset rechtsrecherche, chat open in the browser during the run) | passed. `delivery ok`, the open page showed the report, 2 badges and "2 Sources" without reload; stored message `done: true`, `meta.response_ended_at` set (0.12.5 field, set at the end of the pipe's queue turn; the delivery writes only the content), `output` empty, marker gone; after reload the same, no loading dots, docx chip present |
+| 29 | Word action as the user, twice | passed. One file (52 kB, `PK`), the second call attached nothing, `GET /files/{id}/content` as the user 200 with the docx content type |
+| 30 | Daytime/pipe path: job done with delivery `skipped`, the user writes again in the browser | passed. The report comes back in the new reply: 2 sources, one Word file, no marker, `done: true`; after reload badges, sources and file chip are intact |
+| 31 | 0.12.5 chat model save (`Chat.svelte` `saveControls`: `POST /chats/{id}` with `{files, models}`) after a delivery | passed. The delivered message keeps text, sources and `output`; the body has no `history`, so the history merge does not run. A full-history save from a page that never received the live event still replaces the message with its stale copy (`merge_history`: the incoming message wins, unchanged since 0.12.4); an open page gets `chat:message` and is current |
+| 32 | Own sources: file and knowledge base of the user, admin key reads the knowledge base | passed. Plan lists both, job calls `knowledge_search`, delivered report cites the right figures (28 Tage, Fr. 135, Fr. 15 000), source links under `/api/v1/files/<id>/content`; admin key `POST /retrieval/query/collection` returns `documents`, `metadatas` (`file_id`, `name`), `distances`; `GET /files/{id}` has `created_at` |
+| 33 | Context compaction, `compact_token_threshold: 20`, second turn of a queued chat | passed. The status answer with the marker comes back |
+| 34 | Internals: `scripts/check_owui_internals.py`, `check_dr_functions.py` of the image repository on both functions | passed |
+
+Local-stack pitfalls found on the way: the `open-webui` and `service` names are not unique on the shared `dr-eval` network when another stack runs next to it (a delivery got `405` from another Open WebUI without the hook): use the container names (`OWUI_URL`, the pipe's `SERVICE_URL`). The image defaults to pgvector: a stack without `PGVECTOR_DB_URL` answers knowledge-base file adds with 503. The service retries a failed delivery 3 times in a sweep (`delivery_tries`), then gives up; the pipe path still returns the report.
+
 Known limitations:
 
 * The rendered chat (badges, source popup, file chip, action button) was **not** looked at in the browser pane in this
@@ -423,7 +437,7 @@ Known limitations:
   installed, the file is still available from the service (`/jobs/{id}/report.docx`).
 * The native source list shows URLs only; the Markdown list under the report keeps title, Stand and retrieval date, so the
   list is visible twice (one collapsed).
-* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (checked on v0.12.4); re-test it on upgrades (checklist in section 9).
+* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (checked on v0.12.5); re-test it on upgrades (checklist in section 9).
 * Own sources were exercised through the API the way the browser sends them; the attach menu and the `#` picker were not clicked in the browser pane.
 * The delivery secret can write the text of any message that the pipe queued and that is still waiting (and nothing else); keep it in the Secret and restrict ingress with the NetworkPolicy. The admin key can read every knowledge base and file.
 * A message that carries a status text (job still running when the user writes again) is a new assistant message; the
@@ -452,7 +466,7 @@ file).
 
 ## 9. Upgrade checklist: Open WebUI internals we depend on
 
-Re-test these when the Open WebUI version changes (checked: v0.12.4). Unit tests fake them (`tests/unit/test_pipe_own.py:
+Re-test these when the Open WebUI version changes (checked: v0.12.5). Unit tests fake them (`tests/unit/test_pipe_own.py:
 test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not if Open WebUI changes); the end-to-end check is
 `scripts/e2e_owui.py` (section 7); `scripts/check_owui_internals.py` runs the helpers of the pipe against the real modules inside the container.
 
