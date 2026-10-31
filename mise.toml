@@ -1,7 +1,7 @@
 [tools]
 "github:dmno-dev/varlock" = "1.16.0"
 pass-cli = "latest"
-usage = "6.12.1"
+usage = "7.0.1"
 uv = "0.13.1"
 
 [plugins]
