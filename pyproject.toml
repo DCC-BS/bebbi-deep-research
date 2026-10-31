@@ -49,13 +49,10 @@ dev = [
 # Supply-chain cooldown: uv only uses distributions uploaded at least 7 days ago.
 exclude-newer = "P7D"
 # dcc-backend-common: our own package(s), always current (permanent).
-# TEMPORARY until 2026-10-29: certifi skip the cooldown entirely (P0D), so the locked
-# security fixes don't get downgraded. The weekly dependency routine removes only these temporary
-# entries once the locked versions are 7 days old; Renovate's 14-day minimum age still applies.
-exclude-newer-package = { dcc-backend-common = "P1D", certifi = "P0D" }
-# dependency cooldown: ignore releases newer than one week (internal packages: one day)
-# certifi/uv: exempt from the exclude-newer cooldown so CA-store security fixes (GHSA-6q48-6c7w-9gw2,
-# GHSA-hq85-5cpj-mr62) land right away.
+# TEMPORARY until 2026-11-03: pyasn1 skip the cooldown (P0D) so the locked security fixes
+# aren't downgraded: pyasn1 0.6.5 (GHSA-2qm8-x737-gmw5, uploaded 2026-10-27).
+# The weekly dependency routine removes these entries once the locked versions are 7 days old.
+exclude-newer-package = { dcc-backend-common = "P1D", pyasn1 = "P0D" }
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests/unit"]
