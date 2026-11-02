@@ -55,20 +55,33 @@ jobs:
             push: true
             inject_github_token: true
 
-    # Lightweight tag on the commit that was just published.
+    # Lightweight tag on the commit that was just published. GITHUB_TOKEN cannot create a ref at a commit whose
+    # workflow files differ from the branch head (403 "Resource not accessible by integration"): a workflow change
+    # merged during the build broke v1.2.5. So the tag comes from the DCC-BS release App (contents + workflows: write,
+    # org secrets RELEASE_APP_CLIENT_ID / RELEASE_APP_PRIVATE_KEY).
     tag:
         needs: publish
         runs-on: ubuntu-latest
         permissions:
-            contents: write
+            contents: read
         steps:
             - name: Checkout repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+            - name: Release App token
+              id: app-token
+              uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+              with:
+                  client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+                  private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+                  repositories: ${{ github.event.repository.name }}
+                  permission-contents: write
+                  permission-workflows: write
+
             - name: Tag v<version>
               shell: bash
               env:
-                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_TOKEN: ${{ steps.app-token.outputs.token }}
               run: |
                   VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
                   gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$GITHUB_SHA"
