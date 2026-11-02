@@ -352,11 +352,12 @@ wheels = [
 
 [[package]]
 name = "bebbi-deep-research"
-version = "1.2.4"
+version = "1.2.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "asyncpg" },
+    { name = "certifi" },
     { name = "dcc-backend-common", extra = ["fastapi", "pydantic-ai"] },
     { name = "dependency-injector" },
     { name = "fastapi" },
@@ -389,6 +390,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "asyncpg", specifier = ">=0.30" },
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "dcc-backend-common", extras = ["fastapi", "pydantic-ai"], specifier = ">=0.1.23" },
     { name = "dependency-injector", specifier = ">=4.49.1" },
     { name = "fastapi", specifier = ">=0.115" },

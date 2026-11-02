@@ -1,8 +1,11 @@
 """Async database layer (SQLAlchemy Core with plain SQL): Postgres in production, SQLite for development."""
 
+import os
+import ssl
 from pathlib import Path
 
-from sqlalchemy import inspect, text
+import certifi
+from sqlalchemy import inspect, make_url, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 SCHEMA = [
@@ -36,6 +39,36 @@ INDEXES = [
 INIT_LOCK = 727274  # pg_advisory_xact_lock key: several pods starting at once must not race on the schema
 
 
+def asyncpg_tls(url: str) -> tuple[str, dict]:
+    """Move libpq TLS parameters (``sslmode``, ``sslrootcert``) out of a Postgres URL into asyncpg's ``ssl`` argument.
+
+    SQLAlchemy hands URL query parameters to ``asyncpg.connect`` as keyword arguments, and asyncpg knows only ``ssl``.
+    ``verify-ca``/``verify-full`` verify against ``sslrootcert``, else ``PGSSLROOTCERT``, else certifi (the image has
+    no system CA store).
+
+    Args:
+        url: SQLAlchemy async URL.
+
+    Returns:
+        The URL without the libpq parameters and the ``connect_args`` for ``create_async_engine``.
+    """
+    u = make_url(url)
+    query = {k: v[-1] for k, v in u.normalized_query.items()}  # a repeated parameter: the last one wins, as in libpq
+    if not u.drivername.startswith("postgresql") or not {"sslmode", "sslrootcert"} & set(query):
+        return url, {}
+    mode = query.get("sslmode", "prefer")
+    root = query.get("sslrootcert") or os.getenv("PGSSLROOTCERT")
+    rest = u.difference_update_query(["sslmode", "sslrootcert"]).render_as_string(hide_password=False)
+    if mode not in ("verify-ca", "verify-full"):
+        return rest, {"ssl": mode}
+    # as asyncpg builds it: create_default_context() adds VERIFY_X509_STRICT, which libpq does not and which rejects
+    # CA certificates without a key usage extension
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = mode == "verify-full"
+    ctx.load_verify_locations(cafile=root or certifi.where())
+    return rest, {"ssl": ctx}
+
+
 class DB:
     """Async database access (Postgres in production, SQLite for development and tests)."""
 
@@ -51,7 +84,8 @@ class DB:
         self.url = url
         if url.startswith("sqlite") and ":memory:" not in url:
             Path(url.split(":///", 1)[1]).parent.mkdir(parents=True, exist_ok=True)
-        self.engine: AsyncEngine = create_async_engine(url, **kw)
+        url, connect_args = asyncpg_tls(url)
+        self.engine: AsyncEngine = create_async_engine(url, connect_args=connect_args, **kw)
 
     async def init(self) -> None:
         """Create the tables, add columns of later versions and the indexes (Postgres: under an advisory lock)."""
