@@ -1,5 +1,6 @@
 import asyncio
 import json
+import ssl
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -7,7 +8,7 @@ import httpx
 import pytest
 from dcc_backend_common.config import AppConfigError
 
-from bebbi_deep_research.services.db import DB
+from bebbi_deep_research.services.db import DB, asyncpg_tls
 from bebbi_deep_research.services.policy import in_window
 from bebbi_deep_research.utils.app_config import AppConfig, normalize_db_url
 
@@ -398,6 +399,26 @@ REQUIRED = {
     "RA_SEARCH_URL": "u",
     "RA_FIRECRAWL_URL": "u",
 }
+
+
+def test_libpq_tls_params_become_asyncpg_ssl(tmp_path, monkeypatch):
+    monkeypatch.delenv("PGSSLROOTCERT", raising=False)
+    base = "postgresql+asyncpg://u:p@h:5439/db"
+    assert asyncpg_tls(base) == (base, {})
+    assert asyncpg_tls("sqlite+aiosqlite:///x.db?sslmode=require") == ("sqlite+aiosqlite:///x.db?sslmode=require", {})
+    assert asyncpg_tls(base + "?sslmode=require") == (base, {"ssl": "require"})
+    assert asyncpg_tls(base + "?ssl=require") == (base + "?ssl=require", {})  # asyncpg's own spelling passes through
+    url, kw = asyncpg_tls(base + "?sslmode=verify-ca&application_name=dr")
+    assert url == base + "?application_name=dr"
+    ctx = kw["ssl"]
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and not ctx.check_hostname
+    assert ctx.cert_store_stats()["x509_ca"] > 0  # certifi: the image has no system CA store
+    assert asyncpg_tls(base + "?sslmode=verify-full")[1]["ssl"].check_hostname
+    with pytest.raises(FileNotFoundError):  # an explicit root cert is used, not silently replaced by certifi
+        asyncpg_tls(base + f"?sslmode=verify-ca&sslrootcert={tmp_path}/missing.crt")
+    monkeypatch.setenv("PGSSLROOTCERT", str(tmp_path / "env.crt"))
+    with pytest.raises(FileNotFoundError):
+        asyncpg_tls(base + "?sslmode=verify-ca")
 
 
 def test_settings_parsing():
