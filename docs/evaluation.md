@@ -1,9 +1,10 @@
 # Evaluation summary
 
 Bebbi Bot deep-research evaluation, 7-13 October 2026, all runs on the production model (Gemma-4-31B NVFP4) and
-production search stack (Serper, Firecrawl, MCP). Full report, per-task analyses and raw results are in the
-evaluation repository `deep-research-evaluation` (`docs/bebbi-bot-deep-research.md`, `docs/analysis/`, `docs/research/`,
-`results/`). This repository contains the engine version evaluated last (v7: v6 engine code, v7 preset settings).
+production search stack (Serper, Firecrawl, MCP). The harness, task sets, run scripts and design research are in
+[deep-research-evaluation](https://github.com/DCC-BS/deep-research-evaluation) (`eval/`, `testsets/`, `scripts/`, [`docs/research/`](https://github.com/DCC-BS/deep-research-evaluation/tree/main/docs/research)).
+The scores are on the [test results page](https://dcc-bs.github.io/documentation/evaluation/results#deep-research). Raw results and per-task analyses are not public. This repository
+contains the engine version evaluated last (v7: v6 engine code, v7 preset settings).
 
 ## Decision
 

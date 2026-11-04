@@ -3,7 +3,7 @@
 For the maintainers of `grossrat-bs-mcp` (`https://mcp-grosserrat.statistik.bs.ch/mcp`). The repository is not
 reachable from the research-agent workspace, so the changes are described here instead of a pull request.
 Each item says what we observed, what to change and how to test it. Evidence comes from the evaluation runs
-of 2026-10-09 (evaluation repository, `docs/bebbi-bot-deep-research.md`, section "v4"; [mcp-servers.md](mcp-servers.md)).
+of 2026-10-09 (v4 runs of the German set in [deep-research-evaluation](https://github.com/DCC-BS/deep-research-evaluation), raw results not public; [mcp-servers.md](mcp-servers.md)).
 
 The server already does the most important thing well: every Geschäft and document comes with a public URL
 (`url`, `citation_url`, `pdf_url`) and a date, so the agent cites grosserrat.bs.ch documents directly.
