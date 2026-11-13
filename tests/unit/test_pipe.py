@@ -681,6 +681,85 @@ def test_clarifying_questions_from_the_llm_are_plain_text():
     assert "<img" not in html and "<a " not in html and "<strong>" not in html.split("Antworten Sie kurz")[0]
 
 
+def _hidden_tool_results(name: str = "list_attached_knowledge", call_id: str = "fc_1"):
+    """What Open WebUI 0.13.1 appends after the user's message with native function calling: memory recall, the skills
+    list and the attached knowledge list as an assistant message with a tool call and its tool result."""
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": '<attached_knowledge>\n<knowledge type="collection" id="k1"/>\n</attached_knowledge>',
+        },
+    ]
+
+
+def test_hidden_tool_results_after_the_user_message_do_not_hide_the_state():
+    """0.13.1 puts hidden tool results after the user message, so a tool message is the last message the pipe sees. The
+    queued job must still be reported (the state is read from the assistant answer before the user's message) and the
+    user's words, not the tool result, are the text (cancel words, new task)."""
+    mod = load_pipe()
+    pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [{"text": "suche"}], "report": None}})
+    body = _job_history(mod)
+    body["messages"] += _hidden_tool_results()
+    out = asyncio.run(pipe.pipe(body, {"id": "u"}))
+    assert "läuft noch" in out and [c[:2] for c in calls] == [("GET", "/jobs/j1?user_id=u")]
+
+
+def test_the_text_of_the_turn_is_the_user_message_not_the_tool_result():
+    mod = load_pipe()
+    pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [], "report": None}})
+    body = _job_history(mod, text="abbrechen")
+    body["messages"] += _hidden_tool_results("recall_memories")
+    out = asyncio.run(pipe.pipe(body, {"id": "u"}))
+    assert out == mod.CANCELLED and calls[0][:2] == ("POST", "/jobs/j1/cancel?user_id=u")
+    # a new task: the clarify request carries the user's question, not the knowledge list
+    sent = []
+
+    async def api(method, path, body=None):
+        sent.append((path, body))
+        return {"questions": [], "assumptions": [], "preset": "grossrat"}
+
+    pipe2 = mod.Pipe()
+    pipe2._api = api
+    asyncio.run(
+        pipe2.pipe(
+            {
+                "model": "bebbi_deep_research.grossrat",
+                "messages": [{"role": "user", "content": "Frage zum Stadtklima"}, *_hidden_tool_results()],
+            },
+            {"id": "u"},
+        )
+    )
+    assert sent[0][0] == "/clarify" and sent[0][1]["task"] == "Frage zum Stadtklima"
+
+
+def test_state_marker_is_found_past_hidden_tool_results_of_earlier_turns():
+    """Earlier turns keep their hidden tool results in the history: an assistant message with only tool calls sits
+    between the marker answer and the next user message, or after the marker answer's own user message."""
+    mod = load_pipe()
+    answer = {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
+    history = [
+        {"role": "user", "content": "Frage"},
+        *_hidden_tool_results(call_id="fc_0"),
+        answer,
+        {"role": "user", "content": "und?"},
+        *_hidden_tool_results(call_id="fc_1"),
+    ]
+    assert asyncio.run(mod._state_of_chat(history, None, None)) == {"state": "job", "job": "j1"}
+    # a chat without a marker answer stays without state (and does not read the database)
+    plain = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "Bericht"},
+        {"role": "user", "content": "b"},
+    ]
+    assert asyncio.run(mod._state_of_chat([*plain, *_hidden_tool_results()], None, None)) == {}
+
+
 def _compacted_history(text: str = "Ist der Bericht schon fertig?"):
     """What Open WebUI 0.12.4 hands the pipe after context compaction in a short chat (user, assistant, user): the
     assistant message with our state marker is summarized away, only the summary and the new user message are left."""

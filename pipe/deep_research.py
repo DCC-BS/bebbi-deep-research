@@ -339,8 +339,25 @@ def _decode(payload: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _last_user(messages: list[dict]) -> int:
+    """Index of the user's message. Open WebUI 0.13.1 appends hidden tool results after it (memory recall, skills list,
+    attached knowledge list: an assistant message with `tool_calls` and `tool` messages), so the last message of the
+    request can be a tool message; the pipe's own turn is the last `user` message."""
+    return next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), len(messages) - 1)
+
+
+def _answers(messages: list[dict]) -> list[dict]:
+    """The assistant answers before the user's message, without the synthetic assistant messages that only carry tool
+    calls (hidden tool results of earlier turns: no text, so no marker)."""
+    return [
+        m
+        for m in messages[: _last_user(messages)]
+        if m.get("role") == "assistant" and not (m.get("tool_calls") and not m.get("content"))
+    ]
+
+
 def _state(messages: list[dict]) -> dict:
-    for m in reversed(messages[:-1]):
+    for m in reversed(_answers(messages)):
         if m.get("role") == "assistant":
             found = MARK.search(m.get("content") or "")
             st = _decode(found.group(1)) if found else {}
@@ -381,7 +398,7 @@ async def _state_of_chat(messages: list[dict], chat_id: str | None, metadata: di
     """The chat state: from the assistant messages of the request, else (compaction removed them) from the database."""
     if st := _state(messages):
         return st
-    if any(m.get("role") == "assistant" for m in messages[:-1]):  # an answer without a marker: no state
+    if _answers(messages):  # an answer without a marker: no state
         return {}
     try:
         stored = await _stored_parent(chat_id, metadata)
@@ -716,7 +733,7 @@ class Pipe:
             return ""
 
         messages = body.get("messages") or []
-        text = (messages[-1].get("content") or "") if messages else ""
+        text = (messages[_last_user(messages)].get("content") or "") if messages else ""
         if isinstance(text, list):  # multimodal content parts
             text = " ".join(p.get("text", "") for p in text if isinstance(p, dict))
         # Open WebUI rewrites the last message when files are attached (retrieval context, <attached_files> tags). The
