@@ -67,7 +67,7 @@ services:
       timeout: 3s
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.12.5
+    image: ghcr.io/open-webui/open-webui:v0.13.3
     environment:
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?set WEBUI_SECRET_KEY}
       ENABLE_SIGNUP: "false"
