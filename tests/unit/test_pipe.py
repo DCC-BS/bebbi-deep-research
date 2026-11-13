@@ -85,7 +85,9 @@ def test_running_job_keeps_marker():
     mod = load_pipe()
     pipe, _ = _pipe_with_service(mod, {"j1": {"status": "running", "events": [{"text": "suche"}], "report": None}})
     again = asyncio.run(pipe.pipe(_job_history(mod), {"id": "u"}))
-    assert "läuft noch" in again and mod._state([{"role": "assistant", "content": again}, {}])["job"] == "j1"
+    assert (
+        "läuft noch" in again and mod._state([{"role": "assistant", "content": again}, {"role": "user"}])["job"] == "j1"
+    )
 
 
 def test_title_from_plan():
@@ -130,7 +132,7 @@ def test_approved_plan_is_queued_for_the_night_as_replace_event_with_empty_outpu
         and post[2]["draft_id"] == "d1"
     )
     queued = [e for e in events if e["type"] == "replace"][-1]["data"]["content"]
-    assert "Nachtfenster" in queued and mod._state([{"role": "assistant", "content": queued}, {}]) == {
+    assert "Nachtfenster" in queued and mod._state([{"role": "assistant", "content": queued}, {"role": "user"}]) == {
         "state": "job",
         "job": "j1",
     }
@@ -681,13 +683,13 @@ def test_clarifying_questions_from_the_llm_are_plain_text():
     assert "<img" not in html and "<a " not in html and "<strong>" not in html.split("Antworten Sie kurz")[0]
 
 
-def _hidden_tool_results(name: str = "list_attached_knowledge", call_id: str = "fc_1"):
+def _hidden_tool_results(name: str = "list_attached_knowledge", call_id: str = "fc_1", content=""):
     """What Open WebUI 0.13.1 appends after the user's message with native function calling: memory recall, the skills
     list and the attached knowledge list as an assistant message with a tool call and its tool result."""
     return [
         {
             "role": "assistant",
-            "content": "",
+            "content": content,
             "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}],
         },
         {
@@ -698,24 +700,99 @@ def _hidden_tool_results(name: str = "list_attached_knowledge", call_id: str = "
     ]
 
 
+def _held_history(mod, text: str = "und?", *, marker_in_request: bool):
+    """A chat whose last answer is a queued job, with hidden tool results around every turn. Open WebUI rebuilds the
+    history from the stored `output` of each assistant message: an answer that the pipe returned has its text in the
+    request (`marker_in_request`); a queued message that went out as a `replace` event has only the hidden tool results
+    in its `output`, so the text with the marker is not in the request at all (0.13.3, `process_messages_with_output`)."""
+    held = [{"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}]
+    return {
+        "model": "bebbi_deep_research.grossrat",
+        "messages": [
+            {"role": "user", "content": "Frage"},
+            *_hidden_tool_results(call_id="fc_0"),
+            *(held if marker_in_request else []),
+            {"role": "user", "content": text},
+            *_hidden_tool_results(call_id="fc_1"),
+        ],
+    }
+
+
 def test_hidden_tool_results_after_the_user_message_do_not_hide_the_state():
     """0.13.1 puts hidden tool results after the user message, so a tool message is the last message the pipe sees. The
-    queued job must still be reported (the state is read from the assistant answer before the user's message) and the
-    user's words, not the tool result, are the text (cancel words, new task)."""
+    queued job must still be reported (the state is read from the answer before the user's message)."""
     mod = load_pipe()
     pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [{"text": "suche"}], "report": None}})
-    body = _job_history(mod)
-    body["messages"] += _hidden_tool_results()
-    out = asyncio.run(pipe.pipe(body, {"id": "u"}))
+    out = asyncio.run(pipe.pipe(_held_history(mod, marker_in_request=True), {"id": "u"}))
     assert "läuft noch" in out and [c[:2] for c in calls] == [("GET", "/jobs/j1?user_id=u")]
 
 
-def test_the_text_of_the_turn_is_the_user_message_not_the_tool_result():
+def test_a_queued_message_stored_with_hidden_tool_results_only_is_read_from_the_chat(monkeypatch):
+    """The message that queued the job is stored with `output` = hidden tool results (the text went out as a `replace`
+    event): Open WebUI rebuilds the history from `output`, the marker is gone from the request, and the older clarify
+    answer must not count as the state. The next turn reads the queued message from the stored chat (found with the
+    review of the 0.13.3 pipe: 'abbrechen' was read as the answer to the clarifying questions)."""
     mod = load_pipe()
     pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [], "report": None}})
-    body = _job_history(mod, text="abbrechen")
-    body["messages"] += _hidden_tool_results("recall_memories")
-    out = asyncio.run(pipe.pipe(body, {"id": "u"}))
+    older = {
+        "role": "assistant",
+        "content": "Fragen" + mod._marker({"state": "clarify", "task": "T", "depth": "quick"}),
+    }
+    body = {
+        "model": "bebbi_deep_research.grossrat",
+        "messages": [
+            {"role": "user", "content": "Frage"},
+            *_hidden_tool_results(call_id="a"),
+            older,
+            {"role": "user", "content": "weiter"},
+            *_hidden_tool_results(call_id="b"),  # the queued message: hidden tool results only
+            {"role": "user", "content": "abbrechen"},
+            *_hidden_tool_results(call_id="c"),
+        ],
+    }
+    asked = []
+
+    async def stored(chat_id, metadata):
+        asked.append(metadata["user_message"]["parentId"])
+        return {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
+
+    monkeypatch.setattr(mod, "_stored_parent", stored)
+    meta = {"user_message": {"id": "u3", "parentId": "a2", "content": "abbrechen"}}
+    out = asyncio.run(pipe.pipe(body, {"id": "u"}, __chat_id__="c1", __metadata__=meta))
+    assert asked == ["a2"] and out == mod.CANCELLED and calls[0][:2] == ("POST", "/jobs/j1/cancel?user_id=u")
+
+
+def test_hold_returns_the_text_when_hidden_tool_results_fill_the_output():
+    """`output` renders in preference to `content`. With hidden tool results in it, a `replace`-only queue message would
+    be an empty bubble (checked in the browser on 0.13.3), so the text is the answer then; without them it stays a
+    `replace` event."""
+    mod = load_pipe()
+
+    def run(history):
+        pipe, _ = _pipe_with_service(mod, {"j1": {"status": "running", "events": [], "report": None}})
+        events = []
+
+        async def emit(e):
+            events.append(e)
+
+        async def api(method, path, body=None):
+            from_service = mod.UserError("kaputt")
+            raise from_service
+
+        pipe._api = api
+        out = asyncio.run(pipe.pipe(history, {"id": "u"}, __event_emitter__=emit))
+        return out, [e["type"] for e in events]
+
+    out, types = run(_held_history(mod, marker_in_request=True))
+    assert "kaputt" in out and "research-agent" in out and "replace" not in types
+    out, types = run(_job_history(mod))
+    assert out == "" and "replace" in types
+
+
+def test_text_of_the_turn_is_the_user_message_not_the_tool_result():
+    mod = load_pipe()
+    pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [], "report": None}})
+    out = asyncio.run(pipe.pipe(_held_history(mod, "abbrechen", marker_in_request=True), {"id": "u"}))
     assert out == mod.CANCELLED and calls[0][:2] == ("POST", "/jobs/j1/cancel?user_id=u")
     # a new task: the clarify request carries the user's question, not the knowledge list
     sent = []
@@ -726,38 +803,82 @@ def test_the_text_of_the_turn_is_the_user_message_not_the_tool_result():
 
     pipe2 = mod.Pipe()
     pipe2._api = api
-    asyncio.run(
-        pipe2.pipe(
-            {
-                "model": "bebbi_deep_research.grossrat",
-                "messages": [{"role": "user", "content": "Frage zum Stadtklima"}, *_hidden_tool_results()],
-            },
-            {"id": "u"},
-        )
-    )
+    messages = [{"role": "user", "content": "Frage zum Stadtklima"}, *_hidden_tool_results()]
+    asyncio.run(pipe2.pipe({"model": "bebbi_deep_research.grossrat", "messages": messages}, {"id": "u"}))
     assert sent[0][0] == "/clarify" and sent[0][1]["task"] == "Frage zum Stadtklima"
 
 
-def test_state_marker_is_found_past_hidden_tool_results_of_earlier_turns():
-    """Earlier turns keep their hidden tool results in the history: an assistant message with only tool calls sits
-    between the marker answer and the next user message, or after the marker answer's own user message."""
+def test_no_user_message_is_no_turn():
+    mod = load_pipe()
+    only_assistant = [{"role": "assistant", "content": "x" + mod._marker({"state": "job", "job": "j1"})}]
+    assert mod._last_user(only_assistant) == -1 and mod._last_user([]) == -1
+    assert mod._state(only_assistant) == {}  # not "the last message is the turn"
+
+
+def test_tool_call_messages_without_text_are_no_answers():
+    """Whitespace or an empty list as the content of a tool-call message: still only a hidden tool result."""
     mod = load_pipe()
     answer = {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
+    for empty in ("", "  \n", [], None):
+        history = [
+            {"role": "user", "content": "Frage"},
+            answer,
+            {"role": "user", "content": "und?"},
+            *_hidden_tool_results(content=empty),
+        ]
+        assert mod._state(history) == {"state": "job", "job": "j1"}
+        assert mod._tool_only(_hidden_tool_results(content=empty)[0])
+
+
+def test_list_content_of_an_answer_carries_the_marker():
+    mod = load_pipe()
+    marker = mod._marker({"state": "job", "job": "j1"})
     history = [
         {"role": "user", "content": "Frage"},
-        *_hidden_tool_results(call_id="fc_0"),
-        answer,
-        {"role": "user", "content": "und?"},
-        *_hidden_tool_results(call_id="fc_1"),
+        {"role": "assistant", "content": [{"type": "text", "text": "Eingereiht" + marker}]},
+        {"role": "user", "content": [{"type": "text", "text": "und?"}]},
     ]
-    assert asyncio.run(mod._state_of_chat(history, None, None)) == {"state": "job", "job": "j1"}
-    # a chat without a marker answer stays without state (and does not read the database)
-    plain = [
-        {"role": "user", "content": "a"},
-        {"role": "assistant", "content": "Bericht"},
-        {"role": "user", "content": "b"},
+    assert mod._state(history) == {"state": "job", "job": "j1"}
+    assert mod._text(history[-1]["content"]) == "und?"
+
+
+def test_guided_regeneration_is_not_the_turn():
+    """Guided regeneration (0.13) appends the reply to revise and the instruction as a user message after the turn. The
+    turn is still the user message before; the regenerated reply's state is not the chat's state."""
+    mod = load_pipe()
+    clarify = {
+        "role": "assistant",
+        "content": "Fragen" + mod._marker({"state": "clarify", "task": "T", "depth": "quick"}),
+    }
+    job = {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
+    history = [
+        {"role": "user", "content": "Frage"},
+        clarify,
+        {"role": "user", "content": "weiter"},
+        job,  # the reply to regenerate
+        {"role": "user", "content": "Mach es kürzer"},  # the instruction
     ]
-    assert asyncio.run(mod._state_of_chat([*plain, *_hidden_tool_results()], None, None)) == {}
+    meta = {"regeneration_message_id": "a2"}
+    kept = mod._drop_regeneration(history, meta)
+    assert kept[-1]["content"] == "weiter" and mod._state(kept)["state"] == "clarify"
+    assert mod._drop_regeneration(history, {}) is history  # an ordinary request is untouched
+    sent = []
+
+    async def api(method, path, body=None):
+        sent.append((path, body))
+        return {"draft_id": "d1", "plan": {"title": "t", "parts": []}}
+
+    pipe = mod.Pipe()
+    pipe._api = api
+
+    async def card(*a, **k):
+        return "open", None
+
+    pipe._decide = card
+    asyncio.run(
+        pipe.pipe({"model": "bebbi_deep_research.grossrat", "messages": history}, {"id": "u"}, __metadata__=meta)
+    )
+    assert sent and sent[0][0] == "/plans" and "weiter" in sent[0][1]["task"] and "kürzer" not in sent[0][1]["task"]
 
 
 def _compacted_history(text: str = "Ist der Bericht schon fertig?"):

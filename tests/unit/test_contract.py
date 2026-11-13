@@ -100,7 +100,7 @@ async def test_the_real_pipe_talks_to_the_real_service(tmp_path, monkeypatch):
         assert out == ""  # the queued text went out as a replace event
         queued = events[-1]["data"]["content"]
         assert "Nachtfenster" in queued
-        job_id = mod._state([{"role": "assistant", "content": queued}, {}])["job"]
+        job_id = mod._state([{"role": "assistant", "content": queued}, {"role": "user"}])["job"]
         db = app.state.container.db()
         row = (await db.run("select user_id, chat_id, preset, request_id from jobs where id=:i", i=job_id))[0]
         assert row == {"user_id": "u1", "chat_id": "c1", "preset": "grossrat", "request_id": "c1:m1"}
