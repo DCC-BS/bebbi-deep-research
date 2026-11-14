@@ -110,7 +110,7 @@ def _jpath(path: str, user_id: str) -> str:
 # ---------------------------------------------------------------------------------------------- own sources (A4)
 # The chat's files and knowledge bases. Everything that needs Open WebUI internals is in the helpers below (imports
 # inside the functions, so the module also loads outside Open WebUI and the tests can put fakes in their place).
-# Checked against v0.12.3 (scripts/check_owui_internals.py):
+# Checked against v0.13.3 (scripts/check_owui_internals.py; before: v0.12.3):
 #   open_webui.models.users.Users.get_user_by_id           open_webui.models.files.Files.get_file_by_id
 #   open_webui.utils.access_control.files.has_access_to_file
 #   open_webui.retrieval.utils.filter_accessible_collections   (Open WebUI's own rule for knowledge bases)
@@ -339,56 +339,129 @@ def _decode(payload: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _state(messages: list[dict]) -> dict:
-    for m in reversed(messages[:-1]):
+def _text(content) -> str:
+    """Message content as text: a string, or the text parts of a multimodal list."""
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content if isinstance(p, dict) and isinstance(p.get("text"), str))
+    return content if isinstance(content, str) else ""
+
+
+def _drop_regeneration(messages: list[dict], metadata: dict | None) -> list[dict]:
+    """Guided regeneration: Open WebUI appends the reply to revise (an assistant message) and the user's instruction (a
+    user message) after the turn (`regeneration_message_id` in the metadata; middleware.py). The pipe has no use for the
+    instruction; the turn is the user message before the regenerated reply, and that reply's state is not current."""
+    if not (metadata or {}).get("regeneration_message_id"):
+        return messages
+    # hidden tool results come after the instruction (middleware.py appends them last)
+    end = len(messages)
+    while end and (messages[end - 1].get("role") == "tool" or _tool_only(messages[end - 1])):
+        end -= 1
+    if not end or messages[end - 1].get("role") != "user":
+        return messages
+    rest = messages[: end - 1]
+    while rest and rest[-1].get("role") in ("assistant", "tool"):
+        rest = rest[:-1]
+    return rest or messages
+
+
+def _last_user(messages: list[dict]) -> int:
+    """Index of the user's message, -1 if there is none (no turn). Open WebUI 0.13.1 appends hidden tool results after it
+    (memory recall, skills list, attached knowledge list: an assistant message with `tool_calls` and `tool` messages),
+    so the last message of the request can be a tool message; the pipe's own turn is the last `user` message."""
+    return next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), -1)
+
+
+def _hidden_results(messages: list[dict]) -> bool:
+    """Did Open WebUI append hidden tool results after the user's message?"""
+    turn = _last_user(messages)
+    return turn >= 0 and any(m.get("role") == "tool" or m.get("tool_calls") for m in messages[turn + 1 :])
+
+
+def _tool_only(m: dict) -> bool:
+    return m.get("role") == "assistant" and bool(m.get("tool_calls")) and not _text(m.get("content")).strip()
+
+
+def _previous(messages: list[dict]):
+    """The last assistant message before the user's turn (tool results and a user message without an answer, e.g. a
+    failed turn, are skipped): its dict; `"hidden"` if only hidden tool results are
+    there (a queued message is stored with `output` of hidden tool results only, and Open WebUI rebuilds the history from
+    `output`, so the text with our marker is not in the request); `None` if there is no assistant message before the
+    turn."""
+    turn = _last_user(messages)
+    for m in reversed(messages[: max(turn, 0)]):
         if m.get("role") == "assistant":
-            found = MARK.search(m.get("content") or "")
-            st = _decode(found.group(1)) if found else {}
-            # a forged or broken marker is no state; the user can edit the marker, so ids that go into a service path
-            # must be plain ids (`<id>#` or `<id>?...` would cut off or replace the user_id owner check)
-            ids_ok = all(isinstance(st[k], str) and SERVICE_ID.fullmatch(st[k]) for k in ("job", "draft") if k in st)
-            return st if ids_ok and all(k in st for k in STATE_KEYS.get(st.get("state"), ("?",))) else {}
-    return {}
+            return "hidden" if _tool_only(m) else m
+        # tool results, and a user message whose turn failed before an answer was stored: look further back
+    return None
 
 
-async def _stored_parent(chat_id: str | None, metadata: dict | None) -> dict | None:
-    """The assistant message that the current user message answers, read from the chat in Open WebUI's database.
+def _marker_state(content) -> dict:
+    found = MARK.search(_text(content))
+    st = _decode(found.group(1)) if found else {}
+    # a forged or broken marker is no state; the user can edit the marker, so ids that go into a service path
+    # must be plain ids (`<id>#` or `<id>?...` would cut off or replace the user_id owner check)
+    ids_ok = all(isinstance(st[k], str) and SERVICE_ID.fullmatch(st[k]) for k in ("job", "draft") if k in st)
+    return st if ids_ok and all(k in st for k in STATE_KEYS.get(st.get("state"), ("?",))) else {}
 
-    Since Open WebUI 0.12.4 context compaction also runs in short chats (user, assistant, user) that are over the token
-    threshold, and it summarizes the assistant message away, together with our state marker. The chat in the database
-    still has it. The user message comes from `__metadata__["user_message"]`; when a reply is regenerated the browser
-    sends none and Open WebUI sets `__metadata__["user_message_id"]` itself (main.py), so that message is read from the
-    same chat to find its parent."""
-    if not chat_id:
-        return None
-    metadata = metadata or {}
-    parent = (metadata.get("user_message") or {}).get("parentId")
-    uid = metadata.get("user_message_id")
-    if not (isinstance(parent, str) and parent) and isinstance(uid, str) and uid:
-        from open_webui.models.chats import Chats
 
-        user_message = await Chats.get_message_by_id_and_message_id(chat_id, uid)
-        parent = (user_message or {}).get("parentId")
-    if not (isinstance(parent, str) and parent):
-        return None
+def _state(messages: list[dict]) -> dict:
+    prev = _previous(messages)
+    return _marker_state(prev.get("content")) if isinstance(prev, dict) else {}
+
+
+# Open WebUI's NON_SAVED_CHAT_ID_PREFIXES (utils/chat_id.py, v0.13.3): temporary and channel chats are not stored
+UNSAVED_CHAT_PREFIXES = ("temporary:", "local:", "channel:")
+_MAX_PARENTS = 20  # user messages in a row without an answer (failed turns) that the lookup walks past
+
+
+async def _stored_parent(chat_id: str | None, metadata: dict | None) -> tuple[bool, dict | None]:
+    """(known, message): the assistant message that the current user message answers, read from the chat in Open
+    WebUI's database. `known` is False when the chat cannot tell (no saved chat, message not found); the caller then
+    reads the request. (True, None): the chat has no answer before this message (its first message).
+
+    The stored chat is the source of the state because the request is not: Open WebUI compacts it (0.12.4), rebuilds
+    it from `output` with hidden tool results (0.13.1) and appends a regenerated reply and its instruction (0.13). The
+    user message comes from `__metadata__["user_message"]`; when a reply is regenerated the browser sends none and Open
+    WebUI sets `__metadata__["user_message_id"]` itself (main.py), so that message is read from the same chat. User
+    messages without an answer (a failed turn) are walked past to the answer before them."""
+    if not chat_id or chat_id.startswith(UNSAVED_CHAT_PREFIXES):
+        return False, None
     from open_webui.models.chats import Chats
 
-    stored = await Chats.get_message_by_id_and_message_id(chat_id, parent)
-    return stored if isinstance(stored, dict) and stored.get("role", "assistant") == "assistant" else None
+    metadata = metadata or {}
+    user_message = metadata.get("user_message")
+    if isinstance(user_message, dict) and "parentId" in user_message:
+        parent = user_message.get("parentId")
+    else:
+        uid = metadata.get("user_message_id")
+        stored = await Chats.get_message_by_id_and_message_id(chat_id, uid) if isinstance(uid, str) and uid else None
+        if not isinstance(stored, dict):
+            return False, None
+        parent = stored.get("parentId")
+    for _ in range(_MAX_PARENTS):
+        if not (isinstance(parent, str) and parent):
+            return True, None
+        stored = await Chats.get_message_by_id_and_message_id(chat_id, parent)
+        if not isinstance(stored, dict):
+            return False, None
+        if stored.get("role", "assistant") == "assistant":
+            return True, stored
+        parent = stored.get("parentId")
+    return False, None
 
 
 async def _state_of_chat(messages: list[dict], chat_id: str | None, metadata: dict | None) -> dict:
-    """The chat state: from the assistant messages of the request, else (compaction removed them) from the database."""
-    if st := _state(messages):
-        return st
-    if any(m.get("role") == "assistant" for m in messages[:-1]):  # an answer without a marker: no state
-        return {}
+    """The chat state: from the stored answer before the user's message (`_stored_parent`), else (no saved chat, or
+    the lookup failed) from the assistant message before the turn in the request."""
     try:
-        stored = await _stored_parent(chat_id, metadata)
-    except Exception as e:  # no Open WebUI around (script), or the lookup failed: as before, no state
+        known, stored = await _stored_parent(chat_id, metadata)
+    except Exception as e:  # no Open WebUI around (script), or the lookup failed: read the request
         logger.warning("chat state not read from the stored chat (%s: %s)", type(e).__name__, e)
-        return {}
-    return _state([{"role": "assistant", "content": stored.get("content") or ""}, {}]) if stored else {}
+        known, stored = False, None
+    if known:
+        return _marker_state(stored.get("content")) if stored else {}
+    prev = _previous(messages)
+    return _marker_state(prev.get("content")) if isinstance(prev, dict) else {}
 
 
 _MD_SPECIAL = re.compile(r"([\\`*_\[\]<>!|~#])")
@@ -706,19 +779,23 @@ class Pipe:
                 await __event_emitter__({"type": "status", "data": {"description": text, "done": done}})
 
         async def hold(text: str) -> str:
-            """Text of a message that the service replaces with the report later. Open WebUI v0.11 renders the stored
-            `output` of a message in preference to its `content`, and no API lets the service change `output`. So the
-            text
-            goes out as a `replace` event (stored as content, output stays empty) and the pipe returns nothing."""
-            if not __event_emitter__:
+            """Text of a message that the service replaces with the report later. Open WebUI renders the stored `output`
+            of a message in preference to its `content` (`ContentRenderer.svelte`), and the delivery writes `content`.
+            So the text goes out as a `replace` event (stored as content, output stays empty) and the pipe returns
+            nothing. Exception: with hidden tool results (0.13.1+, see `_hidden_results`) Open WebUI puts them into the
+            message's `output`, so `output` is not empty and the bubble would render empty. Then the text is returned as
+            the answer (the `output` has a text item, the bubble shows it, and the history rebuilt from `output` keeps
+            our marker); the delivery must then replace `output` too (docs/integration.md section 9)."""
+            if not __event_emitter__ or hidden:
                 return text
             await __event_emitter__({"type": "replace", "data": {"content": text}})
             return ""
 
         messages = body.get("messages") or []
-        text = (messages[-1].get("content") or "") if messages else ""
-        if isinstance(text, list):  # multimodal content parts
-            text = " ".join(p.get("text", "") for p in text if isinstance(p, dict))
+        hidden = _hidden_results(messages)
+        messages = _drop_regeneration(messages, __metadata__)
+        turn = _last_user(messages)
+        text = _text(messages[turn].get("content")) if turn >= 0 else ""
         # Open WebUI rewrites the last message when files are attached (retrieval context, <attached_files> tags). The
         # user's own words are in the message object it received from the browser.
         typed = ((__metadata__ or {}).get("user_message") or {}).get("content")
