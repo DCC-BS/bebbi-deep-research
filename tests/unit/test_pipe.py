@@ -901,6 +901,25 @@ def test_guided_regeneration_with_hidden_tool_results_is_not_the_turn():
     assert mod._previous(kept) is None  # the regenerated reply's clarify state is not the chat's state
 
 
+def test_a_failed_turn_does_not_lose_the_state():
+    """A turn that failed before an answer was stored leaves two user messages in a row; the job before them is still
+    the chat's state (the pipe reports it instead of starting a new research)."""
+    mod = load_pipe()
+    pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [], "report": None}})
+    history = {
+        "model": "bebbi_deep_research.grossrat",
+        "messages": [
+            {"role": "user", "content": "Frage"},
+            {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})},
+            {"role": "user", "content": "Ist er fertig?"},  # no answer stored
+            {"role": "user", "content": "Ist der Bericht schon fertig?"},
+            *_hidden_tool_results(),
+        ],
+    }
+    out = asyncio.run(pipe.pipe(history, {"id": "u"}))
+    assert "läuft noch" in out and [c[:2] for c in calls] == [("GET", "/jobs/j1?user_id=u")]
+
+
 def _compacted_history(text: str = "Ist der Bericht schon fertig?"):
     """What Open WebUI 0.12.4 hands the pipe after context compaction in a short chat (user, assistant, user): the
     assistant message with our state marker is summarized away, only the summary and the new user message are left."""

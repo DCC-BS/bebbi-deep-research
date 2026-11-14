@@ -382,17 +382,16 @@ def _tool_only(m: dict) -> bool:
 
 
 def _previous(messages: list[dict]):
-    """The assistant message right before the user's turn: its dict; `"hidden"` if only hidden tool results are
+    """The last assistant message before the user's turn (tool results and a user message without an answer, e.g. a
+    failed turn, are skipped): its dict; `"hidden"` if only hidden tool results are
     there (a queued message is stored with `output` of hidden tool results only, and Open WebUI rebuilds the history from
     `output`, so the text with our marker is not in the request); `None` if there is no assistant message before the
     turn."""
     turn = _last_user(messages)
     for m in reversed(messages[: max(turn, 0)]):
-        if m.get("role") == "tool":
-            continue
         if m.get("role") == "assistant":
             return "hidden" if _tool_only(m) else m
-        return None
+        # tool results, and a user message whose turn failed before an answer was stored: look further back
     return None
 
 
@@ -442,10 +441,6 @@ async def _state_of_chat(messages: list[dict], chat_id: str | None, metadata: di
     prev = _previous(messages)
     if isinstance(prev, dict):
         return _marker_state(prev.get("content"))  # an answer without a marker: no state
-    if prev is None and any(
-        m.get("role") == "assistant" and not _tool_only(m) for m in messages[: _last_user(messages)]
-    ):
-        return {}  # older answers only (the one before the turn is gone): as before, no state
     try:
         stored = await _stored_parent(chat_id, metadata)
     except Exception as e:  # no Open WebUI around (script), or the lookup failed: as before, no state
