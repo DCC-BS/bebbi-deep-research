@@ -409,44 +409,59 @@ def _state(messages: list[dict]) -> dict:
     return _marker_state(prev.get("content")) if isinstance(prev, dict) else {}
 
 
-async def _stored_parent(chat_id: str | None, metadata: dict | None) -> dict | None:
-    """The assistant message that the current user message answers, read from the chat in Open WebUI's database.
+# Open WebUI's NON_SAVED_CHAT_ID_PREFIXES (utils/chat_id.py, v0.13.3): temporary and channel chats are not stored
+UNSAVED_CHAT_PREFIXES = ("temporary:", "local:", "channel:")
+_MAX_PARENTS = 20  # user messages in a row without an answer (failed turns) that the lookup walks past
 
-    Since Open WebUI 0.12.4 context compaction also runs in short chats (user, assistant, user) that are over the token
-    threshold, and it summarizes the assistant message away, together with our state marker. The chat in the database
-    still has it. The user message comes from `__metadata__["user_message"]`; when a reply is regenerated the browser
-    sends none and Open WebUI sets `__metadata__["user_message_id"]` itself (main.py), so that message is read from the
-    same chat to find its parent."""
-    if not chat_id:
-        return None
-    metadata = metadata or {}
-    parent = (metadata.get("user_message") or {}).get("parentId")
-    uid = metadata.get("user_message_id")
-    if not (isinstance(parent, str) and parent) and isinstance(uid, str) and uid:
-        from open_webui.models.chats import Chats
 
-        user_message = await Chats.get_message_by_id_and_message_id(chat_id, uid)
-        parent = (user_message or {}).get("parentId")
-    if not (isinstance(parent, str) and parent):
-        return None
+async def _stored_parent(chat_id: str | None, metadata: dict | None) -> tuple[bool, dict | None]:
+    """(known, message): the assistant message that the current user message answers, read from the chat in Open
+    WebUI's database. `known` is False when the chat cannot tell (no saved chat, message not found); the caller then
+    reads the request. (True, None): the chat has no answer before this message (its first message).
+
+    The stored chat is the source of the state because the request is not: Open WebUI compacts it (0.12.4), rebuilds
+    it from `output` with hidden tool results (0.13.1) and appends a regenerated reply and its instruction (0.13). The
+    user message comes from `__metadata__["user_message"]`; when a reply is regenerated the browser sends none and Open
+    WebUI sets `__metadata__["user_message_id"]` itself (main.py), so that message is read from the same chat. User
+    messages without an answer (a failed turn) are walked past to the answer before them."""
+    if not chat_id or chat_id.startswith(UNSAVED_CHAT_PREFIXES):
+        return False, None
     from open_webui.models.chats import Chats
 
-    stored = await Chats.get_message_by_id_and_message_id(chat_id, parent)
-    return stored if isinstance(stored, dict) and stored.get("role", "assistant") == "assistant" else None
+    metadata = metadata or {}
+    user_message = metadata.get("user_message")
+    if isinstance(user_message, dict) and "parentId" in user_message:
+        parent = user_message.get("parentId")
+    else:
+        uid = metadata.get("user_message_id")
+        stored = await Chats.get_message_by_id_and_message_id(chat_id, uid) if isinstance(uid, str) and uid else None
+        if not isinstance(stored, dict):
+            return False, None
+        parent = stored.get("parentId")
+    for _ in range(_MAX_PARENTS):
+        if not (isinstance(parent, str) and parent):
+            return True, None
+        stored = await Chats.get_message_by_id_and_message_id(chat_id, parent)
+        if not isinstance(stored, dict):
+            return False, None
+        if stored.get("role", "assistant") == "assistant":
+            return True, stored
+        parent = stored.get("parentId")
+    return False, None
 
 
 async def _state_of_chat(messages: list[dict], chat_id: str | None, metadata: dict | None) -> dict:
-    """The chat state: from the assistant message before the turn, else (compaction removed it, or Open WebUI rebuilt
-    it from hidden tool results without the text) from the database."""
-    prev = _previous(messages)
-    if isinstance(prev, dict):
-        return _marker_state(prev.get("content"))  # an answer without a marker: no state
+    """The chat state: from the stored answer before the user's message (`_stored_parent`), else (no saved chat, or
+    the lookup failed) from the assistant message before the turn in the request."""
     try:
-        stored = await _stored_parent(chat_id, metadata)
-    except Exception as e:  # no Open WebUI around (script), or the lookup failed: as before, no state
+        known, stored = await _stored_parent(chat_id, metadata)
+    except Exception as e:  # no Open WebUI around (script), or the lookup failed: read the request
         logger.warning("chat state not read from the stored chat (%s: %s)", type(e).__name__, e)
-        return {}
-    return _marker_state(stored.get("content")) if stored else {}
+        known, stored = False, None
+    if known:
+        return _marker_state(stored.get("content")) if stored else {}
+    prev = _previous(messages)
+    return _marker_state(prev.get("content")) if isinstance(prev, dict) else {}
 
 
 _MD_SPECIAL = re.compile(r"([\\`*_\[\]<>!|~#])")

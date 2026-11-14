@@ -754,7 +754,7 @@ def test_a_queued_message_stored_with_hidden_tool_results_only_is_read_from_the_
 
     async def stored(chat_id, metadata):
         asked.append(metadata["user_message"]["parentId"])
-        return {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
+        return True, {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
 
     monkeypatch.setattr(mod, "_stored_parent", stored)
     meta = {"user_message": {"id": "u3", "parentId": "a2", "content": "abbrechen"}}
@@ -942,7 +942,7 @@ def test_state_survives_context_compaction_by_reading_the_stored_parent_message(
 
     async def stored(chat_id, metadata):
         asked.append((chat_id, metadata["user_message"]["parentId"]))
-        return {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
+        return True, {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
 
     monkeypatch.setattr(mod, "_stored_parent", stored)
     meta = {"user_message": {"id": "u2", "parentId": "a1", "content": "fertig?"}}
@@ -951,27 +951,40 @@ def test_state_survives_context_compaction_by_reading_the_stored_parent_message(
     assert "läuft noch" in out and [c[:2] for c in calls] == [("GET", "/jobs/j1?user_id=u")]
 
 
-def test_stored_parent_is_not_read_when_the_request_has_the_answer_or_no_parent(monkeypatch):
+def test_the_stored_chat_wins_over_the_request_and_the_request_is_the_fallback(monkeypatch):
+    """The stored answer before the user's message is the state, whatever the request holds (compaction, hidden tool
+    results and regeneration change the request, not the chat). When the chat cannot tell, the request counts."""
     mod = load_pipe()
-
-    async def boom(chat_id, metadata):
-        raise AssertionError("the database must not be read")
-
-    monkeypatch.setattr(mod, "_stored_parent", boom)
     meta = {"user_message": {"id": "u2", "parentId": "a1"}}
-    # the assistant message is in the request (no compaction): its marker counts, a missing marker is no state
-    with_marker = _job_history(mod)["messages"]
-    assert asyncio.run(mod._state_of_chat(with_marker, "c1", meta)) == {"state": "job", "job": "j1"}
+    with_marker = _job_history(mod)["messages"]  # the request says: job j1
+    clarify = {
+        "role": "assistant",
+        "content": "Fragen" + mod._marker({"state": "clarify", "task": "T", "depth": "quick"}),
+    }
+
+    async def stored(chat_id, metadata):
+        return True, clarify
+
+    monkeypatch.setattr(mod, "_stored_parent", stored)
+    assert asyncio.run(mod._state_of_chat(with_marker, "c1", meta))["state"] == "clarify"
+
+    async def first(chat_id, metadata):  # the chat's first message: no answer before it
+        return True, None
+
+    monkeypatch.setattr(mod, "_stored_parent", first)
+    assert asyncio.run(mod._state_of_chat(with_marker, "c1", meta)) == {}
+
+    async def unknown(chat_id, metadata):  # temporary chat, or the message is not in the chat
+        return False, None
+
+    monkeypatch.setattr(mod, "_stored_parent", unknown)
+    assert asyncio.run(mod._state_of_chat(with_marker, "temporary:x", meta)) == {"state": "job", "job": "j1"}
     no_marker = [
         {"role": "user", "content": "a"},
         {"role": "assistant", "content": "Bericht"},
         {"role": "user", "content": "b"},
     ]
-    assert asyncio.run(mod._state_of_chat(no_marker, "c1", meta)) == {}
-    # first message of a chat: no parent
-    first = [{"role": "user", "content": "Frage"}]
-    assert asyncio.run(mod._state_of_chat(first, "c1", {"user_message": {"id": "u1", "parentId": None}})) == {}
-    assert asyncio.run(mod._state_of_chat(first, "c1", None)) == {}
+    assert asyncio.run(mod._state_of_chat(no_marker, None, None)) == {}
 
 
 def test_a_failing_or_foreign_lookup_gives_no_state(monkeypatch):
@@ -985,7 +998,7 @@ def test_a_failing_or_foreign_lookup_gives_no_state(monkeypatch):
     assert asyncio.run(mod._state_of_chat(_compacted_history()["messages"], "c1", meta)) == {}
 
     async def forged(chat_id, metadata):  # a marker with an id that would change the service path
-        return {"role": "assistant", "content": "x" + mod._marker({"state": "job", "job": "j1/../x"})}
+        return True, {"role": "assistant", "content": "x" + mod._marker({"state": "job", "job": "j1/../x"})}
 
     monkeypatch.setattr(mod, "_stored_parent", forged)
     assert asyncio.run(mod._state_of_chat(_compacted_history()["messages"], "c1", meta)) == {}
@@ -1013,12 +1026,13 @@ def test_stored_parent_reads_the_chat_through_open_webui(monkeypatch):
     for name, module in (("open_webui", pkg), ("open_webui.models", models), ("open_webui.models.chats", chats)):
         monkeypatch.setitem(sys.modules, name, module)
     meta = lambda parent: {"user_message": {"parentId": parent}}  # noqa: E731
-    assert asyncio.run(mod._stored_parent("c1", meta("a1"))) == {"role": "assistant", "content": "x"}
-    assert asyncio.run(mod._stored_parent("c1", meta("u0"))) is None  # not an assistant message
-    assert (
-        asyncio.run(mod._stored_parent(None, meta("a1"))) is None and asyncio.run(mod._stored_parent("c1", {})) is None
-    )
+    assert asyncio.run(mod._stored_parent("c1", meta("a1"))) == (True, {"role": "assistant", "content": "x"})
+    assert asyncio.run(mod._stored_parent("c1", meta("u0"))) == (True, None)  # a user message with no answer before
+    assert asyncio.run(mod._stored_parent("c1", meta(None))) == (True, None)  # the chat's first message
     assert seen == [("c1", "a1"), ("c1", "u0")]
+    for chat in (None, "temporary:x", "local:x", "channel:x"):  # nothing stored
+        assert asyncio.run(mod._stored_parent(chat, meta("a1"))) == (False, None)
+    assert asyncio.run(mod._stored_parent("c1", {})) == (False, None)  # the message is not named
 
 
 def test_stored_parent_after_regenerate_uses_user_message_id_of_the_same_chat(monkeypatch):
@@ -1045,14 +1059,19 @@ def test_stored_parent_after_regenerate_uses_user_message_id_of_the_same_chat(mo
     chats.Chats = Chats
     for name, module in (("open_webui", pkg), ("open_webui.models", models), ("open_webui.models.chats", chats)):
         monkeypatch.setitem(sys.modules, name, module)
-    assert asyncio.run(mod._stored_parent("c1", {"user_message_id": "u2"}))["role"] == "assistant"
+    assert asyncio.run(mod._stored_parent("c1", {"user_message_id": "u2"}))[1]["role"] == "assistant"
     assert seen == [("c1", "u2"), ("c1", "a1")]  # always the chat of the request
-    assert asyncio.run(mod._stored_parent("c1", {"user_message": None, "user_message_id": "u0"})) is None
-    assert asyncio.run(mod._stored_parent("c1", {"user_message_id": "missing"})) is None
+    assert asyncio.run(mod._stored_parent("c1", {"user_message": None, "user_message_id": "u0"})) == (True, None)
+    assert asyncio.run(mod._stored_parent("c1", {"user_message_id": "missing"})) == (False, None)
     # `user_message` with a parent wins, no second lookup
     seen.clear()
-    assert asyncio.run(mod._stored_parent("c1", {"user_message": {"parentId": "a1"}, "user_message_id": "u2"}))
+    assert asyncio.run(mod._stored_parent("c1", {"user_message": {"parentId": "a1"}, "user_message_id": "u2"}))[0]
     assert seen == [("c1", "a1")]
+    # a failed turn (user message without an answer) is walked past to the answer before it
+    store["u3"] = {"role": "user", "parentId": "u2"}
+    assert asyncio.run(mod._stored_parent("c1", {"user_message": {"parentId": "u3"}}))[1]["content"] == "x"
+    # a parent that is not in the chat: the chat cannot tell
+    assert asyncio.run(mod._stored_parent("c1", {"user_message": {"parentId": "gone"}})) == (False, None)
 
 
 def test_a_failed_state_lookup_is_logged(monkeypatch, caplog):
