@@ -881,6 +881,26 @@ def test_guided_regeneration_is_not_the_turn():
     assert sent and sent[0][0] == "/plans" and "weiter" in sent[0][1]["task"] and "kürzer" not in sent[0][1]["task"]
 
 
+def test_guided_regeneration_with_hidden_tool_results_is_not_the_turn():
+    """Open WebUI 0.13.3 appends the regeneration instruction first and the hidden tool results after it
+    (middleware.py), so the request ends with a tool message. The instruction is still not the turn: regenerating the
+    clarifying questions with "Mach es kürzer" must not take the instruction as the answers."""
+    mod = load_pipe()
+    clarify = {
+        "role": "assistant",
+        "content": "Fragen" + mod._marker({"state": "clarify", "task": "T", "depth": "quick"}),
+    }
+    history = [
+        {"role": "user", "content": "Frage"},
+        clarify,  # the reply to regenerate
+        {"role": "user", "content": "Mach es kürzer"},  # the instruction
+        *_hidden_tool_results(),
+    ]
+    kept = mod._drop_regeneration(history, {"regeneration_message_id": "a1"})
+    assert [m.get("content") for m in kept] == ["Frage"]
+    assert mod._previous(kept) is None  # the regenerated reply's clarify state is not the chat's state
+
+
 def _compacted_history(text: str = "Ist der Bericht schon fertig?"):
     """What Open WebUI 0.12.4 hands the pipe after context compaction in a short chat (user, assistant, user): the
     assistant message with our state marker is summarized away, only the summary and the new user message are left."""

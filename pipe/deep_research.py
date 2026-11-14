@@ -350,9 +350,15 @@ def _drop_regeneration(messages: list[dict], metadata: dict | None) -> list[dict
     """Guided regeneration: Open WebUI appends the reply to revise (an assistant message) and the user's instruction (a
     user message) after the turn (`regeneration_message_id` in the metadata; middleware.py). The pipe has no use for the
     instruction; the turn is the user message before the regenerated reply, and that reply's state is not current."""
-    if not (metadata or {}).get("regeneration_message_id") or not messages or messages[-1].get("role") != "user":
+    if not (metadata or {}).get("regeneration_message_id"):
         return messages
-    rest = messages[:-1]
+    # hidden tool results come after the instruction (middleware.py appends them last)
+    end = len(messages)
+    while end and (messages[end - 1].get("role") == "tool" or _tool_only(messages[end - 1])):
+        end -= 1
+    if not end or messages[end - 1].get("role") != "user":
+        return messages
+    rest = messages[: end - 1]
     while rest and rest[-1].get("role") in ("assistant", "tool"):
         rest = rest[:-1]
     return rest or messages
