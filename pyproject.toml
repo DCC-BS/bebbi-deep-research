@@ -1,6 +1,6 @@
 [project]
 name = "bebbi-deep-research"
-version = "1.2.7"
+version = "1.2.8"
 description = "Deep-research agent and job service for Bebbi Bot (Open WebUI, Kanton Basel-Stadt)"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -19,7 +19,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "tzdata>=2024.2",
     "python-docx>=1.2.0",
-    "dcc-backend-common[fastapi,pydantic-ai]>=0.1.23",
+    "dcc-backend-common[fastapi,pydantic-ai]>=0.1.24",
     "dependency-injector>=4.49.1",
     "rich>=15.0.0",
     "numpy>=2.1",
@@ -50,7 +50,7 @@ dev = [
 # Supply-chain cooldown: uv only uses distributions uploaded at least 7 days ago.
 exclude-newer = "P7D"
 # dcc-backend-common: our own package(s), always current (permanent).
-exclude-newer-package = { dcc-backend-common = "P1D" }
+exclude-newer-package = { dcc-backend-common = "P0D" }
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests/unit"]
