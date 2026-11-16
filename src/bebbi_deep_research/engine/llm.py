@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, override
 
-import httpx
+import httpx2
 import json_repair
 import numpy as np
 from dcc_backend_common.config import log_secret
@@ -156,7 +156,7 @@ class RoleAgent(BaseAgent[None, str]):
         super().__init__(config, deps_type=None, output_type=str, enable_thinking=config.enable_thinking)
 
     @override
-    def _build_http_client(self) -> httpx.AsyncClient:
+    def _build_http_client(self) -> httpx2.AsyncClient:
         """backend-common's retrying client, plus a log line and a counter for every retry."""
         client = super()._build_http_client()
         config = getattr(getattr(client, "_transport", None), "config", None)

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import math
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 import structlog
@@ -171,12 +171,13 @@ async def test_llm_retries_are_logged_and_counted(monkeypatch):
 
     lines = []
     monkeypatch.setattr(L, "logger", type("Rec", (), {"warning": lambda self, e, **f: lines.append((e, f))})())
-    replies = [httpx.Response(503), httpx.Response(200, json=completion("ok"))]
+    # backend-common >= 0.1.24 retries through an httpx2 transport
+    replies = [httpx2.Response(503), httpx2.Response(200, json=completion("ok"))]
     agent = RoleAgent(
         LlmSettings(base_url="http://llm/v1", models={"think": "m1", "fast": "m2", "embed": "e"}).role("fast")
     )
     transport = agent._openai_client._client._transport
-    transport.wrapped = httpx.MockTransport(lambda r: replies.pop(0))
+    transport.wrapped = httpx2.MockTransport(lambda r: replies.pop(0))
     transport.config["wait"] = wait_none()
     before = metrics.value("research_llm_retries_total", model="m2")
     out, _ = await agent.complete("u", "s")
