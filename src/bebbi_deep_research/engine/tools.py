@@ -9,7 +9,7 @@ import time
 from collections import Counter
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from dcc_backend_common.logger import get_logger
 
 from . import metrics
@@ -96,7 +96,7 @@ class Tools:
         """Create the HTTP client for search and fetch."""
         self.search_url, self.search_key = search_url, search_key
         self.firecrawl_url, self.firecrawl_key = firecrawl_url, firecrawl_key
-        self.http = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=150, write=30, pool=60))
+        self.http = httpx2.AsyncClient(timeout=httpx2.Timeout(connect=10, read=150, write=30, pool=60))
         self.errors: Counter[str] = Counter()
 
     def _failed(self, tool: str, reason: str, url: str) -> None:
@@ -118,7 +118,7 @@ class Tools:
         body = {"q": q, "num": num, "gl": "ch", "hl": lang if lang in ("de", "fr", "it", "en") else "de"}
         try:
             r = await self.http.post(self.search_url, json=body, headers={"X-API-KEY": self.search_key})
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             self._failed("search", type(e).__name__, self.search_url)
             return []
         if r.status_code != 200:
@@ -159,7 +159,7 @@ class Tools:
                 json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
                 headers={"Authorization": f"Bearer {self.firecrawl_key}"},
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             self._failed("fetch", type(e).__name__, url)
             return "", "", ""
         if r.status_code != 200:
@@ -221,7 +221,7 @@ async def focus(
 
 
 class MCPClient:
-    """Minimal streamable-HTTP MCP client (initialize, tools/list, tools/call), sync httpx in a thread.
+    """Minimal streamable-HTTP MCP client (initialize, tools/list, tools/call), sync httpx2 in a thread.
 
     Every request is retried on 5xx and connection errors (the Grossrat server answers 503 now and then), and
     the session is re-opened when the server forgets it (404).
@@ -256,7 +256,7 @@ class MCPClient:
         self.retries, self.deadline = retries or self.RETRIES, deadline
         self._lock = threading.RLock()  # request ids and the session are shared by the threads of one job
         self._closed = threading.Event()
-        self.http = httpx.Client(
+        self.http = httpx2.Client(
             timeout=timeout,
             headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
         )
@@ -318,7 +318,7 @@ class MCPClient:
                     json={"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
                     headers={"mcp-session-id": sid} if sid else None,
                 )
-            except httpx.TransportError as e:
+            except httpx2.TransportError as e:
                 if last:
                     raise
                 self._retrying(method, attempt, type(e).__name__)

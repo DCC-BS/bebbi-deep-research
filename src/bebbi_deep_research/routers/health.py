@@ -10,7 +10,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
+import httpx2
 from dcc_backend_common.logger import get_logger
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, Response
@@ -58,13 +58,13 @@ async def readiness(response: Response, db: DB = Depends(Provide[Container.db]))
     return {"status": "ready", "checks": {"database": "healthy"}}
 
 
-async def _check(http: httpx.AsyncClient, url: str, api_key: str = "") -> str:
+async def _check(http: httpx2.AsyncClient, url: str, api_key: str = "") -> str:
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     try:
         r = await http.get(url, headers=headers)
-    except httpx.TimeoutException:
+    except httpx2.TimeoutException:
         return "timeout"
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         return f"unreachable ({type(e).__name__})"
     return "healthy" if r.status_code == 200 else f"status {r.status_code}"
 
@@ -76,7 +76,7 @@ async def dependencies(config: AppConfig = Depends(Provide[Container.config])) -
     targets = {"llm": (f"{config.llm_base_url.rstrip('/')}/models", config.llm_api_key)}
     if config.owui_url:
         targets["open-webui"] = (f"{config.owui_url}/health", "")
-    async with httpx.AsyncClient(timeout=DEPENDENCY_TIMEOUT) as http:
+    async with httpx2.AsyncClient(timeout=DEPENDENCY_TIMEOUT) as http:
         results = await asyncio.gather(*(_check(http, url, key) for url, key in targets.values()))
     checks = dict(zip(targets, results, strict=True))
     return {"status": "ok" if all(v == "healthy" for v in checks.values()) else "degraded", "checks": checks}

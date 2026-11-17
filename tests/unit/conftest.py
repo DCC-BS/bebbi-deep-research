@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import httpx
+import httpx2
 import pytest
 from dependency_injector import providers
 
@@ -166,14 +166,14 @@ def reset_fake():
 
 @asynccontextmanager
 async def running(tmp_path, http_factory=None, keep_db=False, **kw):
-    """App with lifespan (DB, worker loop) and an httpx client; yields (client, app)."""
+    """App with lifespan (DB, worker loop) and an httpx2 client; yields (client, app)."""
     app = create_app(make_container(make_settings(tmp_path, **kw), http_factory))
     if os.environ.get("RA_TEST_DATABASE_URL") and not keep_db:
         await app.state.container.db().run("drop table if exists jobs")
         await app.state.container.db().run("drop table if exists drafts")
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://t", headers=H
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://t", headers=H
         ) as c:
             yield c, app
 

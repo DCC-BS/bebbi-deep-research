@@ -4,7 +4,7 @@ import ssl
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import httpx
+import httpx2
 import pytest
 from dcc_backend_common.config import AppConfigError
 
@@ -25,7 +25,7 @@ async def test_probes_and_auth(tmp_path):
         deps = await c.get("/health/dependencies")  # reported, but never a reason to take the pod out
         assert deps.status_code == 200 and deps.json()["status"] == "degraded"
         assert deps.json()["checks"]["llm"] != "healthy" and "open-webui" not in deps.json()["checks"]
-        anonymous = httpx.AsyncClient(transport=c._transport, base_url="http://t")
+        anonymous = httpx2.AsyncClient(transport=c._transport, base_url="http://t")
         r = await anonymous.post("/clarify", json={"task": "x"})
         assert r.status_code == 401 and r.json()["errorId"] == "authentication_failed"
         assert (await c.get("/metrics")).text.count("research_jobs{") == 6
@@ -44,11 +44,11 @@ async def test_readiness_fails_without_the_database(tmp_path):
 
 async def test_dependencies_report_each_service(tmp_path, monkeypatch):
     def handler(request):
-        return httpx.Response(200 if request.url.path == "/v1/models" else 503)
+        return httpx2.Response(200 if request.url.path == "/v1/models" else 503)
 
-    real = httpx.AsyncClient
+    real = httpx2.AsyncClient
     async with running(tmp_path, owui_url="http://owui") as (c, _):
-        monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+        monkeypatch.setattr(httpx2, "AsyncClient", lambda **kw: real(transport=httpx2.MockTransport(handler), **kw))
         r = await c.get("/health/dependencies")
         assert r.json() == {"status": "degraded", "checks": {"llm": "healthy", "open-webui": "status 503"}}
 
@@ -87,11 +87,11 @@ async def test_clarify_plan_edit(tmp_path):
 async def test_job_lifecycle_and_delivery(tmp_path):
     posted = []
 
-    def handler(request: httpx.Request):
+    def handler(request: httpx2.Request):
         posted.append((str(request.url), request.headers["authorization"], json.loads(request.content)))
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    factory = lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler))  # noqa: E731
     async with running(
         tmp_path,
         http_factory=factory,
@@ -132,11 +132,11 @@ async def test_job_lifecycle_and_delivery(tmp_path):
 async def test_delivery_never_uses_the_admin_key_or_the_chat_api(tmp_path):
     seen = []
 
-    def handler(request: httpx.Request):
+    def handler(request: httpx2.Request):
         seen.append(request)
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    factory = lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler))  # noqa: E731
     async with running(
         tmp_path,
         http_factory=factory,
@@ -160,9 +160,9 @@ async def test_delivery_failure_is_recorded_and_report_stays(tmp_path):
 
     def handler(request):
         calls.append(request)
-        return httpx.Response(500, text="boom")
+        return httpx2.Response(500, text="boom")
 
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    factory = lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler))  # noqa: E731
     app_kw = dict(http_factory=factory, night_window=utc_window(True), **DELIVERY)
     async with running(tmp_path, **app_kw) as (c, app):
         app.state.container.job_runner().retry_delay = 0
@@ -181,9 +181,9 @@ async def test_refusal_by_the_endpoint_is_not_retried(tmp_path):
 
     def handler(request):
         calls.append(request)
-        return httpx.Response(403, json={"detail": "message is not queued for this job"})
+        return httpx2.Response(403, json={"detail": "message is not queued for this job"})
 
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    factory = lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler))  # noqa: E731
     async with running(tmp_path, http_factory=factory, night_window=utc_window(True), **DELIVERY) as (c, app):
         app.state.container.job_runner().retry_delay = 0
         job = await submit(c, chat_id="chat1", message_id="msg1")
@@ -198,8 +198,8 @@ async def test_refusal_by_the_endpoint_is_not_retried(tmp_path):
 
 async def test_no_delivery_without_secret(tmp_path):
     calls = []
-    factory = lambda: httpx.AsyncClient(  # noqa: E731
-        transport=httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(200))
+    factory = lambda: httpx2.AsyncClient(  # noqa: E731
+        transport=httpx2.MockTransport(lambda r: calls.append(r) or httpx2.Response(200))
     )
     async with running(
         tmp_path,
@@ -493,8 +493,8 @@ async def test_docx_only_for_finished_jobs(tmp_path):
 
 async def test_no_delivery_without_url(tmp_path):
     calls = []
-    factory = lambda: httpx.AsyncClient(  # noqa: E731
-        transport=httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(200))
+    factory = lambda: httpx2.AsyncClient(  # noqa: E731
+        transport=httpx2.MockTransport(lambda r: calls.append(r) or httpx2.Response(200))
     )
     async with running(
         tmp_path, http_factory=factory, night_window=utc_window(True), owui_delivery_secret="shared"

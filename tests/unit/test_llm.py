@@ -2,7 +2,7 @@
 
 import json
 
-import httpx
+import httpx2
 import pytest
 from pydantic_ai import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelResponse, TextPart
@@ -29,12 +29,12 @@ def llm_over_http(monkeypatch, replies, **settings):
     """LLM whose role agents talk to a fake OpenAI endpoint; returns (llm, request bodies)."""
     seen = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(json.loads(request.content))
-        return httpx.Response(200, json=replies.pop(0))
+        return httpx2.Response(200, json=replies.pop(0))
 
     monkeypatch.setattr(
-        RoleAgent, "_build_http_client", lambda self: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        RoleAgent, "_build_http_client", lambda self: httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     )
     return LLM(LlmSettings(base_url="http://llm/v1", **settings)), seen
 

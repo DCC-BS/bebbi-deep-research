@@ -34,7 +34,7 @@ The engine uses three roles: `think` (planning, research, writing), `fast` (deci
 | `RA_LLM_EMBED_API_KEY` **S** | empty | key for `RA_LLM_EMBED_BASE_URL` (`{job}` as above); used only when that is set |
 | `RA_LLM_MODEL_THINK` / `_FAST` / `_EMBED` | `gemma-think` / `gemma-fast` / `qwen-embed` | real model names. Production: `RedHatAI/gemma-4-31B-it-NVFP4` for think and fast, `Qwen/Qwen3-Embedding-4B` for embed |
 | `RA_LLM_EXTRA_BODY_THINK` / `_FAST` | empty | JSON merged into every chat request of that role, over backend-common's thinking switch (`chat_template_kwargs.enable_thinking`: `true` for think, `false` for fast, always sent). Verify the key name against the model's chat template |
-| `RA_LLM_TIMEOUT_SECONDS` | `1800` | timeout of one chat or embedding request (httpx read timeout: a slow but steady answer does not trip it). The run as a whole is capped by `RA_JOB_TIMEOUT_SECONDS` |
+| `RA_LLM_TIMEOUT_SECONDS` | `1800` | timeout of one chat or embedding request (httpx2 read timeout: a slow but steady answer does not trip it). The run as a whole is capped by `RA_JOB_TIMEOUT_SECONDS` |
 | `RA_LLM_MAX_RETRIES` | `3` | retries of a request after a timeout, a dropped connection, 5xx or 429 (backoff, `Retry-After` honoured); a refused connection is not retried |
 | `RA_LLM_CONCURRENCY` | `6` | requests the process sends to the LLM endpoint at the same time (chat and embeddings, all jobs and chat turns together); further requests wait in the process |
 
@@ -102,7 +102,7 @@ Access rules and limits: [integration.md](integration.md#5b-own-sources-uploaded
 
 ### Proxy
 
-All outgoing HTTP (httpx, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
+All outgoing HTTP (httpx2, OpenAI client) honours `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
 (chart: `proxy.http`, `proxy.https`, `proxy.noProxy`). Production egress is `http://proxy.bs.ch:3128`.
 `NO_PROXY` takes host names, domain suffixes (`.svc`), IPs and CIDR ranges, no wildcards.
 

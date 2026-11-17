@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import httpx
+import httpx2
 import openai
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 
@@ -37,7 +37,7 @@ def describe_error(e: BaseException) -> str:
         reason = "Das Sprachmodell hat keine verwertbare Antwort geliefert."
     elif isinstance(e, TimeoutError):
         reason = "Die Recherche hat das Zeitlimit überschritten."
-    elif isinstance(e, httpx.HTTPError):
+    elif isinstance(e, httpx2.HTTPError):
         reason = "Ein Dienst der Recherche (Suche oder Seitenabruf) ist nicht erreichbar."
     else:
         reason = "Unerwarteter Fehler."

@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Callable
 
-import httpx
+import httpx2
 from dcc_backend_common.logger import get_logger
 from structlog.contextvars import bind_contextvars, bound_contextvars
 
@@ -118,7 +118,7 @@ class JobRunner:
             http_factory: Returns the HTTP client for Open WebUI calls (tests pass a fake).
         """
         self.settings, self.db, self.cfg, self.make_agent = settings, db, cfg, agent_factory
-        self.http_factory = http_factory or (lambda: httpx.AsyncClient(timeout=30))
+        self.http_factory = http_factory or (lambda: httpx2.AsyncClient(timeout=30))
         self.tasks: dict[str, asyncio.Task] = {}
         # job id -> claim token of this run (only the claiming run may write the final status)
         self.owners: dict[str, str] = {}
@@ -499,7 +499,7 @@ class JobRunner:
                 outcome = f"failed: HTTP {r.status_code} {r.text[:200]}"
                 if r.status_code in (400, 401, 403, 404, 413):  # not going to change by waiting
                     break
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 outcome = f"failed: {type(e).__name__}: {e}"[:300]
             if attempt < 2:
                 await asyncio.sleep(self.retry_delay * (attempt + 1))
