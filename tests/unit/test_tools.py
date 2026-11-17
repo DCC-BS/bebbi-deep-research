@@ -1,21 +1,21 @@
-"""Tools (Serper / Firecrawl mapping, fetch restrictions) and MCPClient against httpx.MockTransport."""
+"""Tools (Serper / Firecrawl mapping, fetch restrictions) and MCPClient against httpx2.MockTransport."""
 
 import json
 import time
 
-import httpx
+import httpx2
 import pytest
 
 from bebbi_deep_research.engine import metrics
 from bebbi_deep_research.engine import tools as T
 from bebbi_deep_research.engine.tools import MCPClient, Tools, fetchable
 
-REAL_CLIENT = httpx.Client
+REAL_CLIENT = httpx2.Client
 
 
 def make_tools(handler):
     t = Tools("http://s/search", "skey", "http://fc", "fkey")
-    t.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    t.http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     return t
 
 
@@ -24,7 +24,7 @@ async def test_search_maps_serper_results_and_sends_key_and_locale():
 
     def handler(req):
         seen.append((req.headers["X-API-KEY"], json.loads(req.content)))
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "organic": [
@@ -40,10 +40,10 @@ async def test_search_maps_serper_results_and_sends_key_and_locale():
 
 
 async def test_search_returns_nothing_on_errors_and_bad_json():
-    assert await make_tools(lambda r: httpx.Response(200, text="<html>")).search("q") == []
+    assert await make_tools(lambda r: httpx2.Response(200, text="<html>")).search("q") == []
 
     def boom(req):
-        raise httpx.ConnectError("down")
+        raise httpx2.ConnectError("down")
 
     assert await make_tools(boom).search("q") == []
 
@@ -67,7 +67,7 @@ def logs(monkeypatch):
 
 @pytest.mark.parametrize(("status", "level"), [(401, "error"), (403, "error"), (429, "warning"), (503, "warning")])
 async def test_search_http_errors_are_counted_and_logged_with_the_host_only(logs, status, level):
-    t = make_tools(lambda r: httpx.Response(status, json={"message": "quota"}))
+    t = make_tools(lambda r: httpx2.Response(status, json={"message": "quota"}))
     assert await t.search("geheime frage") == []
     assert t.errors == {f"search:{status}": 1}
     assert metrics.value("research_tool_errors_total", tool="search", reason=str(status)) >= 1
@@ -77,25 +77,25 @@ async def test_search_http_errors_are_counted_and_logged_with_the_host_only(logs
 
 async def test_search_transport_errors_and_bad_json_are_counted(logs):
     def boom(req):
-        raise httpx.ReadTimeout("slow")
+        raise httpx2.ReadTimeout("slow")
 
     t = make_tools(boom)
     await t.search("q")
-    t.http = make_tools(lambda r: httpx.Response(200, text="<html>")).http
+    t.http = make_tools(lambda r: httpx2.Response(200, text="<html>")).http
     await t.search("q")
     assert t.errors == {"search:ReadTimeout": 1, "search:bad_json": 1}
     assert [line[0] for line in logs.lines] == ["warning", "warning"]
 
 
 async def test_fetch_errors_are_counted_and_logged_with_the_page_host_only(logs):
-    t = make_tools(lambda r: httpx.Response(500, json={"success": False}))
+    t = make_tools(lambda r: httpx2.Response(500, json={"success": False}))
     assert await t.fetch_meta("https://www.bs.ch/private/path?x=1") == ("", "", "")
     assert t.errors == {"fetch:500": 1}
     assert logs.lines == [("warning", "fetch failed", {"tool": "fetch", "reason": "500", "host": "www.bs.ch"})]
 
 
 async def test_successful_calls_count_no_errors(logs):
-    t = make_tools(lambda r: httpx.Response(200, json={"organic": [], "data": {"markdown": "x"}}))
+    t = make_tools(lambda r: httpx2.Response(200, json={"organic": [], "data": {"markdown": "x"}}))
     await t.search("q")
     await t.fetch_meta("https://a.ch/")
     assert t.errors == {} and logs.lines == []
@@ -106,7 +106,7 @@ async def test_fetch_meta_maps_firecrawl_title_text_and_date():
 
     def handler(req):
         seen.append((req.url.path, req.headers["Authorization"], json.loads(req.content)["url"]))
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"data": {"markdown": "# Text", "metadata": {"title": "Titel", "modifiedTime": "2024-05-01"}}}
         )
 
@@ -117,12 +117,12 @@ async def test_fetch_meta_maps_firecrawl_title_text_and_date():
 
 
 async def test_fetch_meta_survives_missing_data_and_non_json():
-    assert await make_tools(lambda r: httpx.Response(200, json={"data": None})).fetch_meta("https://a.ch/") == (
+    assert await make_tools(lambda r: httpx2.Response(200, json={"data": None})).fetch_meta("https://a.ch/") == (
         "",
         "",
         "",
     )
-    assert await make_tools(lambda r: httpx.Response(502, text="bad gateway")).fetch_meta("https://a.ch/") == (
+    assert await make_tools(lambda r: httpx2.Response(502, text="bad gateway")).fetch_meta("https://a.ch/") == (
         "",
         "",
         "",
@@ -211,7 +211,7 @@ def mcp(monkeypatch):
     monkeypatch.setattr(MCPClient, "_sleep", lambda self, s: None)
 
     def build(handler, **kw):
-        monkeypatch.setattr(T.httpx, "Client", lambda **k: REAL_CLIENT(transport=httpx.MockTransport(handler), **k))
+        monkeypatch.setattr(T.httpx2, "Client", lambda **k: REAL_CLIENT(transport=httpx2.MockTransport(handler), **k))
         return MCPClient("http://mcp/", **kw)
 
     return build
@@ -222,7 +222,7 @@ def rpc(req):
 
 
 def jsonrpc(req, result):
-    return httpx.Response(
+    return httpx2.Response(
         200, json={"jsonrpc": "2.0", "id": rpc(req)["id"], "result": result}, headers={"mcp-session-id": "s1"}
     )
 
@@ -232,7 +232,7 @@ def standard(req, calls=None):
     if calls is not None:
         calls.append((body.get("method"), req.headers.get("mcp-session-id")))
     if "id" not in body:
-        return httpx.Response(202)
+        return httpx2.Response(202)
     if body["method"] == "initialize":
         return jsonrpc(req, {"protocolVersion": "2025-06-18"})
     if body["method"] == "tools/list":
@@ -259,7 +259,7 @@ def test_mcp_sse_response_takes_the_last_data_line(mcp):
             data = json.dumps(
                 {"jsonrpc": "2.0", "id": body["id"], "result": {"content": [{"type": "text", "text": "sse"}]}}
             )
-            return httpx.Response(
+            return httpx2.Response(
                 200, text=f"event: message\ndata: {data}\n\n", headers={"content-type": "text/event-stream"}
             )
         return standard(req)
@@ -270,7 +270,7 @@ def test_mcp_sse_response_takes_the_last_data_line(mcp):
 def test_mcp_sse_without_data_line_is_a_clear_error(mcp):
     def handler(req):
         if rpc(req).get("method") == "tools/list":
-            return httpx.Response(200, text="event: ping\n\n", headers={"content-type": "text/event-stream"})
+            return httpx2.Response(200, text="event: ping\n\n", headers={"content-type": "text/event-stream"})
         return standard(req)
 
     with pytest.raises(RuntimeError, match="without a data line"):
@@ -283,7 +283,7 @@ def test_mcp_retries_5xx_then_succeeds(mcp):
     def handler(req):
         if rpc(req).get("method") == "tools/call" and n["fails"]:
             n["fails"] -= 1
-            return httpx.Response(503)
+            return httpx2.Response(503)
         return standard(req)
 
     assert mcp(handler).call("a", {"q": 1}) == "ergebnis" and n["fails"] == 0
@@ -296,7 +296,7 @@ def test_mcp_retries_and_error_results_are_logged_and_counted(mcp, logs):
         body = rpc(req)
         if body.get("method") == "tools/call" and n["fails"]:
             n["fails"] -= 1
-            return httpx.Response(503)
+            return httpx2.Response(503)
         if body.get("method") == "tools/call":
             return jsonrpc(req, {"isError": True, "content": [{"type": "text", "text": "overload"}]})
         return standard(req)
@@ -318,9 +318,9 @@ def test_mcp_gives_up_after_the_configured_attempts(mcp):
 
     def handler(req):
         seen.append(1)
-        return httpx.Response(503)
+        return httpx2.Response(503)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(httpx2.HTTPStatusError):
         mcp(handler, retries=2)
     assert len(seen) == 2
 
@@ -330,9 +330,9 @@ def test_mcp_connection_refused_raises_after_few_attempts_on_connect(mcp):
 
     def handler(req):
         seen.append(1)
-        raise httpx.ConnectError("refused")
+        raise httpx2.ConnectError("refused")
 
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(httpx2.ConnectError):
         mcp(handler, retries=3)
     assert len(seen) == 3
 
@@ -342,9 +342,9 @@ def test_mcp_deadline_stops_the_retries_early(mcp):
 
     def handler(req):
         seen.append(1)
-        raise httpx.ConnectError("refused")
+        raise httpx2.ConnectError("refused")
 
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(httpx2.ConnectError):
         mcp(handler, retries=6, deadline=T.time.monotonic() - 1)
     assert len(seen) == 1
 
@@ -358,7 +358,7 @@ def test_mcp_404_reopens_the_session_and_repeats_the_call(mcp):
         calls.append(body.get("method"))
         if body.get("method") == "tools/call" and state["stale"]:
             state["stale"] = False
-            return httpx.Response(404)
+            return httpx2.Response(404)
         return standard(req)
 
     assert mcp(handler).call("a", {"q": 1}) == "ergebnis"
@@ -367,9 +367,9 @@ def test_mcp_404_reopens_the_session_and_repeats_the_call(mcp):
 
 def test_mcp_initialized_notification_error_is_not_swallowed(mcp):
     def handler(req):
-        return httpx.Response(500) if "id" not in rpc(req) else standard(req)
+        return httpx2.Response(500) if "id" not in rpc(req) else standard(req)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(httpx2.HTTPStatusError):
         mcp(handler)
 
 
@@ -406,9 +406,9 @@ def test_closing_the_client_stops_a_retry_loop_in_its_thread(monkeypatch):
     import threading
 
     def handler(r):
-        return httpx.Response(503) if rpc(r).get("method") == "tools/call" else standard(r)
+        return httpx2.Response(503) if rpc(r).get("method") == "tools/call" else standard(r)
 
-    monkeypatch.setattr(T.httpx, "Client", lambda **k: REAL_CLIENT(transport=httpx.MockTransport(handler), **k))
+    monkeypatch.setattr(T.httpx2, "Client", lambda **k: REAL_CLIENT(transport=httpx2.MockTransport(handler), **k))
     c = MCPClient("http://mcp/")
     errors = []
 

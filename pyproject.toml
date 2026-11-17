@@ -5,7 +5,7 @@ description = "Deep-research agent and job service for Bebbi Bot (Open WebUI, Ka
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "httpx>=0.28",
+    "httpx2>=2.13",
     "openai>=1.109",
     "pyyaml>=6.0",
     "json-repair>=0.50",
@@ -38,6 +38,8 @@ packages = ["src/bebbi_deep_research"]
 
 [dependency-groups]
 dev = [
+    # Only for the Open WebUI pipe tests: pipe/*.py run inside Open WebUI and use its httpx.
+    "httpx>=0.28",
     "pre-commit>=4.0",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

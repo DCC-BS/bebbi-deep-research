@@ -94,7 +94,7 @@ class LlmSettings:
     )
     max_tokens: dict[str, int] = field(default_factory=lambda: {"think": 16000, "fast": 4000})
     extra_body: dict[str, dict[str, Any]] = field(default_factory=dict)
-    timeout: int = 1800  # seconds per request (httpx read timeout; RA_LLM_TIMEOUT_SECONDS)
+    timeout: int = 1800  # seconds per request (httpx2 read timeout; RA_LLM_TIMEOUT_SECONDS)
     max_retries: int = 3  # retries of transient errors per request (RA_LLM_MAX_RETRIES)
 
     def role(self, role: str) -> RoleLlmConfig:

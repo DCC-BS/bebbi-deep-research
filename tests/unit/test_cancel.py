@@ -3,7 +3,7 @@
 import asyncio
 import json
 
-import httpx
+import httpx2
 
 from .conftest import DELIVERY, FakeAgent, running, submit, utc_window, wait_status
 from .test_own_service import own_payload
@@ -13,11 +13,11 @@ from .test_pipe import _job_history, load_pipe
 def _delivery_recorder():
     posted = []
 
-    def handler(request: httpx.Request):
+    def handler(request: httpx2.Request):
         posted.append(json.loads(request.content))
-        return httpx.Response(200, json={"ok": True})
+        return httpx2.Response(200, json={"ok": True})
 
-    return posted, lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return posted, lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
 
 async def _until(cond, timeout=5.0):

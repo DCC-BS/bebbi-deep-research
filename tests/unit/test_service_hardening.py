@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-import httpx
+import httpx2
 
 from bebbi_deep_research.services.jobs import MAX_ATTEMPTS
 from bebbi_deep_research.services.policy import describe_error
@@ -51,7 +51,7 @@ async def test_cancel_during_delivery_no_requeue(tmp_path):
         started.set()
         await asyncio.sleep(3600)
 
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(slow))  # noqa: E731
+    factory = lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(slow))  # noqa: E731
     async with running(tmp_path, http_factory=factory, night_window=utc_window(True), **DELIVERY) as (c, app):
         job = await submit(c, chat_id="chat1", message_id="msg1")
         await asyncio.wait_for(started.wait(), 5)
@@ -63,11 +63,11 @@ async def test_cancel_during_delivery_no_requeue(tmp_path):
 async def test_failed_delivery_is_sweeped_later(tmp_path):
     calls = {"n": 0}
 
-    def handler(request: httpx.Request):
+    def handler(request: httpx2.Request):
         calls["n"] += 1
-        return httpx.Response(500, text="x") if calls["n"] <= 3 else httpx.Response(200, json={"ok": True})
+        return httpx2.Response(500, text="x") if calls["n"] <= 3 else httpx2.Response(200, json={"ok": True})
 
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    factory = lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler))  # noqa: E731
     async with running(tmp_path, http_factory=factory, night_window=utc_window(True), **DELIVERY) as (c, app):
         runner = app.state.container.job_runner()
         runner.retry_delay, runner.sweep_after = 0, 0
@@ -257,7 +257,7 @@ def test_error_detail_without_hosts():
 
     e = openai.APIConnectionError(
         message="Connection to http://llm.internal.svc:8000/v1 failed, host llm.internal.svc 10.1.2.3:8000",
-        request=httpx.Request("GET", "http://x"),
+        request=httpx2.Request("GET", "http://x"),
     )
     msg = describe_error(e)
     assert "nicht erreichbar" in msg and "llm.internal" not in msg and "10.1.2.3" not in msg and "http://" not in msg

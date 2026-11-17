@@ -2,7 +2,7 @@
 
 import json
 
-import httpx
+import httpx2
 
 from bebbi_deep_research.services.report import (
     DELIVERY_MAX_BODY,
@@ -79,9 +79,9 @@ async def test_a_report_with_too_many_sources_is_delivered(tmp_path, monkeypatch
     def handler(request):
         body = json.loads(request.content)
         posted.append(body)
-        return httpx.Response(200 if route_accepts(body) else 400, json={})
+        return httpx2.Response(200 if route_accepts(body) else 400, json={})
 
-    factory = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: E731
+    factory = lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler))  # noqa: E731
     async with running(tmp_path, http_factory=factory, night_window=utc_window(True), **DELIVERY) as (c, _):
         job = await submit(c, chat_id="c1", message_id="m1")
         await wait_status(c, job["job_id"], {"done"})

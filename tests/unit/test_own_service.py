@@ -5,7 +5,7 @@ import json
 import re
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 import yaml
 
@@ -233,19 +233,19 @@ def _retriever(tmp_path, handler, allowed=("kb1",)):
         s,
         list(allowed),
         "https://bebbi.example",
-        http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_factory=lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
     )
 
 
 async def test_retriever_queries_only_approved_collections_and_maps_hits(tmp_path):
     calls = []
 
-    def handler(request: httpx.Request):
+    def handler(request: httpx2.Request):
         calls.append(
             (request.method, request.url.path, json.loads(request.content or b"null"), request.headers["authorization"])
         )
         if request.url.path == "/api/v1/retrieval/query/collection":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "documents": [["Direktvergaben bis CHF 15'000.", "Zweiter Abschnitt"]],
@@ -253,7 +253,7 @@ async def test_retriever_queries_only_approved_collections_and_maps_hits(tmp_pat
                     "distances": [[0.68, 0.41]],
                 },
             )
-        return httpx.Response(200, json={"created_at": 1791571774})  # GET /api/v1/files/f9
+        return httpx2.Response(200, json={"created_at": 1791571774})  # GET /api/v1/files/f9
 
     r = _retriever(tmp_path, handler)
     hits = await r("Direktvergabe", OwnCollection("kb1", "Beschaffung"))
@@ -277,8 +277,8 @@ async def test_retriever_queries_only_approved_collections_and_maps_hits(tmp_pat
 
 
 async def test_retriever_errors_are_raised_for_the_tool_to_report(tmp_path):
-    r = _retriever(tmp_path, lambda request: httpx.Response(403, json={"detail": "no"}))
-    with pytest.raises(httpx.HTTPStatusError):
+    r = _retriever(tmp_path, lambda request: httpx2.Response(403, json={"detail": "no"}))
+    with pytest.raises(httpx2.HTTPStatusError):
         await r("x", OwnCollection("kb1", "K"))
     s = make_settings(tmp_path)  # no OWUI key configured
     with pytest.raises(RuntimeError):

@@ -360,7 +360,7 @@ dependencies = [
     { name = "dcc-backend-common", extra = ["fastapi", "pydantic-ai"] },
     { name = "dependency-injector" },
     { name = "fastapi" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "json-repair" },
     { name = "numpy" },
     { name = "openai" },
@@ -377,6 +377,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -393,7 +394,7 @@ requires-dist = [
     { name = "dcc-backend-common", extras = ["fastapi", "pydantic-ai"], specifier = ">=0.1.24" },
     { name = "dependency-injector", specifier = ">=4.49.1" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.28" },
+    { name = "httpx2", specifier = ">=2.13" },
     { name = "json-repair", specifier = ">=0.50" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "openai", specifier = ">=1.109" },
@@ -410,6 +411,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "httpx", specifier = ">=0.28" },
     { name = "pre-commit", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },

@@ -332,7 +332,7 @@ def fit_delivery(content: str, sources: list[dict], envelope: dict) -> tuple[str
     budget = min(DELIVERY_MAX_CONTENT, DELIVERY_MAX_BODY)
 
     def size(text: str) -> int:
-        # json.dumps with ASCII escapes and spaces is at least as long as the UTF-8 body httpx sends
+        # json.dumps with ASCII escapes and spaces is at least as long as the UTF-8 body httpx2 sends
         return len(json.dumps({**envelope, "content": text, "sources": sources}))
 
     if len(content) <= DELIVERY_MAX_CONTENT and size(content) <= DELIVERY_MAX_BODY:

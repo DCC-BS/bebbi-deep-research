@@ -11,7 +11,7 @@ the model or a request made up at run time.
 
 from datetime import UTC, datetime
 
-import httpx
+import httpx2
 from dcc_backend_common.logger import get_logger
 
 from bebbi_deep_research.engine.own import OwnCollection, OwnFile, OwnSources
@@ -124,7 +124,7 @@ class OwuiRetriever:
             k: Passages per query.
         """
         self.settings, self.allowed, self.base_url, self.k = settings, set(allowed), base_url, k
-        self.http_factory = http_factory or (lambda: httpx.AsyncClient(timeout=60))
+        self.http_factory = http_factory or (lambda: httpx2.AsyncClient(timeout=60))
         self._dates: dict[str, str] = {}
 
     @property
@@ -177,7 +177,7 @@ class OwuiRetriever:
                 r = await http.get(f"{self.settings.owui_url}/api/v1/files/{file_id}", headers=self._auth)
                 if r.status_code == 200 and (ts := r.json().get("created_at")):
                     date = datetime.fromtimestamp(int(ts), UTC).strftime("%Y-%m-%d")
-            except (httpx.HTTPError, ValueError, TypeError):
+            except (httpx2.HTTPError, ValueError, TypeError):
                 pass
             self._dates[file_id] = date
         return self._dates[file_id]
