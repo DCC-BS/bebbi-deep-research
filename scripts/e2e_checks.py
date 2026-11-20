@@ -6,6 +6,17 @@ scripts/e2e_checks.py admin-key FILE.txt
     (POST /api/v1/retrieval/query/collection, response documents/metadatas/distances with file_id and name) and a file
     date (GET /api/v1/files/{id}, created_at), and a normal user is still refused on another user's knowledge base.
     Needs the permission workspace.knowledge for the test user.
+scripts/e2e_checks.py queued-message
+    Open WebUI 0.13.4 holds a message the user sends while a reply is still running (the reply ends at its next step,
+    the held message is answered next). The pipe's reply is open for as long as the plan card is; two chats: a status
+    question and then "abbrechen" are sent while the card is open. Both must come back as ordinary turns of the pipe:
+    the first reply is not cut off, the held message is answered with the job state / the cancellation afterwards.
+scripts/e2e_checks.py night CHAT_ID [--pipe]
+    After a night run was delivered into CHAT_ID (from `e2e_owui.py say --approve`): the stored message has the
+    report, unique sources in order, no marker, an empty `output`; the chat API still returns what the delivery and the
+    job service rely on (`write_access` on the chat is new in 0.13.4, nobody reads it); the Word action
+    attaches one file the owner can download, a second click attaches nothing. With --pipe (daytime path: the service
+    delivers nothing, the user asks again) the last answer is checked and the Word file must be attached already.
 scripts/e2e_checks.py hidden-context
     Open WebUI 0.13.1 appends hidden tool results (here: the knowledge base attached to the model) after the user's
     message, so the pipe sees a tool message last, and stores a queued message with hidden tool results only. Four
@@ -15,7 +26,11 @@ scripts/e2e_checks.py hidden-context
     preference to `content`), or if a later turn does not find the job.
 """
 
+import re
 import sys
+import threading
+import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -104,10 +119,219 @@ def hidden_context() -> None:
         sio.disconnect()
 
 
+def _post_turn(cl: "e.Client", chat_id: str, text: str, model: str, session_id: str) -> httpx.Response:
+    """A user turn sent like the browser does while a reply is running: parent is the open assistant message."""
+    hist = cl.get_chat(chat_id)["chat"]["history"]
+    parent = hist.get("currentId")
+    uid, aid = str(uuid.uuid4()), str(uuid.uuid4())
+    user = {
+        "id": uid,
+        "parentId": parent,
+        "childrenIds": [],
+        "role": "user",
+        "content": text,
+        "timestamp": int(time.time()),
+        "models": [model],
+    }
+    msgs = [{"role": m["role"], "content": m["content"]} for m in cl.path(cl.get_chat(chat_id))]
+    payload = {
+        "model": model,
+        "messages": msgs + [{"role": "user", "content": text}],
+        "stream": True,
+        "chat_id": chat_id,
+        "id": aid,
+        "message_ids": [{"model_id": model, "message_id": aid, "modelIdx": 0}],
+        "session_id": session_id,
+        "parent_id": parent,
+        "user_message": user,
+        "background_tasks": {"follow_up_generation": False},
+        "features": {},
+        "params": {},
+    }
+    return cl.http.post("/api/chat/completions", json=payload)
+
+
+def _wait(cond, timeout: float = 120.0) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(1)
+    return False
+
+
+def _queued_case(
+    env: dict, model: str, held_text: str, expect: tuple[str, ...], label: str, first_ok: tuple[str, ...]
+) -> None:
+    cl = e.Client(env)
+    cid = cl.new_chat(model)
+    sio = cl.open_session(delay=14)  # the card stays open 14 s: the pipe's reply is running
+    first: dict = {}
+
+    def run_first() -> None:
+        aid, text = cl.say(cid, "Welche Hitzemassnahmen plant Basel?", model, session_id=sio.session_id)
+        first.update(aid=aid, text=text)
+
+    def messages() -> dict:
+        return cl.get_chat(cid)["chat"]["history"]["messages"]
+
+    def answered() -> bool:
+        return any(
+            m["role"] == "assistant" and m.get("done") and m["id"] != first.get("aid") and m.get("content")
+            for m in messages().values()
+        )
+
+    t = threading.Thread(target=run_first)
+    t.start()
+    try:
+        _wait(lambda: any(m["role"] == "assistant" for m in messages().values()), 30)
+        time.sleep(4)
+        r = _post_turn(cl, cid, held_text, model, sio.session_id)
+        body = r.json() if r.status_code == 200 else {}
+        check(
+            f"[{label}] second message while the reply runs gets queued=true ({r.status_code} {body})",
+            body.get("queued") is True,
+        )
+        pending = [
+            m for m in messages().values() if m["role"] == "user" and (m.get("meta") or {}).get("status") == "pending"
+        ]
+        check(f"[{label}] held message is stored with meta.status=pending", len(pending) == 1)
+        t.join(120)
+        # (a cancelled job's notice is delivered into the first message by the service: CANCELLED_TEXT)
+        check(
+            f"[{label}] first reply ran to its end ({first.get('text', '')[:50]!r})",
+            any(x in first.get("text", "") for x in first_ok),
+        )
+        check(f"[{label}] held message is answered afterwards", _wait(answered, 90))
+        h = messages()
+        second = [m for m in h.values() if m["role"] == "assistant" and m["id"] != first.get("aid")]
+        text = second[0]["content"] if second else ""
+        check(
+            f"[{label}] answer is the pipe's job state, not a new research ({text[:70]!r})",
+            any(x in text for x in expect),
+        )
+        check(
+            f"[{label}] no message is left pending",
+            not [m for m in h.values() if (m.get("meta") or {}).get("status") == "pending"],
+        )
+    finally:
+        sio.disconnect()
+
+
+def queued_message() -> None:
+    env = e.load_env()
+    model = "bebbi_deep_research.auto"
+    _queued_case(
+        env,
+        model,
+        "Ist der Bericht schon fertig?",
+        ("Die Recherche läuft noch", "Auftrag eingereiht"),
+        "status question",
+        ("Auftrag eingereiht",),
+    )
+    _queued_case(env, model, "abbrechen", ("abgebrochen",), "cancel word", ("Auftrag eingereiht", "abgebrochen"))
+
+
+def night(chat_id: str, pipe: bool = False) -> None:
+    env = e.load_env()
+    cl = e.Client(env)
+    chat = cl.get_chat(chat_id)
+    check(
+        f"chat API answers with write_access ({chat.get('write_access')!r}) for the owner",
+        chat.get("write_access") is True,
+    )
+    msgs = chat["chat"]["history"]["messages"]
+    # delivered report: the first assistant message; pipe path (no delivery): the answer of the later turn
+    m = [x for x in cl.path(chat) if x["role"] == "assistant"][-1 if pipe else 0]
+    check("message is done", m.get("done") is True)
+    check("report text delivered (starts with the report heading)", m.get("content", "").lstrip().startswith("# "))
+    check("state marker is gone from the delivered text", "research-agent:" not in m.get("content", ""))
+    if not pipe:  # the pipe path returns the text, which Open WebUI stores as the `output` message item too
+        out = m.get("output") or []
+        texts = [
+            part.get("text")
+            for item in out
+            if item.get("type") == "message"
+            for part in item.get("content") or []
+            if part.get("type") == "output_text"
+        ]
+        # empty; or, with hidden tool results (a knowledge base on the model), only hidden calls with their outputs plus
+        # the report as the text item: Open WebUI renders `output` in preference to `content`, so the delivery must
+        # have replaced the text item
+        hidden_calls = {i.get("call_id") for i in out if i.get("type") == "function_call" and i.get("hidden")}
+        only_hidden_and_text = all(i.get("type") == "message" or i.get("call_id") in hidden_calls for i in out)
+        check(
+            f"output is empty or hidden items + the report as its text item ({len(out)} items)",
+            not out or (texts == [m.get("content")] and only_hidden_and_text),
+        )
+    srcs = m.get("sources") or []
+    ids = [(s.get("source") or {}).get("name") or (s.get("source") or {}).get("id") for s in srcs]
+    check(
+        f"sources stored once each ({len(srcs)} sources, {len(set(ids))} unique)",
+        len(srcs) > 0 and len(ids) == len(set(ids)),
+    )
+    n_cited = max([int(x) for x in re.findall(r"\[(\d+)\]", m.get("content", ""))] or [0])
+    check(f"every cited [n] has a source (highest [n] {n_cited})", n_cited <= len(srcs))
+    del msgs
+    if pipe:  # the pipe attached the Word file itself and returned the report with the sources events
+        files = [f for f in (m.get("files") or []) if str(f.get("name", "")).endswith(".docx")]
+        check(f"pipe attached one Word file ({len(files)})", len(files) == 1)
+        d = cl.http.get(f"/api/v1/files/{files[0]['id']}/content") if files else None
+        check(
+            f"owner downloads it ({d.status_code if d is not None else None})",
+            d is not None and d.status_code == 200 and d.content[:2] == b"PK",
+        )
+        return
+    sio = cl.open_session()
+    try:
+
+        def action() -> dict:
+            r = cl.http.post(
+                "/api/chat/actions/bebbi_deep_research_download",
+                json={
+                    "model": "bebbi_deep_research.auto",
+                    "messages": [{"role": "assistant", "content": m["content"], "id": m["id"]}],
+                    "chat_id": chat_id,
+                    "id": m["id"],
+                    "session_id": sio.session_id,
+                },
+            )
+            return {"status": r.status_code}
+
+        check("Word action ok (first click)", action()["status"] == 200)
+        time.sleep(2)
+        files = [
+            f
+            for f in (cl.get_chat(chat_id)["chat"]["history"]["messages"][m["id"]].get("files") or [])
+            if str(f.get("name", "")).endswith(".docx")
+        ]
+        check(f"one Word file attached ({len(files)})", len(files) == 1)
+        action()
+        time.sleep(2)
+        files2 = [
+            f
+            for f in (cl.get_chat(chat_id)["chat"]["history"]["messages"][m["id"]].get("files") or [])
+            if str(f.get("name", "")).endswith(".docx")
+        ]
+        check(f"second click attaches nothing ({len(files2)})", len(files2) == 1)
+        if files:
+            d = cl.http.get(f"/api/v1/files/{files[0]['id']}/content")
+            check(
+                f"owner downloads the file ({d.status_code}, {len(d.content)} bytes, PK={d.content[:2] == b'PK'})",
+                d.status_code == 200 and d.content[:2] == b"PK",
+            )
+    finally:
+        sio.disconnect()
+
+
 def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "admin-key" and len(sys.argv) > 2:
         admin_key(sys.argv[2])
+    elif cmd == "queued-message":
+        queued_message()
+    elif cmd == "night" and len(sys.argv) > 2:
+        night(sys.argv[2], pipe="--pipe" in sys.argv)
     elif cmd == "hidden-context":
         hidden_context()
     else:

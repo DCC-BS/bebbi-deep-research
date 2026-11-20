@@ -146,11 +146,12 @@ class Client:
             a.raise_for_status()
         return {"type": "collection", **{k: kb[k] for k in ("id", "name", "description")}, "status": "processed"}
 
-    def open_session(self, choice: int = 0):
+    def open_session(self, choice: int = 0, delay: float = 0.0):
         """Websocket session like the browser's: joins the user's room and answers the ask-user cards of the pipe.
 
         `choice` is the index of the option of the plan card to click (0 = Freigeben); the preset card gets the
-        suggested preset. Returns the socket; its `session_id` goes into the
+        suggested preset. `delay` holds the answer back that many seconds (the pipe's event call, and with it the turn,
+        stays open meanwhile). Returns the socket; its `session_id` goes into the
         completion request, which is how the pipe's event call finds the browser.
         """
         import socketio  # dev dependency (python-socketio[client])
@@ -168,6 +169,7 @@ class Client:
                 # the preset card of the model "Deep Research" (id "preset": the suggested preset is option 0) and the
                 # plan card (id "plan": `choice`, 0 = Freigeben)
                 index = 0 if question["id"] == "preset" else choice
+                time.sleep(delay)
                 return {"status": "answered", "answers": {question["id"]: {"type": "option", "option_index": index}}}
             return None
 
