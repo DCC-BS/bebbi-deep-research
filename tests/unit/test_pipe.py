@@ -1084,3 +1084,254 @@ def test_a_failed_state_lookup_is_logged(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert asyncio.run(mod._state_of_chat([{"role": "user", "content": "x"}], "c1", {})) == {}
     assert "ImportError" in caplog.text and "moved" in caplog.text
+
+
+# ------------------------------------------------ messages typed while a card is open (Open WebUI 0.13.4)
+def test_a_cancel_word_counts_as_its_own_line_or_paragraph():
+    """0.13.4 joins several messages typed while a reply ran with blank lines (subagents.py `combined_content`)."""
+    mod = load_pipe()
+    for text in ("abbrechen", "Abbrechen.", "Wie ist der Stand?\n\nabbrechen", "abbrechen\nEgal", "x\n\nStopp!\n\ny"):
+        assert mod._is_word(text, mod.CANCEL_WORDS), text
+    for text in ("Bitte nicht abbrechen", "abbrechen Sie das nicht", "Wie ist der Stand?", ""):
+        assert not mod._is_word(text, mod.CANCEL_WORDS), text
+
+
+def test_two_held_messages_with_a_cancel_word_cancel_the_job():
+    mod = load_pipe()
+    pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [], "report": None}})
+    out = asyncio.run(pipe.pipe(_job_history(mod, "Ist er fertig?\n\nabbrechen"), {"id": "u"}))
+    assert out == mod.CANCELLED and calls[0][:2] == ("POST", "/jobs/j1/cancel?user_id=u")
+
+
+def test_card_race_gives_up_when_a_message_is_held():
+    mod = load_pipe()
+    mod.HELD_POLL_SECONDS = 0.01
+    cancelled = []
+
+    async def never(event):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    async def quick(event):
+        return "answer"
+
+    polls = []
+
+    async def held():
+        polls.append(1)
+        return len(polls) >= 3
+
+    async def never_held():
+        return False
+
+    async def run():
+        assert await mod._card(never, {}, 5, held) is mod.HELD
+        await asyncio.sleep(0)  # let the cancelled task unwind
+        assert await mod._card(quick, {}, 5, never_held) == "answer"
+        assert await mod._card(quick, {}, 5, None) == "answer"  # no `held`: plain wait_for
+        try:
+            await mod._card(never, {}, 0.05, never_held)
+        except TimeoutError:
+            return True
+        return False
+
+    assert asyncio.run(run()) and cancelled and len(polls) == 3
+
+
+def test_has_queued_message_uses_open_webuis_condition(monkeypatch):
+    import sys
+    import types
+
+    mod = load_pipe()
+    seen = []
+
+    class ChatMessages:
+        @staticmethod
+        async def has_queued_message(chat_id, message_id):
+            seen.append((chat_id, message_id))
+            return message_id == "m-held"
+
+    module = types.ModuleType("open_webui.models.chat_messages")
+    module.ChatMessages = ChatMessages
+    monkeypatch.setitem(sys.modules, "open_webui", types.ModuleType("open_webui"))
+    monkeypatch.setitem(sys.modules, "open_webui.models", types.ModuleType("open_webui.models"))
+    monkeypatch.setitem(sys.modules, "open_webui.models.chat_messages", module)
+    assert asyncio.run(mod._has_queued_message("c1", "m-held")) is True
+    assert asyncio.run(mod._has_queued_message("c1", "m-other")) is False
+    assert seen == [("c1", "m-held"), ("c1", "m-other")]
+    # temporary chats are not stored (no held messages); no ids: nothing to ask
+    assert asyncio.run(mod._has_queued_message("temporary:x", "m-held")) is False
+    assert asyncio.run(mod._has_queued_message(None, "m-held")) is False and len(seen) == 2
+
+    class Broken:
+        @staticmethod
+        async def has_queued_message(*a):
+            raise RuntimeError("db down")
+
+    module.ChatMessages = Broken
+    assert asyncio.run(mod._has_queued_message("c1", "m-held")) is False  # the card is then waited for as before
+
+
+def _blocked_card_pipe(mod, monkeypatch, held_after: int = 2):
+    """A card that nobody answers, and a user who types a message after `held_after` polls."""
+    mod.HELD_POLL_SECONDS = 0.01
+    pipe, calls, asked, events, _call, emit = _card_pipe(mod, [])
+    polls = []
+
+    async def call(event):
+        asked.append(event)
+        await asyncio.sleep(3600)
+
+    async def has_queued(chat_id, message_id):
+        polls.append((chat_id, message_id))
+        return len(polls) >= held_after
+
+    monkeypatch.setattr(mod, "_has_queued_message", has_queued)
+    return pipe, calls, asked, events, call, emit, polls
+
+
+def test_a_message_typed_while_the_plan_card_is_open_ends_the_turn_and_keeps_the_plan(monkeypatch):
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit, polls = _blocked_card_pipe(mod, monkeypatch)
+    body = {"model": "x.grossrat", "messages": [{"role": "user", "content": "Frage schnell"}]}
+    out = asyncio.run(pipe.pipe(body, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    assert polls[0] == ("c1", "m1")  # the reply being written is the parent of the held message
+    assert not any(c[1] == "/jobs" for c in calls) and len(asked) == 1
+    assert "Änderungswunsch" in out and "Rechercheplan" in out
+    st = mod._state([{"role": "assistant", "content": out}, {"role": "user"}])
+    assert st["state"] == "plan" and st["draft"] == "d1" and st["depth"]
+
+
+def test_a_message_typed_while_the_change_dialog_is_open_also_ends_the_turn(monkeypatch):
+    mod = load_pipe()
+    mod.HELD_POLL_SECONDS = 0.01
+    pipe, calls, asked, events, _call, emit = _card_pipe(mod, [])
+    polls = []
+
+    async def call(event):
+        asked.append(event["type"])
+        if event["type"] == "request:user_input":
+            return _pick(1)  # Ändern
+        await asyncio.sleep(3600)  # the input dialog stays open
+
+    async def has_queued(chat_id, message_id):
+        polls.append(1)
+        return True
+
+    monkeypatch.setattr(mod, "_has_queued_message", has_queued)
+    body = {"model": "x.grossrat", "messages": [{"role": "user", "content": "Frage"}]}
+    out = asyncio.run(pipe.pipe(body, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    assert asked == ["request:user_input", "input"] and "Änderungswunsch" in out
+    assert mod._state([{"role": "assistant", "content": out}, {"role": "user"}])["state"] == "plan"
+
+
+def test_a_message_typed_while_the_preset_card_is_open_is_a_new_question(monkeypatch):
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit, polls = _blocked_card_pipe(mod, monkeypatch)
+
+    async def api(method, path, body=None):
+        calls.append((method, path, body))
+        if path == "/clarify":
+            return {"questions": [], "assumptions": [], "preset": "grossrat"}
+        if path == "/presets":
+            return []
+        raise AssertionError(path)
+
+    pipe._api = api
+    body = {"model": "bebbi_deep_research.auto", "messages": [{"role": "user", "content": "Frage"}]}
+    out = asyncio.run(pipe.pipe(body, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    assert "neue Frage" in out and "research-agent" not in out and not any(c[1] == "/plans" for c in calls)
+
+
+def _plan_history(mod, text: str, edits: int = 0):
+    state = {"state": "plan", "draft": "d1", "depth": "quick", **({"edits": edits} if edits else {})}
+    return {
+        "model": "x.grossrat",
+        "messages": [
+            {"role": "user", "content": "Frage"},
+            {"role": "assistant", "content": "Plan ..." + mod._marker(state)},
+            {"role": "user", "content": text},
+        ],
+    }
+
+
+def test_the_held_message_is_read_as_a_change_request_on_the_plan():
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit = _card_pipe(mod, [_pick(0)])
+    out = asyncio.run(
+        pipe.pipe(_plan_history(mod, "Teil 3 weglassen"), {"id": "u"}, emit, "c1", "m2", __event_call__=call)
+    )
+    edit = next(c for c in calls if c[1].endswith("/edit"))
+    assert edit[0:2] == ("POST", "/plans/d1/edit") and edit[2] == {"instruction": "Teil 3 weglassen", "user_id": "u"}
+    assert not any(c[1] == "/clarify" or c[1] == "/plans" for c in calls)  # not a new research
+    assert asked[0]["type"] == "request:user_input"  # the changed plan is shown with the card again
+    job = next(c for c in calls if c[1] == "/jobs")  # approved there
+    assert job[2]["draft_id"] == "d1" and out == ""
+
+
+def test_several_held_messages_are_one_change_request():
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit = _card_pipe(mod, [_pick(2)])
+    asyncio.run(
+        pipe.pipe(
+            _plan_history(mod, "Teil 3 weglassen\n\nNur Basel-Stadt"),
+            {"id": "u"},
+            emit,
+            "c1",
+            "m2",
+            __event_call__=call,
+        )
+    )
+    edit = next(c for c in calls if c[1].endswith("/edit"))
+    assert edit[2]["instruction"] == "Teil 3 weglassen\n\nNur Basel-Stadt"
+
+
+def test_typed_approval_cancel_and_the_edit_limit_on_a_held_plan():
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit = _card_pipe(mod, [])
+    out = asyncio.run(pipe.pipe(_plan_history(mod, "Freigeben"), {"id": "u"}, emit, "c1", "m2", __event_call__=call))
+    assert out == "" and next(c for c in calls if c[1] == "/jobs")[2]["draft_id"] == "d1" and not asked
+
+    pipe, calls, asked, events, call, emit = _card_pipe(mod, [])
+    out = asyncio.run(
+        pipe.pipe(_plan_history(mod, "Egal\n\nabbrechen"), {"id": "u"}, emit, "c1", "m2", __event_call__=call)
+    )
+    assert "verworfen" in out and calls == [] and "research-agent" not in out
+
+    pipe, calls, asked, events, call, emit = _card_pipe(mod, [])
+    out = asyncio.run(
+        pipe.pipe(_plan_history(mod, "Noch ein Wunsch", edits=3), {"id": "u"}, emit, "c1", "m2", __event_call__=call)
+    )
+    assert (
+        "dreimal" in out
+        and calls == []
+        and mod._state([{"role": "assistant", "content": out}, {"role": "user"}])["state"] == "plan"
+    )
+
+
+def test_a_plan_marker_without_a_draft_is_no_state():
+    mod = load_pipe()
+    assert mod._marker_state(mod._marker({"state": "plan", "depth": "quick"})) == {}
+    assert mod._marker_state(mod._marker({"state": "plan", "draft": "d1?user_id=x"})) == {}
+
+
+def test_hidden_results_before_the_turn_and_none_after_it_are_no_hidden_results():
+    """Open WebUI 0.13.4 (#34257) no longer repeats the context lists (memory, skills, attached knowledge) on every
+    turn: the request can hold them before an earlier turn and none after the current user message. The state marker
+    in the answer before the turn is still found, and `hold` keeps using `replace` (no hidden items in this message)."""
+    mod = load_pipe()
+    answer = {"role": "assistant", "content": "Eingereiht" + mod._marker({"state": "job", "job": "j1"})}
+    history = [
+        {"role": "user", "content": "Frage"},
+        *_hidden_tool_results(),  # the lists of the first turn
+        answer,
+        {"role": "user", "content": "Ist er fertig?"},  # no lists after this one
+    ]
+    assert mod._hidden_results(history) is False
+    assert mod._last_user(history) == 4 and mod._state(history) == {"state": "job", "job": "j1"}
+    pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [], "report": None}})
+    out = asyncio.run(pipe.pipe({"model": "x.grossrat", "messages": history}, {"id": "u"}))
+    assert "läuft noch" in out and [c[:2] for c in calls] == [("GET", "/jobs/j1?user_id=u")]

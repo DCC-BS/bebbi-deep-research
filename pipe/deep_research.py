@@ -42,7 +42,10 @@ ATTACHED = re.compile(
 # (card closed or timed out, browser gone, no browser session) counts as "no": nothing runs, a new message starts over.
 APPROVE, CHANGE, DISCARD = "Freigeben", "Ändern", "Verwerfen"
 AUTO = "auto"  # id of the one model that lets the user choose the preset per task
-CANCEL_WORDS = {"abbrechen", "recherche abbrechen", "stopp"}  # the whole message, nothing else, cancels a queued job
+CANCEL_WORDS = {"abbrechen", "recherche abbrechen", "stopp"}  # a whole line or paragraph of the message cancels a job
+APPROVE_WORDS = {"freigeben", "ok", "ja", "starten", "los"}  # typed instead of the card: the plan is approved
+HELD_POLL_SECONDS = 2.0  # how often an open card checks whether the user has typed a message meanwhile
+HELD = object()  # a card ended because the user typed a message (Open WebUI 0.13.4 holds it until this reply is done)
 CANCELLED = "Die Recherche wurde abgebrochen. Es wird kein Bericht erstellt."
 # Version of the service API this pipe speaks (service: routers/contract.py). Sent with every call; the service refuses
 # another version with a German message, so a pipe and a service that do not fit together fail visibly.
@@ -322,7 +325,7 @@ def _filename(job: dict) -> str:
     return job.get("docx_name") or f"Bebbi-Deep-Research_{job.get('id', 'Bericht')}.docx"
 
 
-STATE_KEYS = {"clarify": ("task",), "job": ("job",)}
+STATE_KEYS = {"clarify": ("task",), "job": ("job",), "plan": ("draft",)}
 SERVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # job and draft ids: no "/", "#", "?" or "&" that change the path
 
 
@@ -412,6 +415,52 @@ def _state(messages: list[dict]) -> dict:
 # Open WebUI's NON_SAVED_CHAT_ID_PREFIXES (utils/chat_id.py, v0.13.3): temporary and channel chats are not stored
 UNSAVED_CHAT_PREFIXES = ("temporary:", "local:", "channel:")
 _MAX_PARENTS = 20  # user messages in a row without an answer (failed turns) that the lookup walks past
+
+
+def _is_word(text: str, words: set[str]) -> bool:
+    """Is a line or paragraph of the message exactly one of `words`? Open WebUI 0.13.4 joins several messages that the
+    user typed while a reply ran into one text with blank lines between them (`subagents.py`), so "abbrechen" can be one
+    paragraph of several."""
+    return any(line.strip().strip(".!").lower() in words for line in re.split(r"\n+", text))
+
+
+async def _has_queued_message(chat_id, message_id) -> bool:
+    """Has the user typed a message while this reply runs? Open WebUI 0.13.4 holds it (meta.status "pending", child of
+    this reply) until the reply is done; it is the condition of `ChatMessages.has_queued_message` (chat_messages.py)."""
+    if not chat_id or not message_id or str(chat_id).startswith(UNSAVED_CHAT_PREFIXES):
+        return False
+    try:
+        from open_webui.models.chat_messages import ChatMessages
+
+        return bool(await ChatMessages.has_queued_message(chat_id, message_id))
+    except Exception as e:  # no Open WebUI around, or the lookup failed: wait for the card as before
+        logger.debug("held message not checked (%s: %s)", type(e).__name__, e)
+        return False
+
+
+async def _card(call, event: dict, timeout: float, held=None):
+    """Run an event call (ask-user card, input dialog) and give it up when the user types a message instead.
+
+    A card has no free text, so a message typed meanwhile is held by Open WebUI until this reply ends, which would be
+    when the card times out. `held` (async, no arguments) is polled every HELD_POLL_SECONDS; when it says yes the call
+    is cancelled and HELD returned. Without `held` this is `asyncio.wait_for`."""
+    if held is None:
+        return await asyncio.wait_for(call(event), timeout=timeout)
+    task = asyncio.ensure_future(call(event))
+    end = time.monotonic() + timeout
+    try:
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                raise TimeoutError
+            done, _ = await asyncio.wait({task}, timeout=min(HELD_POLL_SECONDS, left))
+            if done:
+                return task.result()
+            if await held():
+                return HELD
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 async def _stored_parent(chat_id: str | None, metadata: dict | None) -> tuple[bool, dict | None]:
@@ -641,10 +690,11 @@ class Pipe:
             self.valves.OWN_MAX_FILE_CHARS,
         )
 
-    async def _choose_preset(self, call, suggested: str | None) -> str | None:
+    async def _choose_preset(self, call, suggested: str | None, held=None):
         """Let the user confirm the suggested preset or pick another in Open WebUI's ask-user card.
 
-        Returns the preset name, None when there is no answer (card closed or timed out, browser gone). Without a
+        Returns the preset name, None when there is no answer (card closed or timed out, browser gone), HELD when the
+        user typed a message instead (it is answered as a new question after this reply). Without a
         browser session (no card possible) the suggestion, else DEFAULT_PRESET, is taken."""
         labels = self._labels()
         if suggested not in labels:
@@ -672,17 +722,19 @@ class Pipe:
             "allow_other": False,
         }
         try:
-            res = await asyncio.wait_for(
-                call(
-                    {
-                        "type": "request:user_input",
-                        "data": {"questions": [question], "allow_other": False, "timeout_ms": seconds * 1000},
-                    }
-                ),
-                timeout=seconds + 30,
+            res = await _card(
+                call,
+                {
+                    "type": "request:user_input",
+                    "data": {"questions": [question], "allow_other": False, "timeout_ms": seconds * 1000},
+                },
+                seconds + 30,
+                held,
             )
         except Exception:
             return None
+        if res is HELD:
+            return HELD
         answer = (
             ((res or {}).get("answers") or {}).get("preset")
             if isinstance(res, dict) and res.get("status") == "answered"
@@ -691,7 +743,7 @@ class Pipe:
         index = answer.get("option_index") if isinstance(answer, dict) and answer.get("type") == "option" else None
         return names[index] if isinstance(index, int) and 0 <= index < len(names) else None
 
-    async def _decide(self, call, can_change: bool) -> tuple[str, str]:
+    async def _decide(self, call, can_change: bool, held=None) -> tuple[str, str]:
         """Ask the user what happens with the plan.
 
         Open WebUI's ask-user card (`request:user_input`, buttons only, no free text), for "Ändern" followed by an
@@ -717,9 +769,7 @@ class Pipe:
 
         async def ask(event: dict):
             try:
-                return await asyncio.wait_for(
-                    call(event), timeout=seconds + 30
-                )  # the card closes itself after `seconds`
+                return await _card(call, event, seconds + 30, held)  # the card closes itself after `seconds`
             except Exception:
                 return None
 
@@ -730,6 +780,8 @@ class Pipe:
                     "data": {"questions": [question], "allow_other": False, "timeout_ms": seconds * 1000},
                 }
             )
+            if res is HELD:
+                return "held", ""
             answer = (
                 ((res or {}).get("answers") or {}).get("plan")
                 if isinstance(res, dict) and res.get("status") == "answered"
@@ -753,6 +805,8 @@ class Pipe:
                     },
                 }
             )
+            if change is HELD:
+                return "held", ""
             if isinstance(change, str) and change.strip():
                 return "change", change.strip()
             # dialog cancelled or empty: back to the choice
@@ -790,6 +844,9 @@ class Pipe:
                 return text
             await __event_emitter__({"type": "replace", "data": {"content": text}})
             return ""
+
+        async def held() -> bool:
+            return await _has_queued_message(__chat_id__, __message_id__)
 
         messages = body.get("messages") or []
         hidden = _hidden_results(messages)
@@ -848,7 +905,15 @@ class Pipe:
                     await __event_emitter__(
                         {"type": "replace", "data": {"content": shown}}
                     )  # visible while the card is open
-                choice, instruction = await self._decide(__event_call__, st.get("edits", 0) < 3)
+                choice, instruction = await self._decide(__event_call__, st.get("edits", 0) < 3, held)
+                if choice == "held":
+                    # The user typed instead of clicking: Open WebUI answers that message after this reply, with this
+                    # reply as its parent. The marker keeps the plan, so the message is read as a change request.
+                    return (
+                        shown + "\n\n*Ihre Nachricht wird als Änderungswunsch zum Plan behandelt. Mit **freigeben** "
+                        "starten Sie die Recherche, mit **abbrechen** verwerfen Sie den Plan.*"
+                        + _marker({**st, "state": "plan"})
+                    )
                 if choice == "approve":
                     return await submit(st)
                 if choice == "discard":
@@ -862,9 +927,23 @@ class Pipe:
 
         try:
             st = await _state_of_chat(messages, __chat_id__, __metadata__)
+            # --- a plan that was not decided in the card because the user typed a message: that message answers it
+            if st.get("state") == "plan":
+                if _is_word(text, CANCEL_WORDS):
+                    return "*Plan verworfen, es wurde keine Recherche gestartet.*"
+                if _is_word(text, APPROVE_WORDS):
+                    return await submit(st)
+                if st.get("edits", 0) >= 3:
+                    return (
+                        "Der Plan wurde schon dreimal angepasst und kann nicht mehr geändert werden. Schreiben Sie "
+                        "**freigeben** oder **abbrechen**." + _marker(st)
+                    )
+                plan, own_info = await change(st, text)
+                return await review(plan, own_info, st)
+
             # --- running / finished job: report status or result
             if st.get("state") == "job":
-                if text.strip().strip(".!").lower() in CANCEL_WORDS:
+                if _is_word(text, CANCEL_WORDS):
                     try:
                         await self._api("POST", _jpath(f"/jobs/{quote(st['job'], safe='')}/cancel", uid))
                         return CANCELLED
@@ -907,7 +986,12 @@ class Pipe:
                 )
                 if choose:
                     await status("Wählen Sie, wo recherchiert wird", done=True)
-                    picked = await self._choose_preset(__event_call__, c.get("preset"))
+                    picked = await self._choose_preset(__event_call__, c.get("preset"), held)
+                    if picked is HELD:
+                        return (
+                            "*Keine Auswahl erhalten, es wurde keine Recherche gestartet. Ihre neue Nachricht wird als "
+                            "neue Frage behandelt.*"
+                        )
                     if picked is None:
                         return (
                             "*Keine Auswahl erhalten, es wurde keine Recherche gestartet. "
