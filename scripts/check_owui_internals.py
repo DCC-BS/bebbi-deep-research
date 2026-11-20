@@ -27,6 +27,7 @@ def load_pipe():
 
 async def main(user_id: str, file_id: str, kb_id: str, chat_id: str = "") -> None:
     pipe = load_pipe()
+    from open_webui.models.chat_messages import ChatMessages
     from open_webui.models.chats import Chats
     from open_webui.retrieval.utils import filter_accessible_collections
     from open_webui.routers.files import upload_file_handler
@@ -37,10 +38,12 @@ async def main(user_id: str, file_id: str, kb_id: str, chat_id: str = "") -> Non
         filter_accessible_collections,
         Chats.get_message_metadata,
         Chats.get_message_by_id_and_message_id,
+        ChatMessages.has_queued_message,
         upload_file_handler,
     ):
         print(fn.__qualname__, inspect.signature(fn))
     user = await pipe._owui_user(user_id)
+    print("held message in a made-up reply:", await pipe._has_queued_message(chat_id or "none", "no-such-reply"))
     print("user:", user.role)
     file = await pipe._owui_file(user, file_id)
     print("file:", file.filename, file.created_at, (file.meta or {}).get("name"), type(file.data).__name__)
