@@ -112,7 +112,7 @@ Setup:
 
 The **admin API key** (`OWUI_API_KEY`) is still used, read-only, for own sources: `POST /api/v1/retrieval/query/collection`
 (knowledge bases of the user, only ids the pipe approved for the job) and `GET /api/v1/files/{id}` (date of a document).
-Both still accept an admin key at v0.13.3 (`BYPASS_ADMIN_ACCESS_CONTROL` default true, section 7). Create a user
+Both still accept an admin key at v0.13.4 (`BYPASS_ADMIN_ACCESS_CONTROL` default true, section 7). Create a user
 "deep-research-service" with role admin, enable API keys (`ENABLE_API_KEYS=true`; with `ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS` allow
 `/api/v1/retrieval` and `/api/v1/files`), create the key in Settings, Account, API keys, store it as `OWUI_API_KEY`. The key no longer
 needs `/api/v1/chats`.
@@ -180,7 +180,7 @@ users should use a normal model for that. Making the delivered message carry a "
 pipe answer the next message with the same report again, so we left it out. The same holds for a report that the pipe
 returns itself (later message, fallback above): it carries no marker either.
 
-### How the pipe and the delivery fit Open WebUI v0.11.4, v0.12.3, v0.12.4, v0.12.5 and v0.13.3 (found in the end-to-end test)
+### How the pipe and the delivery fit Open WebUI v0.11.4, v0.12.3, v0.12.4, v0.12.5, v0.13.3 and v0.13.4 (found in the end-to-end test)
 
 * **Plan and clarifying questions are plain text**: the planner sees web snippets, so the pipe escapes the Markdown
   characters of every LLM-written line (plan title, task, parts, goals, sub-questions, must-name items, questions,
@@ -203,7 +203,7 @@ returns itself (later message, fallback above): it carries no marker either.
 * **Model list cache**: after installing a function or model, open Open WebUI once (`GET /api/models`) before sending
   completions with the new model id; the first completion otherwise answers "Model not found".
 
-## 5a. Citations and Word download (how Open WebUI v0.11.4, v0.12.3, v0.12.4, v0.12.5 and v0.13.3 do it)
+## 5a. Citations and Word download (how Open WebUI v0.11.4, v0.12.3, v0.12.4, v0.12.5, v0.13.3 and v0.13.4 do it)
 
 **What Open WebUI expects** (read in the image: backend `/app/backend/open_webui`, frontend from the source maps of
 `/app/build/_app/immutable`):
@@ -438,7 +438,24 @@ processing, `files` in the completion request, test user "tester" without admin 
 | 45 | Browser (headless Chromium, test user): queued message of a model with hidden tool results | **empty bubble confirmed** with the `replace`-only hold (0 characters); with the text returned it renders. Delivered report (22 sources) stayed hidden behind the queued text / the bubble stayed empty with the unpatched `dr_delivery` (chat after delivery: only the sources chip). With the proposed `dr_delivery` patch (replaces the text item of `output`, `chat:completion` event with `output` to an open page) the open page showed the report without reload, badges and "13 Sources" |
 | 46 | Same with `capabilities.builtin_tools: false` on the model | no hidden tool results, queued message `output` stays empty, everything as at 0.12.5 (all e2e turns pass except the precondition "hidden tool results present", as it must) |
 
-Local-stack pitfalls found on the way: the `open-webui` and `service` names are not unique on the shared `dr-eval` network when another stack runs next to it (a delivery got `405` from another Open WebUI without the hook): use the container names (`OWUI_URL`, the pipe's `SERVICE_URL`). The image defaults to pgvector: a stack without `PGVECTOR_DB_URL` answers knowledge-base file adds with 503. A secret under 32 characters in the Open WebUI container leaves the delivery route out (log ERROR, POST answers 405). The service retries a failed delivery 3 times in a sweep (`delivery_tries`), then gives up; the pipe path still returns the report.
+**Re-run on Open WebUI v0.13.4** (2026-11-20, image `open-webui:v0.13.4-kdkp-local` with the `dr_delivery` hook, `ENABLE_ADMIN_CHAT_ACCESS=false`, pgvector, compose project outside the repository; the UI part in the browser pane as the test user). **No real model, no research run:** both GPUs were taken by an unrelated training job, so the vLLM stack could not start. The job service ran for real (routes, queue, night window, delivery, Word export) with a scripted agent in place of the LLM (13 sources, 20 s run), the embeddings came from a hash-based fake. Open WebUI, the pipe, the delivery route and the action are the real ones. The daytime and night runs with Gemma are still open.
+
+| # | Scenario | Result |
+|---|---|---|
+| 47 | Night run (model "Deep Research", plan card answered by `e2e_owui.py say --approve`, window opened by restarting the service, chat page open) | passed. `delivery ok`, the open page showed the report, badges and "13 Sources" **without reload**; popup of a badge shows title, Stand and the excerpt. `scripts/e2e_checks.py night CHAT`: `write_access: true` on the chat, message done, text starts with the report, marker gone, `output` empty, 13 unique sources, highest `[n]` 13, Word action attaches one file, the second click none, owner 200, other user 404, admin 200 |
+| 48 | Same with a knowledge base on the model (hidden tool results) | passed. `output` holds the hidden call and its result plus the report as the text item (the delivery route's `_output_with_text`); the open page showed the report without reload; after reload report, badges and sources intact |
+| 49 | Daytime path (service without delivery secret, window open): job done, "Und jetzt?" | passed (`night CHAT --pipe`). The report comes back in the new reply with 13 sources, one Word file attached by the pipe, downloadable by the owner. The first status answer, asked while the job still ran, kept the marker |
+| 50 | **Queued messages steer replies** (new in 0.13.4): a second message while the pipe's reply is open (plan card unanswered for 14 s) | the message is held (`{"queued": true}`, stored with `meta.status: "pending"`); the pipe's reply is **not** cut off (only the tool-call loop of the middleware stops for a held message, `middleware.py` `has_queued_message`; a pipe has no such loop) and the held message is answered as an ordinary new turn after it: a status question gets the job state with the marker, "abbrechen" cancels the job (`scripts/e2e_checks.py queued-message`, 12 checks pass). Behaviour change: before 0.13.4 the second message started a second turn at once. Now it waits until the first reply is done, which for the pipe is the open plan card (card timeout) or a running clarify/plan call. An approved research is queued for the night and the pipe returns at once, so a running or night job never holds a message |
+| 51 | Compaction on a short queued chat, `compact_token_threshold: 20` | passed: status answer with the marker |
+| 52 | Chat saves after a delivery: `POST /chats/{id}` with `{models, files}` and with an empty history patch | passed, message unchanged. A full-history save with the stale queued copy still replaces the delivered message (`update_chat_by_id`, `merge_history`: identical to 0.13.3 apart from `_repair_chat_current_id`) |
+| 53 | Admin key: `scripts/e2e_checks.py admin-key` (needs `workspace.knowledge` for the user) | passed: 200 with `documents`, `metadatas` (`file_id`, `name`), `distances`, `GET /files/{id}` with `created_at`, other user 403 |
+| 54 | Internals: `check_owui_internals.py` in the container, `check_dr_functions.py` for both functions, `scripts/e2e_checks.py hidden-context` | passed (hidden-context: 6 checks, hidden results present, state survives) |
+| 55 | `share_mode` / `write_access` | `GET /chats/{id}` carries `write_access` (true for the owner); `share_mode` lives in the shared-chat copy. Neither the service nor `dr_delivery` reads either (the service makes only the two admin-key calls above; the route uses `Chats.get_chat_by_id`, `get_message_by_id_and_message_id`, `upsert_message_to_chat_by_id_and_message_id`, `get_event_emitter`, signatures unchanged) |
+| 56 | Live events renamed onto the `events` channel | nothing we own listens to them: the e2e client's `events` handler answers `request:user_input` (the pipe's cards; `get_event_call` still calls `sio.call('events', {chat_id, message_id, data})`), the route emits through `get_event_emitter`. The removed `{user_id}:{x}:{y}` stream events and `generate_direct_chat_completion` are not used |
+
+Observation: the queued message carries `usage: {"incomplete": true}` (the pipe returns no usage; same code at 0.13.3), which only matters for analytics.
+
+Local-stack pitfalls found on the way: the `open-webui` and `service` names are not unique on the shared `dr-eval` network when another stack runs next to it (a delivery got `405` from another Open WebUI without the hook): use the container names (`OWUI_URL`, the pipe's `SERVICE_URL`). The image defaults to pgvector: a stack without `PGVECTOR_DB_URL` answers knowledge-base file adds with 503. With rootless Docker the host is not reachable from containers (`host.docker.internal` refuses): run the service and any fake LLM as containers on the stack's network. Embedding settings are persistent config after the first start (change them with `POST /api/v1/retrieval/embedding/update`, not the env). A secret under 32 characters in the Open WebUI container leaves the delivery route out (log ERROR, POST answers 405). The service retries a failed delivery 3 times in a sweep (`delivery_tries`), then gives up; the pipe path still returns the report.
 
 Known limitations:
 
@@ -455,7 +472,7 @@ Known limitations:
   installed, the file is still available from the service (`/jobs/{id}/report.docx`).
 * The native source list shows URLs only; the Markdown list under the report keeps title, Stand and retrieval date, so the
   list is visible twice (one collapsed).
-* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (checked on v0.13.3); re-test it on upgrades (checklist in section 9).
+* The in-process upload imports `open_webui.routers.files` and `open_webui.models.users` (checked on v0.13.4); re-test it on upgrades (checklist in section 9).
 * Own sources were exercised through the API the way the browser sends them; the attach menu and the `#` picker were not clicked in the browser pane.
 * The delivery secret can write the text of any message that the pipe queued and that is still waiting (and nothing else); keep it in the Secret and restrict ingress with the NetworkPolicy. The admin key can read every knowledge base and file.
 * A message that carries a status text (job still running when the user writes again) is a new assistant message; the
@@ -484,7 +501,7 @@ file).
 
 ## 9. Upgrade checklist: Open WebUI internals we depend on
 
-Re-test these when the Open WebUI version changes (checked: v0.13.3). Unit tests fake them (`tests/unit/test_pipe_own.py:
+Re-test these when the Open WebUI version changes (checked: v0.13.4). Unit tests fake them (`tests/unit/test_pipe_own.py:
 test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not if Open WebUI changes); the end-to-end check is
 `scripts/e2e_owui.py` (section 7); `scripts/check_owui_internals.py` runs the helpers of the pipe against the real modules inside the container.
 
@@ -496,6 +513,7 @@ test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not
 | Hidden tool results (0.13.1: with native function calling, memory recall, the skills list and the attached knowledge list are appended after the user's message as an assistant message with `tool_calls` plus `tool` messages, and stored in the message's `output`; `utils/middleware.py` `hidden_tool_result`, `initial_output`; with `capabilities.builtin_tools: false` on the model they do not occur) | (1) the last message the pipe sees can be a `tool` message: the pipe takes the last `user` message as the turn (`_last_user`). (2) A queued message (`replace` event, text only in `content`) is stored with `output` = hidden tool results only, and the history is rebuilt from `output`: the marker is not in the request. So `_state_of_chat` reads the state from the stored chat first (`_stored_parent`: the answer before the user's message, past user messages without an answer); the request (`_previous`) is only the fallback for temporary chats or a failed lookup. (3) `ContentRenderer.svelte` renders `output` in preference to `content`: with hidden items a `replace`-only message is an empty bubble (browser, 0.13.3), so `hold()` returns the text then, and the delivery route must replace the text item of `output` as well (proposed patch for `dr_delivery.py`, kdkp image; without it the delivered report stays hidden behind the queued text unless the model sets `builtin_tools: false`). (4) Guided regeneration appends the reply and an instruction as a user message (`regeneration_message_id`): `_drop_regeneration` | `tests/unit/test_pipe.py: test_hidden_tool_results_*`, `test_a_queued_message_stored_with_hidden_tool_results_only_*`, `test_hold_returns_the_text_*`, `test_guided_regeneration_*`; `scripts/e2e_checks.py hidden-context` (model with a knowledge base attached) |
 | `__task__` values of background requests (`title_generation`, `tags_generation`, `follow_up_generation`, and since 0.12 `memory_review`, `context_compaction`) | the pipe answers every task locally | `functions.py`, `utils/memory.py`, `utils/context_compaction.py` |
 | Context compaction (`utils/context_compaction.py`: `_find_compaction_boundary`; `utils/middleware.py`, `compact_messages_for_request`) | since 0.12.4 it also compacts a chat of three messages (user, assistant, user) over the threshold and drops the assistant message with our state marker from `body["messages"]`; `_state_of_chat` then reads it from the stored chat through `__metadata__["user_message"]["parentId"]` and `Chats.get_message_by_id_and_message_id`. `CONTEXT_COMPACTION_MODEL` empty sends the summary task to the pipe, which answers it with an empty text (Open WebUI falls back to excerpts) | `tests/unit/test_pipe.py: test_state_survives_context_compaction...`; `scripts/e2e_owui.py say --params '{"compact_token_threshold": 20}'` |
+| Queued messages (0.13.4: `main.py` `queue_user_message` in `utils/subagents.py` holds a user message sent while the reply is still `done: false`, answers it after the reply; `middleware.py` `has_queued_message` ends only the tool-call loop) | the pipe's reply is never cut short (no tool-call loop), but a second message during an open plan card or a running clarify/plan call now waits for the reply instead of starting a parallel turn; the held message is then answered with the marker of the first reply in the history | `scripts/e2e_checks.py queued-message` |
 | Pipe Valves button (`has_user_valves` from `UserValves` in `functions.py`; `MessageInput.svelte` since 0.12.4 also needs the permission `chat.valves`) | the pipe has no `UserValves`: users never edit valves, the valves are admin valves (Admin, Functions) | `functions.py` |
 | `source` events, `metadata.source` / `metadata.name` unique per source | citation badges | section 5a |
 | `open_webui.routers.files.upload_file_handler`, `open_webui.models.users.Users` | Word file as the user's file | section 5a |
