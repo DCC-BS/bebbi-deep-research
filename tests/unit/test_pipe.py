@@ -1087,13 +1087,58 @@ def test_a_failed_state_lookup_is_logged(monkeypatch, caplog):
 
 
 # ------------------------------------------------ messages typed while a card is open (Open WebUI 0.13.4)
-def test_a_cancel_word_counts_as_its_own_line_or_paragraph():
+def test_a_cancel_word_counts_as_the_whole_text_or_its_last_paragraph():
     """0.13.4 joins several messages typed while a reply ran with blank lines (subagents.py `combined_content`)."""
     mod = load_pipe()
-    for text in ("abbrechen", "Abbrechen.", "Wie ist der Stand?\n\nabbrechen", "abbrechen\nEgal", "x\n\nStopp!\n\ny"):
+    for text in ("abbrechen", "Abbrechen.", "Wie ist der Stand?\n\nabbrechen", "x\n\n  Stopp!  "):
         assert mod._is_word(text, mod.CANCEL_WORDS), text
-    for text in ("Bitte nicht abbrechen", "abbrechen Sie das nicht", "Wie ist der Stand?", ""):
+    for text in (
+        "Bitte nicht abbrechen",
+        "abbrechen Sie das nicht",
+        "Wie ist der Stand?",
+        "",
+        "Hier ein Log:\nfoo\nStopp\nbar",  # a pasted multi-line message with a line "Stopp"
+        "abbrechen\n\nund doch nicht",  # the word is not the last paragraph
+        "x\n\nStopp!\n\ny",
+    ):
         assert not mod._is_word(text, mod.CANCEL_WORDS), text
+    assert not mod._is_word("ok\n\nTeil 3 weglassen", mod.APPROVE_WORDS)  # an "ok" paragraph followed by a change
+    assert mod._is_word("Teil 3 weglassen\n\nok", mod.APPROVE_WORDS)
+
+
+def test_a_click_that_arrives_while_held_is_checked_wins():
+    mod = load_pipe()
+    mod.HELD_POLL_SECONDS = 0.01
+    gate = asyncio.Event()
+
+    async def call(event):
+        await gate.wait()
+        return "clicked"
+
+    async def held():
+        gate.set()  # the user clicks while the check runs
+        await asyncio.sleep(0.05)  # the call finishes meanwhile
+        return True
+
+    assert asyncio.run(mod._card(call, {}, 5, held)) == "clicked"
+
+
+def test_a_cancelled_card_call_is_awaited():
+    mod = load_pipe()
+    mod.HELD_POLL_SECONDS = 0.01
+    unwound = []
+
+    async def call(event):
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            await asyncio.sleep(0)
+            unwound.append(True)
+
+    async def held():
+        return True
+
+    assert asyncio.run(mod._card(call, {}, 5, held)) is mod.HELD and unwound
 
 
 def test_two_held_messages_with_a_cancel_word_cancel_the_job():
@@ -1315,6 +1360,7 @@ def test_typed_approval_cancel_and_the_edit_limit_on_a_held_plan():
 def test_a_plan_marker_without_a_draft_is_no_state():
     mod = load_pipe()
     assert mod._marker_state(mod._marker({"state": "plan", "depth": "quick"})) == {}
+    assert mod._marker_state(mod._marker({"state": "plan", "draft": "d1"})) == {}  # no depth: review would fail
     assert mod._marker_state(mod._marker({"state": "plan", "draft": "d1?user_id=x"})) == {}
 
 

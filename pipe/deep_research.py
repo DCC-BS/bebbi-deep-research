@@ -325,7 +325,7 @@ def _filename(job: dict) -> str:
     return job.get("docx_name") or f"Bebbi-Deep-Research_{job.get('id', 'Bericht')}.docx"
 
 
-STATE_KEYS = {"clarify": ("task",), "job": ("job",), "plan": ("draft",)}
+STATE_KEYS = {"clarify": ("task",), "job": ("job",), "plan": ("draft", "depth")}
 SERVICE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # job and draft ids: no "/", "#", "?" or "&" that change the path
 
 
@@ -418,10 +418,11 @@ _MAX_PARENTS = 20  # user messages in a row without an answer (failed turns) tha
 
 
 def _is_word(text: str, words: set[str]) -> bool:
-    """Is a line or paragraph of the message exactly one of `words`? Open WebUI 0.13.4 joins several messages that the
-    user typed while a reply ran into one text with blank lines between them (`subagents.py`), so "abbrechen" can be one
-    paragraph of several."""
-    return any(line.strip().strip(".!").lower() in words for line in re.split(r"\n+", text))
+    """Is the message, or its last paragraph, exactly one of `words`? Open WebUI 0.13.4 joins several messages that the
+    user typed while a reply ran into one text with blank lines between them (`subagents.py`), so the word the user typed
+    last is the last paragraph. A word inside a longer paragraph, or followed by more text, is not a command."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    return bool(paragraphs) and paragraphs[-1].strip(".!").lower() in words
 
 
 async def _has_queued_message(chat_id, message_id) -> bool:
@@ -457,10 +458,13 @@ async def _card(call, event: dict, timeout: float, held=None):
             if done:
                 return task.result()
             if await held():
+                if task.done():  # the click came in while `held` ran: it wins, the held text is answered afterwards
+                    return task.result()
                 return HELD
     finally:
         if not task.done():
             task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def _stored_parent(chat_id: str | None, metadata: dict | None) -> tuple[bool, dict | None]:
