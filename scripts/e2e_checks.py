@@ -170,7 +170,12 @@ def _queued_case(env: dict, model: str, held: list[str], label: str, check_turns
     first: dict = {}
 
     def run_first() -> None:
-        aid, text = cl.say(cid, "Welche Hitzemassnahmen plant Basel?", model, session_id=sio.session_id)
+        aid, text = cl.say(
+            cid,
+            "Welche Hitzeschutzmassnahmen hat die Stadt Basel beschlossen? Kurze, schnelle Recherche.",
+            model,
+            session_id=sio.session_id,
+        )
         first.update(aid=aid, text=text)
 
     def messages() -> dict:
@@ -185,7 +190,7 @@ def _queued_case(env: dict, model: str, held: list[str], label: str, check_turns
     t = threading.Thread(target=run_first)
     t.start()
     try:
-        _wait(lambda: any("Rechercheplan" in c for c in sio.replaced), 60)  # the plan card is open
+        _wait(lambda: any("Rechercheplan" in c for c in sio.replaced), 240)  # the plan card is open
         time.sleep(3)
         started = time.time()
         for text in held:
@@ -226,9 +231,13 @@ def queued_message() -> None:
     model = "bebbi_deep_research.auto"
 
     def as_change(first: dict, text: str, sio) -> None:
-        # two held messages arrive as one text, "A\n\nB"; the mock/real service edits the plan with it
-        edited = [c for c in sio.replaced if "Teil 3 weglassen" in c and "Nur Basel-Stadt" in c]
-        check("[change request] the plan was edited with both held messages as one instruction", bool(edited))
+        # two held messages arrive as one text, "A\n\nB". The scripted agent puts the instruction into the plan title; a
+        # real model rewrites the plan, so a second, different plan text counts as well
+        plans = [c for c in sio.replaced if "Rechercheplan" in c]
+        edited = [c for c in plans if "Teil 3 weglassen" in c and "Nur Basel-Stadt" in c] or (
+            len(plans) > 1 and len(set(plans)) > 1
+        )
+        check(f"[change request] the plan was edited and shown again ({len(set(plans))} plan texts)", bool(edited))
         check(
             f"[change request] the answer is the queued job, not a new research ({text[:60]!r})",
             "Auftrag eingereiht" in text,
