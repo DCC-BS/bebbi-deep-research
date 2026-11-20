@@ -7,14 +7,14 @@ scripts/e2e_checks.py admin-key FILE.txt
     date (GET /api/v1/files/{id}, created_at), and a normal user is still refused on another user's knowledge base.
     Needs the permission workspace.knowledge for the test user.
 scripts/e2e_checks.py queued-message
-    Open WebUI 0.13.4 holds a message the user sends while a reply is still running (the reply ends at its next step,
-    the held message is answered next). The pipe's reply is open for as long as the plan card is; two chats: a status
-    question and then "abbrechen" are sent while the card is open. Both must come back as ordinary turns of the pipe:
-    the first reply is not cut off, the held message is answered with the job state / the cancellation afterwards.
+    Open WebUI 0.13.4 holds a message the user types while a reply is still running and answers it after the reply. The
+    pipe's reply is open for as long as its plan card is (a card has no free text), so the pipe polls for a held message
+    and ends its turn at once, keeping the plan in its state marker. Two chats, each with two messages typed while the
+    plan card is open (they arrive as one text, joined by a blank line): change requests ("Teil 3 weglassen",
+    "Nur Basel-Stadt") must edit the plan and queue the job; a status question followed by "abbrechen" must discard it.
 scripts/e2e_checks.py night CHAT_ID [--pipe]
     After a night run was delivered into CHAT_ID (from `e2e_owui.py say --approve`): the stored message has the
-    report, unique sources in order, no marker, an empty `output`; the chat API still returns what the delivery and the
-    job service rely on (`write_access` on the chat is new in 0.13.4, nobody reads it); the Word action
+    report, unique sources in order, no marker and an empty `output`; the Word action
     attaches one file the owner can download, a second click attaches nothing. With --pipe (daytime path: the service
     delivers nothing, the user asks again) the last answer is checked and the Word file must be attached already.
 scripts/e2e_checks.py hidden-context
@@ -160,12 +160,13 @@ def _wait(cond, timeout: float = 120.0) -> bool:
     return False
 
 
-def _queued_case(
-    env: dict, model: str, held_text: str, expect: tuple[str, ...], label: str, first_ok: tuple[str, ...]
-) -> None:
+def _queued_case(env: dict, model: str, held: list[str], label: str, check_turns) -> None:
+    """First turn of a new chat with the plan card held open for 40 s; `held` are typed meanwhile, one after the other.
+    The pipe must end its turn at once (not wait for the card), keeping the plan in its marker; `check_turns(first,
+    second, sio)` then judges the answer to the held messages."""
     cl = e.Client(env)
     cid = cl.new_chat(model)
-    sio = cl.open_session(delay=14)  # the card stays open 14 s: the pipe's reply is running
+    sio = cl.open_session(delay=40)
     first: dict = {}
 
     def run_first() -> None:
@@ -184,32 +185,34 @@ def _queued_case(
     t = threading.Thread(target=run_first)
     t.start()
     try:
-        _wait(lambda: any(m["role"] == "assistant" for m in messages().values()), 30)
-        time.sleep(4)
-        r = _post_turn(cl, cid, held_text, model, sio.session_id)
-        body = r.json() if r.status_code == 200 else {}
-        check(
-            f"[{label}] second message while the reply runs gets queued=true ({r.status_code} {body})",
-            body.get("queued") is True,
-        )
+        _wait(lambda: any("Rechercheplan" in c for c in sio.replaced), 60)  # the plan card is open
+        time.sleep(3)
+        started = time.time()
+        for text in held:
+            r = _post_turn(cl, cid, text, model, sio.session_id)
+            body = r.json() if r.status_code == 200 else {}
+            check(
+                f"[{label}] {text!r} typed while the card is open is held ({r.status_code} {body})",
+                body.get("queued") is True,
+            )
         pending = [
             m for m in messages().values() if m["role"] == "user" and (m.get("meta") or {}).get("status") == "pending"
         ]
-        check(f"[{label}] held message is stored with meta.status=pending", len(pending) == 1)
-        t.join(120)
-        # (a cancelled job's notice is delivered into the first message by the service: CANCELLED_TEXT)
         check(
-            f"[{label}] first reply ran to its end ({first.get('text', '')[:50]!r})",
-            any(x in first.get("text", "") for x in first_ok),
+            f"[{label}] held messages are stored with meta.status=pending ({len(pending)})", len(pending) == len(held)
         )
-        check(f"[{label}] held message is answered afterwards", _wait(answered, 90))
+        t.join(120)
+        took = time.time() - started
+        check(f"[{label}] the first reply ends without waiting for the card ({took:.0f} s of 40 s)", took < 25)
+        check(
+            f"[{label}] it keeps the plan for the held message ({first.get('text', '')[-60:]!r})",
+            "Änderungswunsch" in first.get("text", ""),
+        )
+        check(f"[{label}] held messages are answered afterwards", _wait(answered, 90))
         h = messages()
         second = [m for m in h.values() if m["role"] == "assistant" and m["id"] != first.get("aid")]
         text = second[0]["content"] if second else ""
-        check(
-            f"[{label}] answer is the pipe's job state, not a new research ({text[:70]!r})",
-            any(x in text for x in expect),
-        )
+        check_turns(first, text, sio)
         check(
             f"[{label}] no message is left pending",
             not [m for m in h.values() if (m.get("meta") or {}).get("status") == "pending"],
@@ -221,26 +224,28 @@ def _queued_case(
 def queued_message() -> None:
     env = e.load_env()
     model = "bebbi_deep_research.auto"
-    _queued_case(
-        env,
-        model,
-        "Ist der Bericht schon fertig?",
-        ("Die Recherche läuft noch", "Auftrag eingereiht"),
-        "status question",
-        ("Auftrag eingereiht",),
-    )
-    _queued_case(env, model, "abbrechen", ("abgebrochen",), "cancel word", ("Auftrag eingereiht", "abgebrochen"))
+
+    def as_change(first: dict, text: str, sio) -> None:
+        # two held messages arrive as one text, "A\n\nB"; the mock/real service edits the plan with it
+        edited = [c for c in sio.replaced if "Teil 3 weglassen" in c and "Nur Basel-Stadt" in c]
+        check("[change request] the plan was edited with both held messages as one instruction", bool(edited))
+        check(
+            f"[change request] the answer is the queued job, not a new research ({text[:60]!r})",
+            "Auftrag eingereiht" in text,
+        )
+
+    _queued_case(env, model, ["Teil 3 weglassen", "Nur Basel-Stadt"], "change request", as_change)
+
+    def as_discard(first: dict, text: str, sio) -> None:
+        check(f"[cancel word] 'abbrechen' as the last paragraph discards the plan ({text[:60]!r})", "verworfen" in text)
+
+    _queued_case(env, model, ["Wie ist der Stand?", "abbrechen"], "cancel word", as_discard)
 
 
 def night(chat_id: str, pipe: bool = False) -> None:
     env = e.load_env()
     cl = e.Client(env)
     chat = cl.get_chat(chat_id)
-    check(
-        f"chat API answers with write_access ({chat.get('write_access')!r}) for the owner",
-        chat.get("write_access") is True,
-    )
-    msgs = chat["chat"]["history"]["messages"]
     # delivered report: the first assistant message; pipe path (no delivery): the answer of the later turn
     m = [x for x in cl.path(chat) if x["role"] == "assistant"][-1 if pipe else 0]
     check("message is done", m.get("done") is True)
@@ -272,7 +277,6 @@ def night(chat_id: str, pipe: bool = False) -> None:
     )
     n_cited = max([int(x) for x in re.findall(r"\[(\d+)\]", m.get("content", ""))] or [0])
     check(f"every cited [n] has a source (highest [n] {n_cited})", n_cited <= len(srcs))
-    del msgs
     if pipe:  # the pipe attached the Word file itself and returned the report with the sources events
         files = [f for f in (m.get("files") or []) if str(f.get("name", "")).endswith(".docx")]
         check(f"pipe attached one Word file ({len(files)})", len(files) == 1)

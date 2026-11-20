@@ -150,26 +150,33 @@ class Client:
         """Websocket session like the browser's: joins the user's room and answers the ask-user cards of the pipe.
 
         `choice` is the index of the option of the plan card to click (0 = Freigeben); the preset card gets the
-        suggested preset. `delay` holds the answer back that many seconds (the pipe's event call, and with it the turn,
-        stays open meanwhile). Returns the socket; its `session_id` goes into the
+        suggested preset. `delay` holds the answer to the first plan card back that many seconds (the pipe's event call,
+        and with it the turn, stays open meanwhile; the preset card and later cards are answered at once).
+        The text of every `replace` event (the pipe's plan and status texts) is collected in `sio.replaced`.
+        Returns the socket; its `session_id` goes into the
         completion request, which is how the pipe's event call finds the browser.
         """
         import socketio  # dev dependency (python-socketio[client])
 
         sio = socketio.Client(reconnection=False)
+        sio.replaced = []
+        held_back = [delay]
         token = self.http.headers["Authorization"].removeprefix("Bearer ")
 
         @sio.on("events")
         def on_events(data):
             event = data.get("data") or {}
             print("[event] " + str(event.get("type")), file=sys.stderr)
+            if event.get("type") == "replace":
+                sio.replaced.append((event.get("data") or {}).get("content", ""))
             if event.get("type") == "request:user_input":
                 question = event["data"]["questions"][0]
                 print("[card] " + question["question"], file=sys.stderr)
                 # the preset card of the model "Deep Research" (id "preset": the suggested preset is option 0) and the
                 # plan card (id "plan": `choice`, 0 = Freigeben)
                 index = 0 if question["id"] == "preset" else choice
-                time.sleep(delay)
+                if question["id"] == "plan":
+                    time.sleep(held_back.pop() if held_back else 0)
                 return {"status": "answered", "answers": {question["id"]: {"type": "option", "option_index": index}}}
             return None
 
