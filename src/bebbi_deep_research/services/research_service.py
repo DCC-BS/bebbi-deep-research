@@ -99,7 +99,7 @@ class ResearchService:
         Raises:
             ApiErrorException: 422 if the preset works only with own sources and none are usable.
         """
-        mode = self.presets.preset(preset).own_sources
+        mode = self.presets.require(preset).own_sources
         stored, info = prepare(own, self.settings, preview=preview)
         if mode == "off":
             if own and (own.files or own.collections):
@@ -196,7 +196,7 @@ class ResearchService:
         draft = new_id()
         plan = await agent.plan(
             request.task,
-            self.presets.preset(request.preset),
+            self.presets.require(request.preset),
             self.presets.budgets[request.depth],
             **self._engine_own(stored),
         )
@@ -233,14 +233,14 @@ class ResearchService:
             json.loads(draft["plan"]),
             request.instruction,
             draft["task"],
-            self.presets.preset(draft["preset"]),
+            self.presets.require(draft["preset"]),
             self.presets.budgets[draft["depth"]],
         )
         await self.db.execute(
             "update drafts set plan=:p where id=:i", p=json.dumps(plan, ensure_ascii=False), i=draft_id
         )
         info = describe(json.loads(draft.get("own_sources") or "null"))
-        mode = self.presets.preset(draft["preset"]).own_sources
+        mode = self.presets.require(draft["preset"]).own_sources
         return {"draft_id": draft_id, "plan": plan, "own_sources": {**info, "mode": mode} if info else None}
 
     async def _queued_view(self, job: dict[str, Any], own_info: dict[str, Any] | None) -> dict[str, Any]:

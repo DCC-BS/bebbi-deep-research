@@ -82,6 +82,17 @@ class Config:
         """The preset `name`: one of the file, or a mixed preset (`mix:...`, see `mix_name`), else None."""
         return self.presets.get(name) or (mixed_preset(self, name) if name.startswith(MIX + ":") else None)
 
+    def require(self, name: str) -> Preset:
+        """The preset `name` (see `preset`).
+
+        Raises:
+            KeyError: `name` is no preset of the file and no valid mixed preset.
+        """
+        p = self.preset(name)
+        if p is None:
+            raise KeyError(f"unknown preset {name!r}")
+        return p
+
     def offered_sources(self) -> dict[str, Choice]:
         """The sources of `choices:` that can be used now (web and enabled MCP servers)."""
         return {k: c for k, c in self.sources.items() if k == "web" or k in self.mcp_servers}
@@ -202,7 +213,7 @@ def mixed_preset(cfg: "Config", name: str) -> Preset | None:
         home = cfg.presets.get(cfg.sources[s].preset or "")
         if home and home not in homes:
             homes.append(home)
-    base = cfg.presets[cfg.styles[sel["style"]].preset]
+    base = cfg.presets[cfg.styles[sel["style"]].preset or ""]  # checked above: the style's preset exists
     if base.engine == "focus":
         if sel["own"] == "only" and cfg.own_only_preset in cfg.presets:
             base = cfg.presets[cfg.own_only_preset]
