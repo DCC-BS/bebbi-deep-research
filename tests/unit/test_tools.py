@@ -426,3 +426,31 @@ def test_closing_the_client_stops_a_retry_loop_in_its_thread(monkeypatch):
     t.join(timeout=5)
     assert not t.is_alive() and time.monotonic() - started < 2
     assert errors and "closed" in str(errors[0])
+
+
+async def test_fetch_without_firecrawl_key_sends_no_authorization_header():
+    """An in-cluster Firecrawl has no key: "Bearer " alone is an illegal header value and failed every fetch."""
+    import httpx2
+
+    from bebbi_deep_research.engine.tools import Tools
+
+    seen = []
+
+    def handler(request: httpx2.Request):
+        seen.append(request.headers.get("authorization"))
+        return httpx2.Response(200, json={"data": {"markdown": "Text", "metadata": {"title": "T"}}})
+
+    for key, want in (("", None), ("k1", "Bearer k1")):
+        tools = Tools("http://s/search", "", "http://fc", key)
+        tools.http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+        await tools.fetch("https://www.bs.ch/seite")
+        assert seen[-1] == want and not tools.errors
+
+
+def test_no_evidence_is_explained_to_the_user():
+    from bebbi_deep_research.engine.tools import NoEvidenceError
+    from bebbi_deep_research.services.policy import describe_error
+
+    msg = describe_error(NoEvidenceError({"fetch:LocalProtocolError": 34, "search:500": 1}))
+    assert msg.startswith("Es konnte keine einzige Quelle gelesen werden (alle 34 Seitenabrufe sind fehlgeschlagen)")
+    assert "Ohne Belege wird kein Bericht erstellt" in msg and "fetch:LocalProtocolError 34x" in msg

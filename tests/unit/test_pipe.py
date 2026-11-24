@@ -554,6 +554,8 @@ def _preset_pipe(mod, answers: list, suggestion="grossrat", questions=()):
         if path == "/presets":
             calls.append((method, path, body))
             return [{"name": "grossrat", "description": "Grosser Rat Basel-Stadt"}, {"name": "rechtsrecherche"}]
+        if path.startswith("/options"):  # a service without choices: the one-question preset card
+            raise mod.NotFound("no choices configured")
         return await plan_api(method, path, body)
 
     pipe._api = api
@@ -636,6 +638,199 @@ def test_a_preset_model_skips_the_choice():
     clarify = next(c for c in calls if c[1] == "/clarify")
     assert clarify[2]["preset"] == "rechtsrecherche" and "suggest_preset" not in clarify[2]
     assert [q["data"]["questions"][0]["id"] for q in asked] == ["plan"]
+
+
+# ------------------------------------------- the card: one question per source, files, knowledge, style, depth
+OPTIONS = {
+    "sources": [
+        {"id": "web", "label": "Websuche", "description": "Öffentliche Webseiten."},
+        {"id": "grossrat", "label": "Grosser Rat Basel-Stadt", "description": "Geschäfte seit 1973."},
+        {"id": "data-bs", "label": "Open Data Basel-Stadt", "description": "Datensätze."},
+    ],
+    "styles": [
+        {"id": "kompakt", "label": "Kurze Verwaltungsantwort", "description": "Plan: Checkliste. Bericht: kurz."},
+        {"id": "analyse", "label": "Ausführliche Analyse", "description": "Plan: mehrere Teile. Bericht: lang."},
+    ],
+    "depths": [
+        {"id": "quick", "focus_words": 600, "focus_calls": 8, "rounds": 1},
+        {"id": "standard", "focus_words": 900, "focus_calls": 14, "rounds": 2},
+        {"id": "deep", "focus_words": 1300, "focus_calls": 20, "rounds": 3},
+    ],
+    "selected": {"web": True, "mcp": ["grossrat"], "own": "prefer", "style": "kompakt"},
+}
+
+
+def _steps_pipe(mod, answers: list, questions=(), own=None):
+    """Model "Deep Research" with a service that offers choices; the fake browser answers the cards in order."""
+    pipe, calls, asked, events, call, emit = _card_pipe(mod, answers)
+    plan_api = pipe._api
+
+    async def api(method, path, body=None):
+        if path == "/clarify":
+            calls.append((method, path, body))
+            return {"questions": list(questions), "assumptions": [], "preset": "grossrat"}
+        if path.startswith("/options/resolve"):
+            calls.append((method, path, body))
+            plain = {k: v for k, v in body.items() if k != "own_attached"}
+            suggested = {"web": True, "mcp": ["grossrat"], "own": "prefer", "style": "kompakt"}
+            name = "grossrat" if plain == suggested else "mix:x"
+            return {"preset": name, "label": "Quellen: Grosser Rat Basel-Stadt · Bericht: Kurze Verwaltungsantwort"}
+        if path.startswith("/options"):
+            calls.append((method, path, body))
+            return OPTIONS
+        return await plan_api(method, path, body)
+
+    async def collect(*a, **k):
+        return own
+
+    pipe._api = api
+    pipe._collect_own = collect
+    return pipe, calls, asked, events, call, emit
+
+
+def _answers(card: dict, pick: dict) -> dict:
+    """Answer a card: `pick` maps question id -> option label (default: the first option, the recommendation)."""
+    out = {}
+    for q in card["data"]["questions"]:
+        labels = [o["label"] for o in q["options"]]
+        i = labels.index(pick[q["id"]]) if q["id"] in pick else 0
+        out[q["id"]] = {"type": "option", "option_index": i, "label": labels[i]}
+    return {"status": "answered", "answers": out}
+
+
+def _browser(picks: list, rest: list = ()):
+    """Answers source cards with `picks` (one dict per card shown), then the rest (plan card, dialogs) in order."""
+    queue = list(picks)
+    after = list(rest)
+
+    async def call(event, seen):
+        seen.append(event)
+        if event["type"] == "request:user_input" and event["data"]["questions"][0]["id"].startswith("src:") and queue:
+            return _answers(event, queue.pop(0))
+        return after.pop(0)
+
+    return call
+
+
+def _run(mod, picks, rest=(), own=None, questions=()):
+    pipe, calls, asked, events, _call, emit = _steps_pipe(mod, [], questions=questions, own=own)
+    browser = _browser(picks, rest)
+
+    async def call(event):
+        return await browser(event, asked)
+
+    out = asyncio.run(pipe.pipe(AUTO_BODY, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    return out, calls, asked, events
+
+
+def test_the_card_asks_each_data_source_then_web_files_knowledge_style_and_depth():
+    mod = load_pipe()
+    own = {"files": [{"name": "Bericht.pdf"}], "collections": [{"name": "Richtlinien"}], "notes": []}
+    pick = {
+        "src:grossrat": "Ja",
+        "src:data-bs": "Ja",
+        "src:web": "Nein",
+        "style": "Ausführliche Analyse",
+        "depth": "Gründlich",
+    }
+    out, calls, asked, events = _run(mod, [pick], [_pick(2)], own=own)
+    card = asked[0]
+    assert card["type"] == "request:user_input"
+    qs = card["data"]["questions"]
+    assert [q["id"] for q in qs] == ["src:grossrat", "src:data-bs", "src:web", "files", "kb", "style", "depth"]
+    # the recommendation comes first (the card marks it): the suggested sources yes, the others no
+    assert [o["label"] for o in qs[0]["options"]] == ["Ja", "Nein"] and [o["label"] for o in qs[1]["options"]] == [
+        "Nein",
+        "Ja",
+    ]
+    assert qs[0]["header"] == "Grosser Rat Basel-Stadt" and "Geschäfte seit 1973" in qs[0]["question"]
+    assert "Bericht.pdf" in qs[3]["question"] and "«Richtlinien»" in qs[4]["question"]
+    assert [o["label"] for o in qs[6]["options"]] == ["Standard", "Schnell", "Gründlich"]  # the default depth first
+    assert "Schnell: 1 Recherche-Runde, bis 8 Abfragen, Kurzantwort ca. 600 Wörter." in qs[6]["question"]
+    assert "Kurze Verwaltungsantwort: Plan: Checkliste" in qs[5]["question"]  # option texts are cut to one line
+    resolve = next(c for c in calls if c[1] == "/options/resolve")[2]
+    assert resolve == {
+        "web": False,
+        "mcp": ["data-bs", "grossrat"],
+        "own": "prefer",
+        "style": "analyse",
+        "own_attached": True,
+    }
+    plan = next(c for c in calls if c[1] == "/plans")
+    assert plan[2]["preset"] == "mix:x" and plan[2]["depth"] == "deep"
+    assert plan[2]["own_sources"]["files"] == [{"name": "Bericht.pdf"}]
+    assert "Quellen: Grosser Rat Basel-Stadt" in out
+
+
+def test_switched_off_files_or_knowledge_are_not_sent_and_documents_only_is_derived():
+    mod = load_pipe()
+    own = {"files": [{"name": "Bericht.pdf"}], "collections": [{"name": "Richtlinien"}], "notes": []}
+    pick = {"src:grossrat": "Nein", "src:data-bs": "Nein", "src:web": "Nein", "kb": "Nein"}
+    out, calls, asked, events = _run(mod, [pick], [_pick(0)], own=own)
+    resolve = next(c for c in calls if c[1] == "/options/resolve")[2]
+    assert resolve["own"] == "only" and resolve["web"] is False and resolve["mcp"] == []
+    plan = next(c for c in calls if c[1] == "/plans")[2]
+    assert plan["own_sources"]["collections"] == [] and plan["own_sources"]["files"]
+    job = next(c for c in calls if c[1] == "/jobs")[2]  # the submit collects the texts again: same filter
+    assert job["own_sources"]["collections"] == []
+
+
+def test_without_attachments_the_card_recommends_no_and_explains_how_to_attach():
+    mod = load_pipe()
+    out, calls, asked, events = _run(mod, [{}], [_pick(2)])
+    qs = {q["id"]: q for q in asked[0]["data"]["questions"]}
+    assert [o["label"] for o in qs["files"]["options"]] == ["Nein", "Ja"] and "keine Dateien" in qs["files"]["question"]
+    assert "«+»" in qs["files"]["question"] and "«#»" in qs["kb"]["question"]
+    resolve = next(c for c in calls if c[1] == "/options/resolve")[2]
+    assert resolve["own"] == "prefer" and resolve["own_attached"] is False  # nothing attached: the default mode
+    assert next(c for c in calls if c[1] == "/plans")[2]["preset"] == "grossrat"
+
+
+def test_wanting_files_without_attaching_any_ends_with_how_to_attach():
+    mod = load_pipe()
+    out, calls, asked, events = _run(mod, [{"files": "Ja"}])
+    assert "Es wurde keine Recherche gestartet" in out and "«+»" in out
+    assert not any(c[1] in ("/plans", "/options/resolve") for c in calls)
+
+
+def test_no_source_asks_again_and_no_answer_starts_nothing():
+    mod = load_pipe()
+    none = {"src:grossrat": "Nein", "src:data-bs": "Nein", "src:web": "Nein"}
+    out, calls, asked, events = _run(mod, [none], [{"status": "cancelled"}])
+    assert len(asked) == 2 and asked[1]["data"]["questions"][0]["question"].startswith("Bitte wählen Sie mindestens")
+    assert "Keine Auswahl" in out and not any(c[1] in ("/plans", "/options/resolve") for c in calls)
+
+
+def test_the_selection_survives_the_clarifying_questions():
+    mod = load_pipe()
+    own = {"files": [{"name": "a.pdf"}], "collections": [{"name": "KB"}], "notes": []}
+    pick = {"src:web": "Nein", "kb": "Nein", "depth": "Schnell"}
+    first, calls, asked, events = _run(mod, [pick], own=own, questions=["Zeitraum?"])
+    assert "Zeitraum?" in first
+    body = {
+        "model": "bebbi_deep_research.auto",
+        "messages": [
+            *AUTO_BODY["messages"],
+            {"role": "assistant", "content": first},
+            {"role": "user", "content": "ab 2020"},
+        ],
+    }
+    pipe2, calls2, asked2, events2, call2, emit2 = _steps_pipe(mod, [_pick(2)], own=own)
+    out = asyncio.run(pipe2.pipe(body, {"id": "u"}, emit2, "c1", "m2", __event_call__=call2))
+    plan = next(c for c in calls2 if c[1] == "/plans")
+    assert plan[2]["preset"] == "mix:x" and plan[2]["depth"] == "quick"
+    assert plan[2]["own_sources"]["collections"] == []  # the knowledge base stays off after the questions
+    assert not any(c[1].startswith("/options") or c[1] == "/clarify" for c in calls2)
+    assert "Quellen: Grosser Rat" in out
+
+
+def test_the_status_trail_shows_the_users_decisions():
+    mod = load_pipe()
+    out, calls, asked, events = _run(mod, [{"depth": "Gründlich"}], [_pick(1), "nur Basel-Stadt", _pick(0)])
+    trail = [e["data"]["description"] for e in events if e["type"] == "status"]
+    assert "Quellen: Grosser Rat Basel-Stadt · Bericht: Kurze Verwaltungsantwort · Tiefe: Gründlich" in trail
+    assert trail.index("Plan freigegeben") > trail.index("Änderungswunsch: nur Basel-Stadt")
+    assert mod._decision_line("Recht", "quick") == "Recherche: Recht · Tiefe: Schnell"
 
 
 # ------------------------------------------------------- D8: LLM-written plan and questions render as plain text
@@ -1283,6 +1478,8 @@ def test_a_message_typed_while_the_preset_card_is_open_is_a_new_question(monkeyp
             return {"questions": [], "assumptions": [], "preset": "grossrat"}
         if path == "/presets":
             return []
+        if path.startswith("/options"):
+            raise mod.NotFound("no choices configured")
         raise AssertionError(path)
 
     pipe._api = api
@@ -1381,3 +1578,26 @@ def test_hidden_results_before_the_turn_and_none_after_it_are_no_hidden_results(
     pipe, calls = _pipe_with_service(mod, {"j1": {"status": "running", "events": [], "report": None}})
     out = asyncio.run(pipe.pipe({"model": "x.grossrat", "messages": history}, {"id": "u"}))
     assert "läuft noch" in out and [c[:2] for c in calls] == [("GET", "/jobs/j1?user_id=u")]
+
+
+def test_the_approved_plan_stays_as_a_collapsed_block_and_the_marker_still_reads():
+    mod = load_pipe()
+    pipe, calls, asked, events, call, emit = _card_pipe(mod, [_pick(0)])
+    body = {"model": "x.grossrat", "messages": [{"role": "user", "content": "Frage schnell"}]}
+    asyncio.run(pipe.pipe(body, {"id": "u"}, emit, "c1", "m1", __event_call__=call))
+    queued = events[-1]["data"]["content"]
+    assert queued.startswith("Auftrag eingereiht")
+    block = queued.split("<details>", 1)[1]
+    assert block.startswith("\n<summary>Rechercheplan</summary>") and "**Rechercheplan:" in block
+    assert "</details>" in block and "research-agent" not in block.split("</details>")[0]
+    assert mod._state([{"role": "assistant", "content": queued}, {"role": "user"}])["state"] == "job"
+    assert mod._plan_details("") == ""
+
+
+def test_attached_documents_switched_off_are_mode_off():
+    mod = load_pipe()
+    own = {"files": [{"name": "a.pdf"}], "collections": [], "notes": []}
+    out, calls, asked, events = _run(mod, [{"files": "Nein"}], [_pick(2)], own=own)
+    resolve = next(c for c in calls if c[1] == "/options/resolve")[2]
+    assert resolve["own"] == "off" and resolve["own_attached"] is False
+    assert "own_sources" not in next(c for c in calls if c[1] == "/plans")[2]

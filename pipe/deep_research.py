@@ -8,8 +8,10 @@ requirements: httpx
 # Open WebUI pipe function (manifold): one model "Deep Research" (id auto); the research preset (Recht, Grosser Rat,
 # ...) is chosen per task. The valve PRESET_MODELS also lists one model per preset, which skips the choice.
 # Conversation flow, tracked with a hidden state marker in the assistant message:
-#   0. model "Deep Research": the service suggests a preset for the task, the user confirms or picks another in
-#      Open WebUI's ask-user card (no answer: no research)
+#   0. model "Deep Research": the service suggests a preset for the task; Open WebUI's ask-user card asks one question
+#      at a time, recommendation first: each data source (MCP servers of the service), web search, the chat's files,
+#      its knowledge bases, report style, depth. The service turns the answers into a preset (GET /options, POST
+#      /options/resolve). No answer: no research. A service without choices: the one-question preset card.
 #   1. user task -> clarifying questions (if needed)          state=clarify
 #   2. answers / task -> research plan for approval            state=plan
 #   3. the user decides in Open WebUI's ask-user card, in the same turn: Freigeben -> job queued for the night window
@@ -543,13 +545,107 @@ def _render_plan(plan: dict, depth: str, own: dict | None = None) -> str:
     own_lines = _own_lines(own)
     if own_lines:
         lines += [""] + [ln + "  " for ln in own_lines[:-1]] + own_lines[-1:]
-    lines += ["", f"Tiefe: **{depth}**."]
+    lines += ["", f"Tiefe: **{DEPTH_TITLES.get(depth, depth)}**."]
     return "\n".join(lines)
 
 
 def _with_preset(shown: str, label: str) -> str:
-    """The plan with the chosen preset named in its last line (model "Deep Research" only)."""
-    return shown[: -len(".")] + f", Recherche: **{label}**." if label else shown
+    """The plan with the chosen preset named in its last line (model "Deep Research" only).
+
+    `label` is a preset label ("Recht") or the selection line of the two-step card ("Quellen: ... · Bericht: ...")."""
+    if not label:
+        return shown
+    if label.startswith("Quellen:"):
+        return shown + "  \n" + _plain(label, 500)
+    return shown[: -len(".")] + f", Recherche: **{label}**."
+
+
+# The card for model "Deep Research" (Open WebUI's ask-user card, `request:user_input`, above the input field; one
+# question at a time, "Zurück" to change an earlier answer, the answer to the last question submits): one question per
+# data source (the enabled MCP servers, from the service, so a new server shows up by itself), web search, the chat's
+# files, its knowledge bases, report style and depth. The first option of a question is the recommendation.
+DEPTH_TITLES = {"quick": "Schnell", "standard": "Standard", "deep": "Gründlich"}
+YES, NO = "Ja", "Nein"
+FILES_HOWTO = (
+    "Hängen Sie die Dateien über «+» im Eingabefeld an (oder ziehen Sie sie in den Chat) und senden Sie die Frage "
+    "erneut: Anhänge gelten für die Nachricht, mit der sie gesendet werden."
+)
+KB_HOWTO = (
+    "Tippen Sie im Eingabefeld «#», wählen Sie den Wissensspeicher aus und senden Sie die Frage erneut: Anhänge "
+    "gelten für die Nachricht, mit der sie gesendet werden."
+)
+ATTACH_FIRST = "*Es wurde keine Recherche gestartet: {what} {howto}*"
+
+
+def _yes_no(qid: str, header: str, question: str, yes: str, no: str, recommend_yes: bool) -> tuple[dict, list]:
+    """A Ja/Nein question of the card, the recommended answer first; returns (question, values per option)."""
+    options = [(True, {"label": YES, "description": yes}), (False, {"label": NO, "description": no})]
+    if not recommend_yes:
+        options.reverse()
+    question = {
+        "id": qid,
+        "header": header[:48],
+        "question": question,
+        "options": [o for _, o in options],
+        "allow_other": False,
+    }
+    return question, [v for v, _ in options]
+
+
+def _choice(qid: str, header: str, question: str, items: list[tuple[str, str, str]], recommended: str):
+    """A question with one option per (value, label, description), the recommended value first."""
+    items = sorted(items, key=lambda it: it[0] != recommended)
+    question = {
+        "id": qid,
+        "header": header[:48],
+        "question": question,
+        "options": [{"label": label, "description": d} for _, label, d in items],
+        "allow_other": False,
+    }
+    return question, [v for v, _, _ in items]
+
+
+def _depth_line(d: dict) -> str:
+    """What a depth means, for the card (figures of the short answer; the analysis takes about twice as long)."""
+    rounds = d.get("rounds", 1)
+    return (
+        f"{rounds} Recherche-Runde{'n' if rounds != 1 else ''}, bis {d.get('focus_calls', '?')} Abfragen, "
+        f"Kurzantwort ca. {d.get('focus_words', '?')} Wörter."
+    )
+
+
+def _filter_own(own: dict | None, use: dict | None) -> dict | None:
+    """The chat's own sources without what the user switched off in the card (files, knowledge bases)."""
+    if not own or not use:
+        return own
+    out = {
+        **own,
+        "files": own.get("files", []) if use.get("files", True) else [],
+        "collections": own.get("collections", []) if use.get("kb", True) else [],
+    }
+    return out if out["files"] or out["collections"] or out.get("notes") else None
+
+
+DECISION_STATUS = {  # the user's answer on the plan, as a line of the status trail ("change" shows the request)
+    "approve": "Plan freigegeben",
+    "discard": "Plan verworfen",
+    "open": "Keine Antwort auf den Plan",
+    "held": "Nachricht statt Antwort auf den Plan",
+}
+
+
+def _plan_details(shown: str) -> str:
+    """The approved plan as a collapsed block (`<details>`, Open WebUI renders it as an expandable section)."""
+    if not shown.strip():
+        return ""
+    return "\n\n<details>\n<summary>Rechercheplan</summary>\n\n" + shown.strip() + "\n\n</details>"
+
+
+def _decision_line(label: str, depth: str) -> str:
+    """The user's choice of sources, report and depth as a line of the status trail."""
+    label = label.removeprefix("Quellen: ")
+    shown = f"Quellen: {label}" if " · Bericht: " in label else f"Recherche: {label}"
+    return f"{shown} · Tiefe: {DEPTH_TITLES.get(depth, depth)}"
 
 
 class Pipe:
@@ -680,9 +776,15 @@ class Pipe:
             return json.dumps({"follow_ups": []})
         return ""
 
-    async def _own(self, request, user: dict, body: dict, files: list, with_text: bool) -> dict | None:
+    async def _own(
+        self, request, user: dict, body: dict, files: list, with_text: bool, use: dict | None = None
+    ) -> dict | None:
+        """The chat's files and knowledge bases; `use` (from the card) leaves out files or knowledge bases."""
         if not self.valves.OWN_SOURCES or not (user or {}).get("id"):
             return None
+        return _filter_own(await self._collect_own(request, user, body, files, with_text), use)
+
+    async def _collect_own(self, request, user: dict, body: dict, files: list, with_text: bool) -> dict | None:
         return await collect_own_sources(
             request,
             user["id"],
@@ -746,6 +848,147 @@ class Pipe:
         )
         index = answer.get("option_index") if isinstance(answer, dict) and answer.get("type") == "option" else None
         return names[index] if isinstance(index, int) and 0 <= index < len(names) else None
+
+    async def _choose(self, call, suggested: str | None, own: dict | None, depth: str, held=None):
+        """The card for model "Deep Research": sources one by one, then report style and depth.
+
+        Returns (preset, label, depth, use) with `use` = {"files": bool, "kb": bool}, a str (the reply that ends the
+        turn, e.g. how to attach files), None when there is no answer, HELD when the user typed a message instead.
+        Without a browser session the suggestion, else DEFAULT_PRESET, is taken. A service without `choices` (404 on
+        /options) gets the one-question preset card of earlier versions."""
+        try:
+            opts = await self._api("GET", "/options" + (f"?preset={quote(suggested, safe='')}" if suggested else ""))
+        except NotFound:
+            opts = None
+        if call is None or opts is None:
+            picked = await self._choose_preset(call, suggested, held)
+            if picked is None or picked is HELD:
+                return picked
+            return picked, self._labels().get(picked, picked), depth, None
+        sel = opts["selected"]
+        files = [f["name"] for f in (own or {}).get("files", [])]
+        kbs = [c["name"] for c in (own or {}).get("collections", [])]
+        asked: list[tuple[dict, list]] = []
+        for src in [x for x in opts["sources"] if x["id"] != "web"] + [x for x in opts["sources"] if x["id"] == "web"]:
+            on = sel["web"] if src["id"] == "web" else src["id"] in sel["mcp"]
+            asked.append(
+                _yes_no(
+                    "src:" + src["id"],
+                    src["label"],
+                    f"{src['label']} verwenden? {src['description']}",
+                    "In dieser Quelle suchen.",
+                    "Diese Quelle nicht verwenden.",
+                    bool(on) and sel["own"] != "only",
+                )
+            )
+        asked.append(
+            _yes_no(
+                "files",
+                "Hochgeladene Dateien",
+                (
+                    "Ihre hochgeladenen Dateien verwenden? Gefunden: " + ", ".join(files) + "."
+                    if files
+                    else "Hochgeladene Dateien verwenden? In diesem Chat sind keine Dateien hochgeladen. " + FILES_HOWTO
+                ),
+                "Die Dateien zuerst lesen." if files else "Ich hänge Dateien an.",
+                "Ohne Dateien recherchieren." if not files else "Die Dateien nicht verwenden.",
+                bool(files),
+            )
+        )
+        asked.append(
+            _yes_no(
+                "kb",
+                "Wissensspeicher",
+                (
+                    "Die angehängten Wissensspeicher verwenden? Gefunden: " + ", ".join(f"«{k}»" for k in kbs) + "."
+                    if kbs
+                    else "Wissensspeicher verwenden? Weder an die Frage noch an das Modell ist einer angehängt. "
+                    + KB_HOWTO
+                ),
+                "In den Wissensspeichern suchen." if kbs else "Ich hänge einen Wissensspeicher an.",
+                "Ohne Wissensspeicher recherchieren." if not kbs else "Die Wissensspeicher nicht verwenden.",
+                bool(kbs),
+            )
+        )
+        styles = opts["styles"]
+        asked.append(
+            _choice(
+                "style",
+                "Art des Berichts",
+                "Wie soll der Bericht aufgebaut sein? "
+                + " ".join(f"{x['label']}: {x['description']}" for x in styles)
+                + " Danach erstellt Deep Research einen Rechercheplan, den Sie freigeben, ändern oder verwerfen.",
+                [(x["id"], x["label"], "") for x in styles],
+                sel["style"],
+            )
+        )
+        asked.append(
+            _choice(
+                "depth",
+                "Tiefe",
+                "Wie gründlich soll recherchiert werden? Die Recherche läuft nach der Freigabe im Nachtfenster. "
+                + " ".join(f"{DEPTH_TITLES.get(d['id'], d['id'])}: {_depth_line(d)}" for d in opts["depths"]),
+                [(d["id"], DEPTH_TITLES.get(d["id"], d["id"]), "") for d in opts["depths"]],
+                depth,
+            )
+        )
+        seconds = 60 * max(1, self.valves.DECISION_MINUTES)
+        questions = [q for q, _ in asked]
+        for _ in range(3):
+            try:
+                res = await _card(
+                    call,
+                    {
+                        "type": "request:user_input",
+                        "data": {"questions": questions, "allow_other": False, "timeout_ms": seconds * 1000},
+                    },
+                    seconds + 30,
+                    held,
+                )
+            except Exception:
+                return None
+            if res is HELD:
+                return HELD
+            answers = (res or {}).get("answers") if isinstance(res, dict) and res.get("status") == "answered" else None
+            if not isinstance(answers, dict):
+                return None
+            got = {}
+            for q, values in asked:
+                a = answers.get(q["id"])
+                i = a.get("option_index") if isinstance(a, dict) and a.get("type") == "option" else None
+                if not isinstance(i, int) or not 0 <= i < len(values):
+                    return None
+                got[q["id"]] = values[i]
+            if got["files"] and not files:
+                return ATTACH_FIRST.format(
+                    what="Sie möchten Dateien verwenden, es sind aber keine angehängt.", howto=FILES_HOWTO
+                )
+            if got["kb"] and not kbs:
+                return ATTACH_FIRST.format(
+                    what="Sie möchten Wissensspeicher verwenden, es ist aber keiner angehängt.", howto=KB_HOWTO
+                )
+            on = {k[4:] for k, v in got.items() if k.startswith("src:") and v}
+            own_on = got["files"] or got["kb"]
+            if on or own_on:
+                break
+            first = dict(questions[0])
+            first["question"] = "Bitte wählen Sie mindestens eine Quelle. " + asked[0][0]["question"]
+            questions = [first] + questions[1:]
+        else:
+            return None
+        res = await self._api(
+            "POST",
+            "/options/resolve",
+            {
+                "web": "web" in on,
+                "mcp": sorted(on - {"web"}),
+                # nothing attached: the default mode (the selection can still match a preset of the file)
+                "own": ("prefer" if on else "only") if own_on else ("off" if files or kbs else "prefer"),
+                "style": got["style"],
+                "own_attached": own_on,
+            },
+        )
+        return res["preset"], res["label"], got["depth"], {"files": got["files"], "kb": got["kb"]}
 
     async def _decide(self, call, can_change: bool, held=None) -> tuple[str, str]:
         """Ask the user what happens with the plan.
@@ -865,11 +1108,16 @@ class Pipe:
         preset = body.get("model", "").split(".")[-1]
         choose = preset not in self._labels()  # model "Deep Research": the preset is chosen per task
         st: dict = {}
+        label = ""  # model "Deep Research": the chosen preset or selection, named in the plan
+        use = None  # model "Deep Research": {"files": bool, "kb": bool}, what the user wants of the chat's own sources
         uid = (__user__ or {}).get("id") or "?"
 
-        async def submit(st: dict) -> str:
-            """Queue the job of the approved plan for the night window (for now every research runs at night)."""
-            own = await self._own(__request__, __user__, body, chat_files, with_text=True)
+        async def submit(st: dict, shown: str = "") -> str:
+            """Queue the job of the approved plan for the night window (for now every research runs at night).
+
+            `shown`: the approved plan as shown; it stays in the message as a collapsed block until the report."""
+            use = st.get("use") if isinstance(st.get("use"), dict) else None
+            own = await self._own(__request__, __user__, body, chat_files, with_text=True, use=use)
             job = await self._api(
                 "POST",
                 "/jobs",
@@ -889,7 +1137,7 @@ class Pipe:
             )
             return await hold(
                 f"Auftrag eingereiht für das Nachtfenster ({job['window']}). Der Bericht erscheint "
-                "in diesem Chat, sobald er fertig ist." + own_note + _marker(st)
+                "in diesem Chat, sobald er fertig ist." + own_note + _plan_details(shown) + _marker(st)
             )
 
         async def change(st: dict, instruction: str) -> tuple[dict, dict | None]:
@@ -910,6 +1158,9 @@ class Pipe:
                         {"type": "replace", "data": {"content": shown}}
                     )  # visible while the card is open
                 choice, instruction = await self._decide(__event_call__, st.get("edits", 0) < 3, held)
+                await status(
+                    DECISION_STATUS.get(choice, "") or f"Änderungswunsch: {_plain(instruction, 120)}", done=True
+                )
                 if choice == "held":
                     # The user typed instead of clicking: Open WebUI answers that message after this reply, with this
                     # reply as its parent. The marker keeps the plan, so the message is read as a change request.
@@ -919,7 +1170,7 @@ class Pipe:
                         + _marker({**st, "state": "plan"})
                     )
                 if choice == "approve":
-                    return await submit(st)
+                    return await submit(st, shown)
                 if choice == "discard":
                     return shown + "\n\n*Plan verworfen, es wurde keine Recherche gestartet.*"
                 if choice == "open":  # no answer counts as no
@@ -973,8 +1224,14 @@ class Pipe:
             )  # previews: enough to clarify and plan
             if st.get("state") == "clarify":
                 task, depth = st["task"] + "\n\nPräzisierungen: " + text, st.get("depth", depth)
-                if choose:  # the preset chosen before the questions (a forged one falls back to the default)
-                    preset = st.get("preset") if st.get("preset") in self._labels() else self.valves.DEFAULT_PRESET
+                use = st.get("use") if isinstance(st.get("use"), dict) else None
+                own = _filter_own(own, use)
+                if choose:  # the preset chosen before the questions (the service refuses an unknown one)
+                    preset = st.get("preset") if isinstance(st.get("preset"), str) else self.valves.DEFAULT_PRESET
+                    label = st.get("label") if isinstance(st.get("label"), str) else ""
+                    if label:
+                        await status(_decision_line(label, depth), done=True)
+                await status("Antworten auf die Rückfragen übernommen", done=True)
             else:
                 task = text
                 await status("Prüfe, ob Rückfragen nötig sind")
@@ -989,8 +1246,8 @@ class Pipe:
                     },
                 )
                 if choose:
-                    await status("Wählen Sie, wo recherchiert wird", done=True)
-                    picked = await self._choose_preset(__event_call__, c.get("preset"), held)
+                    await status("Wählen Sie Quellen und Bericht", done=True)
+                    picked = await self._choose(__event_call__, c.get("preset"), own, depth, held)
                     if picked is HELD:
                         return (
                             "*Keine Auswahl erhalten, es wurde keine Recherche gestartet. Ihre neue Nachricht wird als "
@@ -1001,7 +1258,11 @@ class Pipe:
                             "*Keine Auswahl erhalten, es wurde keine Recherche gestartet. "
                             "Stellen Sie die Frage erneut, um neu zu beginnen.*"
                         )
-                    preset = picked
+                    if isinstance(picked, str):  # e.g. files wanted but none attached: how to attach them
+                        return picked
+                    preset, label, depth, use = picked
+                    own = _filter_own(own, use)
+                    await status(_decision_line(label, depth), done=True)  # the choice stays visible in the trail
                 if c["questions"]:
                     await status("Rückfragen", done=True)
                     qs = "\n".join(f"{i}. {_plain(q)}" for i, q in enumerate(c["questions"], 1))
@@ -1014,7 +1275,13 @@ class Pipe:
                         f"Bevor ich den Rechercheplan erstelle:\n\n{qs}{assume}\n\nAntworten Sie kurz "
                         "(oder mit **weiter**, um mit diesen Annahmen fortzufahren)."
                     ) + _marker(
-                        {"state": "clarify", "task": task, "depth": depth, **({"preset": preset} if choose else {})}
+                        {
+                            "state": "clarify",
+                            "task": task,
+                            "depth": depth,
+                            **({"preset": preset, "label": label} if choose else {}),
+                            **({"use": use} if use else {}),
+                        }
                     )
             await status("Erstelle Rechercheplan")
             res = await self._api(
@@ -1029,9 +1296,9 @@ class Pipe:
                 },
             )
             await status("Plan erstellt", done=True)
-            st = {"state": "plan", "draft": res["draft_id"], "depth": depth}
+            st = {"state": "plan", "draft": res["draft_id"], "depth": depth, **({"use": use} if use else {})}
             if choose:
-                st["label"] = self._labels().get(preset, preset)
+                st["label"] = label
             return await review(res["plan"], res.get("own_sources"), st)
         except Exception as e:
             if isinstance(e, NotFound):

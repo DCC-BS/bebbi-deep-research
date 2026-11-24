@@ -83,6 +83,23 @@ async def test_clarify_plan_edit(tmp_path):
         assert {p["name"] for p in (await c.get("/presets")).json()} >= {"grossrat", "web_survey"}
 
 
+async def test_options_resolve_a_selection_and_a_mixed_preset_runs(tmp_path):
+    async with running(tmp_path) as (c, _):
+        o = (await c.get("/options?preset=grossrat")).json()
+        assert [s["id"] for s in o["sources"]][0] == "web" and {s["id"] for s in o["styles"]} == {"kompakt", "analyse"}
+        assert o["selected"] == {"web": True, "mcp": ["grossrat"], "own": "prefer", "style": "kompakt"}
+        assert [d["id"] for d in o["depths"]] == ["quick", "standard", "deep"]
+        r = (await c.post("/options/resolve", json=o["selected"])).json()
+        assert r["preset"] == "grossrat" and r["label"].startswith("Quellen: Websuche, Grosser Rat")
+        mix = {"web": False, "mcp": ["grossrat", "data-bs"], "own": "prefer", "style": "kompakt"}
+        name = (await c.post("/options/resolve", json=mix)).json()["preset"]
+        assert name.startswith("mix:")
+        bad = await c.post("/options/resolve", json={**mix, "mcp": []})
+        assert bad.status_code == 400
+        job = await submit(c, preset=name)
+        assert (await wait_status(c, job["job_id"], {"done"}))["status"] == "done"
+
+
 # --------------------------------------------------------------- job lifecycle
 async def test_job_lifecycle_and_delivery(tmp_path):
     posted = []

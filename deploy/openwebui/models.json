@@ -13,7 +13,7 @@
     ],
     "is_active": true,
     "meta": {
-      "description": "Gründliche Recherche mit Rückfragen und Plan, als Bericht mit Quellen. Sie wählen, wo recherchiert wird (Web, Verwaltung, Recht, Grosser Rat, Statistik, Eigene Dokumente); die Recherche läuft über Nacht.",
+      "description": "Gründliche Recherche mit Rückfragen und Plan, als Bericht mit Quellen. Sie wählen die Quellen (Datenquellen, Web, Ihre Dateien und Wissensspeicher), die Art des Berichts und die Tiefe; die Recherche läuft über Nacht.",
       "capabilities": {
         "vision": false,
         "file_upload": true,

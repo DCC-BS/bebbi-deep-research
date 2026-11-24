@@ -23,7 +23,7 @@ from .house_style import report_house_style
 from .llm import ToolBudget, budgeted_tools
 from .sources import Registry, Source, mcp_to_sources, search_to_sources
 from .text import Evidence, checked_numbers, distinctive, fix_sr_labels, split_units
-from .tools import domain, focus
+from .tools import NoEvidenceError, domain, focus
 
 logger = get_logger(__name__)
 
@@ -81,7 +81,8 @@ class FocusEngine:
     # ---------------------------------------------------------------- tools
     async def _tool_specs(self, preset: Preset) -> tuple[list[dict], dict, list[str]]:
         own = self.ctx.own
-        specs, routes, hints = ([] if own and own.mode == "only" else list(WEB_TOOLS)), {}, []
+        no_web = (own and own.mode == "only") or not preset.web  # web off: a mixed preset without web search
+        specs, routes, hints = ([] if no_web else list(WEB_TOOLS)), {}, []
         if own:
             specs += O.tool_specs(own)
         servers = [] if own and own.mode == "only" else [sv for sv in preset.mcp if sv in self.cfg.mcp_servers]
@@ -242,6 +243,8 @@ class FocusEngine:
         if not final:
             raise RuntimeError("focus engine: the model returned an empty final answer after the final prompt")
         calls = executed
+        if not reg.sources:  # nothing read: no report from the model's own knowledge without a single citation
+            raise NoEvidenceError(getattr(self.tools, "errors", None))
 
         await self.ctx.emit("status", "Prüfe Belege")
         stats: dict = {"tool_calls": calls, "sources": len(reg.sources)}

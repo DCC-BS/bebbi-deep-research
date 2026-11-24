@@ -106,7 +106,7 @@ class ChatTurns:
             )
         hits = (
             []
-            if own and own.mode == "only"
+            if (own and own.mode == "only") or not preset.web  # no web search: the user switched it off
             else await self.tools.search(task[:200], "de" if preset.language == "de" else "en", num=8)
         )
         discovery = "\n".join(f"- {h['title']} ({domain(h['url'])}): {h['snippet'][:180]}" for h in hits) or "-"

@@ -19,6 +19,7 @@ from bebbi_deep_research.models.research import (
     CreatePlanRequest,
     EditPlanRequest,
     RunWhen,
+    SelectionRequest,
     SubmitJobRequest,
 )
 from bebbi_deep_research.services.db import DB
@@ -98,7 +99,7 @@ class ResearchService:
         Raises:
             ApiErrorException: 422 if the preset works only with own sources and none are usable.
         """
-        mode = self.presets.presets[preset].own_sources
+        mode = self.presets.require(preset).own_sources
         stored, info = prepare(own, self.settings, preview=preview)
         if mode == "off":
             if own and (own.files or own.collections):
@@ -119,6 +120,53 @@ class ResearchService:
             {"name": p.name, "description": p.description, "engine": p.engine} for p in self.presets.presets.values()
         ]
 
+    def options(self, preset: str | None) -> dict[str, Any]:
+        """What the two steps of the Deep Research card offer.
+
+        Sources, report styles, depths, and the selection that matches `preset` (the suggested one; none: the first
+        style with every offered source).
+        """
+        cfg = self.presets
+        if not cfg.styles:
+            raise not_found("no choices configured")
+        sources = cfg.offered_sources()
+        p = cfg.preset(preset or "")
+        selected = (
+            cfg.selection_of(p)
+            if p is not None
+            else {
+                "web": "web" in sources,
+                "mcp": sorted(k for k in sources if k != "web"),
+                "own": "prefer",
+                "style": next(iter(cfg.styles)),
+            }
+        )
+
+        def view(items: dict) -> list[dict[str, str]]:
+            return [{"id": k, "label": c.label, "description": c.description} for k, c in items.items()]
+
+        return {
+            "sources": view(sources),
+            "styles": view(cfg.styles),
+            "depths": [
+                {"id": d, "focus_words": b.focus_words, "focus_calls": b.focus_calls, "rounds": b.rounds}
+                for d, b in cfg.budgets.items()
+            ],
+            "selected": selected,
+        }
+
+    def resolve(self, request: SelectionRequest) -> dict[str, str]:
+        """The preset for the user's selection in the card, with the line that names it in the plan.
+
+        Raises:
+            ApiErrorException: 400 for an unknown source, style or mode, or when nothing is selected.
+        """
+        try:
+            name = self.presets.resolve_selection(request.web, request.mcp, request.own, request.style)
+        except ValueError as e:
+            raise invalid_request(str(e)) from None
+        return {"preset": name, "label": self.presets.describe_selection(name, own_attached=request.own_attached)}
+
     async def clarify(self, request: ClarifyRequest) -> dict[str, Any]:
         """Return up to two clarifying questions and the assumptions made without an answer.
 
@@ -131,7 +179,7 @@ class ResearchService:
             presets = {p.name: p.description for p in self.presets.presets.values()}
             return await agent.clarify(request.task, presets=presets, **self._engine_own(stored))
         stored = None
-        if request.preset in self.presets.presets:
+        if self.presets.preset(request.preset) is not None:
             stored, _ = self._own_for(request.preset, request.own_sources, preview=True)
         return await agent.clarify(request.task, **self._engine_own(stored))
 
@@ -141,14 +189,14 @@ class ResearchService:
         Raises:
             ApiErrorException: 400 for an unknown preset or depth, 422 from the own-sources rule.
         """
-        if request.preset not in self.presets.presets or request.depth not in self.presets.budgets:
+        if self.presets.preset(request.preset) is None or request.depth not in self.presets.budgets:
             raise invalid_request("unknown preset or depth")
         agent = self.agent_factory("plan-" + uuid.uuid4().hex[:8])
         stored, info = self._own_for(request.preset, request.own_sources, preview=True)
         draft = new_id()
         plan = await agent.plan(
             request.task,
-            self.presets.presets[request.preset],
+            self.presets.require(request.preset),
             self.presets.budgets[request.depth],
             **self._engine_own(stored),
         )
@@ -185,14 +233,14 @@ class ResearchService:
             json.loads(draft["plan"]),
             request.instruction,
             draft["task"],
-            self.presets.presets[draft["preset"]],
+            self.presets.require(draft["preset"]),
             self.presets.budgets[draft["depth"]],
         )
         await self.db.execute(
             "update drafts set plan=:p where id=:i", p=json.dumps(plan, ensure_ascii=False), i=draft_id
         )
         info = describe(json.loads(draft.get("own_sources") or "null"))
-        mode = self.presets.presets[draft["preset"]].own_sources
+        mode = self.presets.require(draft["preset"]).own_sources
         return {"draft_id": draft_id, "plan": plan, "own_sources": {**info, "mode": mode} if info else None}
 
     async def _queued_view(self, job: dict[str, Any], own_info: dict[str, Any] | None) -> dict[str, Any]:
@@ -339,7 +387,9 @@ class ResearchService:
             job["report"],
             sources,
             task=job["task"],
-            preset=job["preset"],
+            preset=job["preset"]
+            if job["preset"] in self.presets.presets
+            else self.presets.describe_selection(job["preset"]),  # a mixed preset: its sources and style
             depth=job["depth"],
             finished=job["finished"],
             tz=self.settings.timezone,

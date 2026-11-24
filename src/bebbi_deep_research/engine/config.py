@@ -7,7 +7,7 @@ missing depths stop the start with a message that names every problem. Check a f
 """
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -50,6 +50,16 @@ class Preset:
     plan_first: bool = True  # focus engine: plan before the loop (the plan is the checklist)
     house_style: bool = True  # German reports follow the Hausstil Kanton Basel-Stadt (engine/house_style.py)
     own_sources: str = "prefer"  # the user's files / knowledge bases: prefer (own first, web for the rest) | only | off
+    web: bool = True  # web search and page fetch (off only in a mixed preset, see Config.preset)
+
+
+@dataclass
+class Choice:
+    """A source (step 1) or report style (step 2) the user picks in the Deep Research card (`choices:`)."""
+
+    label: str
+    description: str
+    preset: str | None = None  # source: preset whose search and writing rules come with it; style: base preset
 
 
 @dataclass
@@ -64,10 +74,195 @@ class Config:
     mcp_tool_descriptions: dict[str, dict[str, str]] = field(
         default_factory=dict
     )  # server -> tool -> text the model sees
+    sources: dict[str, Choice] = field(default_factory=dict)  # "web" and MCP servers the user can switch on
+    styles: dict[str, Choice] = field(default_factory=dict)  # report styles; preset = base preset of the style
+    own_only_preset: str | None = None  # base preset of a focus style when the user's documents are the only source
+
+    def preset(self, name: str) -> Preset | None:
+        """The preset `name`: one of the file, or a mixed preset (`mix:...`, see `mix_name`), else None."""
+        return self.presets.get(name) or (mixed_preset(self, name) if name.startswith(MIX + ":") else None)
+
+    def require(self, name: str) -> Preset:
+        """The preset `name` (see `preset`).
+
+        Raises:
+            KeyError: `name` is no preset of the file and no valid mixed preset.
+        """
+        p = self.preset(name)
+        if p is None:
+            raise KeyError(f"unknown preset {name!r}")
+        return p
+
+    def offered_sources(self) -> dict[str, Choice]:
+        """The sources of `choices:` that can be used now (web and enabled MCP servers)."""
+        return {k: c for k, c in self.sources.items() if k == "web" or k in self.mcp_servers}
+
+    def selection_of(self, preset: Preset) -> dict:
+        """What a preset uses, as a selection of the card: web, MCP sources, own-sources mode, style."""
+        offered = self.offered_sources()
+        uses_web = preset.web and any("web" in r for r in preset.routes.values())
+        only = preset.own_sources == "only"  # the engines drop web and MCP tools then
+        style = next((k for k, c in self.styles.items() if c.preset == preset.name), None)
+        if style is None:
+            style = next(
+                (
+                    k
+                    for k, c in self.styles.items()
+                    if c.preset in self.presets and self.presets[c.preset].engine == preset.engine
+                ),
+                next(iter(self.styles), ""),
+            )
+        return {
+            "web": bool(uses_web and "web" in offered and not only),
+            "mcp": [] if only else sorted(s for s in preset.mcp if s in offered and s != "web"),
+            "own": preset.own_sources,
+            "style": style,
+        }
+
+    def resolve_selection(self, web: bool, mcp: list[str], own: str, style: str) -> str:
+        """The preset name for a selection: a preset of the file when it uses exactly this, else a mixed preset.
+
+        Raises:
+            ValueError: unknown style, source or own-sources mode, or nothing to research with.
+        """
+        offered = self.offered_sources()
+        if style not in self.styles:
+            raise ValueError(f"unknown style {style!r}")
+        if own not in OWN_MODES:
+            raise ValueError(f"unknown own-sources mode {own!r}")
+        unknown = [s for s in mcp if s == "web" or s not in offered]
+        if unknown:
+            raise ValueError(f"unknown source {', '.join(unknown)}")
+        if web and "web" not in offered:
+            raise ValueError("web search is not offered")
+        if own == "only":
+            web, mcp = False, []
+        if not web and not mcp and own != "only":
+            raise ValueError("no source selected")
+        wanted = {"web": bool(web), "mcp": sorted(set(mcp)), "own": own, "style": style}
+        for p in self.presets.values():
+            if self.selection_of(p) == wanted:
+                return p.name
+        return mix_name(style, bool(web), own, wanted["mcp"])
+
+    def describe_selection(self, name: str, own_attached: bool = True) -> str:
+        """Short German line for the plan and the Word file: sources and report style of preset `name`.
+
+        `own_attached=False`: the chat has no files or knowledge bases, so the line does not mention them.
+        """
+        p = self.preset(name)
+        if p is None or not self.styles:
+            return name
+        sel = self.selection_of(p) if not name.startswith(MIX + ":") else _parse_mix(name) or {}
+        offered = self.offered_sources()
+        names = [offered["web"].label] if sel.get("web") and "web" in offered else []
+        names += [offered[s].label for s in sel.get("mcp", []) if s in offered]
+        own = {"prefer": "eigene Dokumente zuerst", "only": "nur eigene Dokumente", "off": ""}.get(
+            sel.get("own", ""), ""
+        )
+        if sel.get("own") == "only":
+            names = []
+        names += [own] if own and own_attached else []
+        style = self.styles.get(sel.get("style", ""))
+        return f"Quellen: {', '.join(names) or '–'} · Bericht: {style.label if style else p.name}"
 
 
 DEPTHS = ("quick", "standard", "deep")  # the pipe offers these (DEFAULT_DEPTH, "schnell", "gründlich")
 INTENTS = ("primary", "data", "secondary")
+OWN_MODES = ("prefer", "only", "off")
+MIX = "mix"  # prefix of a mixed preset: mix:<style>:<web 0|1>:<own>:<server+server>
+
+
+def mix_name(style: str, web: bool, own: str, mcp: list[str]) -> str:
+    """Name of the mixed preset for a selection (stored with drafts and jobs, resolved again by Config.preset)."""
+    return f"{MIX}:{style}:{int(bool(web))}:{own}:{'+'.join(sorted(set(mcp)))}"
+
+
+def _parse_mix(name: str) -> dict | None:
+    parts = name.split(":")
+    if len(parts) != 5 or parts[0] != MIX or parts[2] not in ("0", "1") or parts[3] not in OWN_MODES:
+        return None
+    return {"style": parts[1], "web": parts[2] == "1", "own": parts[3], "mcp": [s for s in parts[4].split("+") if s]}
+
+
+def _join(texts: list[str]) -> str:
+    out: list[str] = []
+    for t in texts:
+        t = (t or "").strip()
+        if t and t not in out:
+            out.append(t)
+    return "\n".join(out)
+
+
+def mixed_preset(cfg: "Config", name: str) -> Preset | None:
+    """The preset of a selection the user made in the card (sources + report style), None if `name` is not valid.
+
+    Base: the style's preset; for a focus style the preset of the one ticked data source when there is exactly one
+    (its tuned search and writing rules), or `own_only_preset` when the user's documents are the only source. The
+    ticked sources' presets add their search rules, writing rules, preferred domains and MCP tool allowlists. Web
+    search, MCP servers and the own-sources mode are exactly what the user ticked.
+    """
+    sel = _parse_mix(name)
+    if sel is None or sel["style"] not in cfg.styles or cfg.styles[sel["style"]].preset not in cfg.presets:
+        return None
+    if any(s == "web" or s not in cfg.sources for s in sel["mcp"]):
+        return None
+    servers, web = sel["mcp"], sel["web"]
+    homes = []
+    for s in servers:
+        home = cfg.presets.get(cfg.sources[s].preset or "")
+        if home and home not in homes:
+            homes.append(home)
+    base = cfg.presets[cfg.styles[sel["style"]].preset or ""]  # checked above: the style's preset exists
+    if base.engine == "focus":
+        if sel["own"] == "only" and cfg.own_only_preset in cfg.presets:
+            base = cfg.presets[cfg.own_only_preset]
+        elif len(homes) == 1:
+            base = homes[0]
+    rules = [base] + [h for h in homes if h is not base]
+    mcp = {}
+    for s in servers:
+        tools = []
+        for p in rules:
+            tools += [t for t in p.mcp.get(s, []) if t not in tools]
+        mcp[s] = tools or list(cfg.mcp_tool_descriptions.get(s, {}))
+    routes = {}
+    for intent in INTENTS:
+        known = [r for p in rules for r in p.routes.get(intent, []) if r.startswith("mcp:") and r[4:] in servers]
+        extra = [f"mcp:{s}" for s in servers] if intent != "secondary" or not web else []
+        route = list(dict.fromkeys(known + extra))
+        routes[intent] = route + (["web"] if web else [])
+    domains = {intent: _join_list([p.prefer_domains.get(intent, []) for p in rules]) for intent in INTENTS}
+    report = dict(base.report)
+    writer = _join([p.report.get("writer_rules", "") for p in rules])
+    if writer:
+        report["writer_rules"] = writer
+    query = _join(
+        [p.query_rules for p in rules]
+        + (
+            []
+            if web
+            else ["Keine Websuche in dieser Recherche: nur die Datenwerkzeuge und die Dokumente des Benutzers."]
+        )
+    )
+    offered = cfg.offered_sources()
+    labels = ([offered["web"].label] if web and "web" in offered else []) + [cfg.sources[s].label for s in servers]
+    return replace(
+        base,
+        name=name,
+        description=f"{cfg.styles[sel['style']].label}: {', '.join(labels) or 'eigene Dokumente'}",
+        routes=routes,
+        mcp=mcp,
+        prefer_domains={k: v for k, v in domains.items() if v},
+        query_rules=query,
+        report=report,
+        own_sources=sel["own"],
+        web=web,
+    )
+
+
+def _join_list(lists: list[list[str]]) -> list[str]:
+    return list(dict.fromkeys(x for xs in lists for x in xs))
 
 
 class _Strict(BaseModel):
@@ -151,6 +346,26 @@ class McpServerSpec(_Strict):
     hint: str = ""
     enabled: bool = True
     tools: dict[str, str] = Field(default_factory=dict)  # tool -> description the model sees
+    # shown to the user in the Deep Research card (one question per enabled server); preset: whose rules come with it
+    label: str = Field("", max_length=80)
+    description: str = Field("", max_length=1000)
+    preset: str | None = None
+
+
+class ChoiceSpec(_Strict):
+    """One source or report style under `choices:`."""
+
+    label: str = Field(min_length=1, max_length=80)
+    description: str = Field(min_length=1, max_length=1000)
+    preset: str | None = None
+
+
+class ChoicesSpec(_Strict):
+    """`choices:`: what the user picks in the two steps of the Deep Research card (docs/presets.md)."""
+
+    sources: dict[str, ChoiceSpec] = Field(default_factory=dict)
+    styles: dict[str, ChoiceSpec] = Field(min_length=1)
+    own_only_preset: str | None = None
 
 
 class PresetsFile(_Strict):
@@ -160,6 +375,7 @@ class PresetsFile(_Strict):
     budgets: dict[str, BudgetSpec]
     defaults: dict[str, Any] | None = None  # YAML anchor that the presets merge (`<<: *defaults`)
     presets: dict[str, PresetSpec] = Field(min_length=1)
+    choices: ChoicesSpec | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -192,6 +408,24 @@ class PresetsFile(_Strict):
                     problems.append(
                         f"presets.{name}.mcp.{server}: {', '.join(unknown)} not among the tools of mcp_servers.{server}"
                     )
+        for name, spec in self.mcp_servers.items():
+            if spec.preset and spec.preset not in self.presets:
+                problems.append(f"mcp_servers.{name}.preset: no such preset {spec.preset!r}")
+        if self.choices:
+            for key, c in self.choices.sources.items():
+                if key != "web":
+                    problems.append(
+                        f"choices.sources.{key}: only 'web' "
+                        "(MCP servers are offered from mcp_servers: label, description, preset)"
+                    )
+                if c.preset and c.preset not in self.presets:
+                    problems.append(f"choices.sources.{key}.preset: no such preset {c.preset!r}")
+            for key, c in self.choices.styles.items():
+                if not c.preset or c.preset not in self.presets:
+                    problems.append(f"choices.styles.{key}.preset: needs a preset of presets (got {c.preset!r})")
+            own = self.choices.own_only_preset
+            if own and own not in self.presets:
+                problems.append(f"choices.own_only_preset: no such preset {own!r}")
         if problems:
             raise ValueError("; ".join(problems))
         return self
@@ -252,6 +486,7 @@ def load_config(path: Path) -> Config:
             hints[name] = entry.hint.strip()
         if entry.tools:
             descs[name] = {t: " ".join(str(d).split()) for t, d in entry.tools.items()}
+    choices = spec.choices
     return Config(
         presets=presets,
         budgets=budgets,
@@ -259,6 +494,21 @@ def load_config(path: Path) -> Config:
         mcp_hints=hints,
         mcp_disabled=disabled,
         mcp_tool_descriptions=descs,
+        sources=(
+            {k: Choice(**c.model_dump()) for k, c in choices.sources.items()}
+            | {  # every MCP server is a source of the card: a new server shows up without further configuration
+                name: Choice(
+                    label=entry.label or name,
+                    description=entry.description or (entry.hint.strip().splitlines() or [name])[0],
+                    preset=entry.preset,
+                )
+                for name, entry in spec.mcp_servers.items()
+            }
+        )
+        if choices
+        else {},
+        styles={k: Choice(**c.model_dump()) for k, c in choices.styles.items()} if choices else {},
+        own_only_preset=choices.own_only_preset if choices else None,
     )
 
 

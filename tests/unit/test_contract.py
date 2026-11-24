@@ -54,11 +54,20 @@ def _route_to(monkeypatch, app):
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: REAL_CLIENT(transport=httpx.ASGITransport(app=app), **kw))
 
 
-def _answer(index):
+def _answer(index, pick=None):
+    """A browser that picks option `index` in cards (in the source card: the recommendation, or `pick`: id -> label)."""
+
     async def call(event):
         if event["type"] == "request:user_input":
-            qid = event["data"]["questions"][0]["id"]
-            return {"status": "answered", "answers": {qid: {"type": "option", "option_index": index}}}
+            qs = event["data"]["questions"]
+            if qs[0]["id"].startswith("src:"):
+                out = {}
+                for q in qs:
+                    labels = [o["label"] for o in q["options"]]
+                    i = labels.index((pick or {})[q["id"]]) if q["id"] in (pick or {}) else 0
+                    out[q["id"]] = {"type": "option", "option_index": i}
+                return {"status": "answered", "answers": out}
+            return {"status": "answered", "answers": {qs[0]["id"]: {"type": "option", "option_index": index}}}
         return None
 
     return call
@@ -76,7 +85,7 @@ async def test_the_real_pipe_talks_to_the_real_service(tmp_path, monkeypatch):
         async def emit(e):
             events.append(e)
 
-        # model "Deep Research": the preset card (first option = the suggestion), then the clarifying questions
+        # model "Deep Research": the source card (answered with the recommendations), then the clarifying questions
         first = {"model": "bebbi_deep_research.auto", "messages": [{"role": "user", "content": "Frage schnell"}]}
         out = await pipe.pipe(first, {"id": "u1"}, __event_emitter__=emit, __event_call__=_answer(0))
         assert "Welcher Zeitraum?" in out
@@ -104,6 +113,15 @@ async def test_the_real_pipe_talks_to_the_real_service(tmp_path, monkeypatch):
         db = app.state.container.db()
         row = (await db.run("select user_id, chat_id, preset, request_id from jobs where id=:i", i=job_id))[0]
         assert row == {"user_id": "u1", "chat_id": "c1", "preset": "grossrat", "request_id": "c1:m1"}
+
+        # another selection: no web search, report style "analyse" -> a mixed preset is planned and queued
+        changed = _answer(0, {"src:web": "Nein", "style": "Ausführliche Analyse"})
+        out = await pipe.pipe(first, {"id": "u2"}, __event_emitter__=emit, __event_call__=changed)
+        second["messages"][1] = {"role": "assistant", "content": out}
+        await pipe.pipe(second, {"id": "u2"}, __event_emitter__=emit, __event_call__=changed, __chat_id__="c2")
+        job_id = mod._state([{"role": "assistant", "content": events[-1]["data"]["content"]}, {"role": "user"}])["job"]
+        row = (await db.run("select preset from jobs where id=:i", i=job_id))[0]
+        assert row["preset"] == "mix:analyse:0:prefer:grossrat"
 
 
 async def test_pipe_of_another_version_shows_the_service_message(tmp_path, monkeypatch):

@@ -76,7 +76,9 @@ def test_empty_final_answer_raises():
     eng, agent = _engine()
 
     eng.llm = ScriptedLLM([say("")] * 6)
-    preset = SimpleNamespace(plan_first=False, language="de", mcp={}, query_rules="", report={}, house_style=True)
+    preset = SimpleNamespace(
+        plan_first=False, language="de", mcp={}, query_rules="", report={}, house_style=True, web=True
+    )
     agent.own = None
     agent.cfg = SimpleNamespace(mcp_servers={})
     eng.cfg = agent.cfg

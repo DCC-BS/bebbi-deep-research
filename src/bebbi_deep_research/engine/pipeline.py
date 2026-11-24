@@ -23,7 +23,7 @@ from .ledger import Card, Ledger, SubQ, quote_in_page
 from .llm import ToolBudget, budgeted_tools
 from .sources import Registry, mcp_to_sources
 from .text import Evidence, checked_numbers, distinctive, fix_sr_labels, split_units, unsupported
-from .tools import domain, domain_match, focus
+from .tools import NoEvidenceError, domain, domain_match, focus
 
 logger = get_logger(__name__)
 
@@ -269,7 +269,7 @@ class PipelineEngine:
     async def _research_subq(self, sq: SubQ, plan: dict, preset: Preset, budget: Budget, led: Ledger) -> int:
         async with self.sem:
             await self.ctx.emit("status", f"Recherche: {sq.text[:90]}")
-            routes = preset.routes.get(sq.intent) or ["web"]
+            routes = [r for r in preset.routes.get(sq.intent) or ["web"] if r != "web" or preset.web]
             added = 0
             if self.ctx.own:
                 try:
@@ -567,6 +567,9 @@ class PipelineEngine:
             todo = await self._reflect(rnd, plan, budget, led)
             if not todo:
                 break
+
+        if not led.cards:  # nothing read: no report from the model's own knowledge without a single citation
+            raise NoEvidenceError(getattr(self.tools, "errors", None))
 
         # write: parts in parallel, then summary and closing part
         self._de = plan["language"] == "de"

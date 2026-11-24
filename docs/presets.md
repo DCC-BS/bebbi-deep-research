@@ -21,6 +21,27 @@ Check a file (for example the ConfigMap copy in kdkp-kiw-k8s-config) before depl
 
 Daytime rule: only `quick` runs of a `focus` preset may start outside the night window.
 
+## Choices
+
+What the card of the model "Deep Research" asks ([integration.md](integration.md#5-chat-flow-and-the-fallback)): one
+Ja/Nein question per source, the chat's files and knowledge bases, then report style and depth.
+
+| Key | Meaning |
+|---|---|
+| `mcp_servers.<name>.label` / `description` / `preset` | every enabled MCP server is a source of the card, asked with this label and description (default: the name and the first line of `hint`); `preset` is the preset whose search rules, writing rules, preferred domains and tool allowlist come with the source. A new server needs no other entry |
+| `choices.sources.web` | label and description of the web-search question (the only key under `choices.sources`) |
+| `choices.styles.<id>` | report style: `label`, `description` (what the plan and the report look like, short: it is an option text) and `preset`, the base preset of the style (its engine and report rules) |
+| `choices.own_only_preset` | base of a focus style when the user's documents are the only source (`dokumente`) |
+
+The service (`Config.resolve_selection`) maps a selection to the preset of the file that uses exactly these sources,
+own-sources mode and style (so the suggestion keeps its tuned preset), else to a mixed preset named
+`mix:<style>:<web 0|1>:<own>:<server+server>`. The name is stored with the draft and the job and resolved again when the
+job runs (`Config.preset`). A mixed preset (`mixed_preset`): the style's preset as base; for a focus style the preset of
+the one ticked data source if exactly one is ticked, or `own_only_preset` for documents only; plus the rules of every
+ticked source's preset. Web search, MCP servers and the own-sources mode are exactly the selection: without web the
+engines offer no web tools and the planner does no discovery search. `GET /options` lists what the card offers,
+`POST /options/resolve` returns `{preset, label}`.
+
 ## Budgets (depth)
 
 `quick`, `standard`, `deep` in `budgets:`. Fields: `rounds`, `max_subq`, `queries_per_subq`, `fetch_per_subq`,
@@ -52,7 +73,8 @@ engine: in every sub-question the best matching uploads and the knowledge hits a
 ## Add a preset
 
 1. Add an entry under `presets:` (copy `grossrat` for a focus preset; set `routes`, `mcp`, `prefer_domains`, `query_rules`, `report`).
-2. Add `name:Label` to the pipe valve `PRESETS` (the preset appears in the card of "Deep Research"; the service
+2. If the preset should be reachable from the card, make sure its sources and style match: each MCP server maps to its
+   preset via `mcp_servers.<name>.preset`, the style via `choices.styles.<id>.preset`. Add `name:Label` to the pipe valve `PRESETS` (the preset appears in the card of "Deep Research"; the service
    suggests it from its `description`) and to `LABELS` and `SUGGESTIONS` in `scripts/build_openwebui_assets.py`; run
    `uv run python scripts/build_openwebui_assets.py`.
 3. Add the label for the Word file to `PRESET_LABELS` in `services/docx_export.py` (without it the Word header shows
@@ -63,7 +85,8 @@ engine: in every sub-question the best matching uploads and the knowledge hits a
 
 ## Add an MCP server
 
-1. Under `mcp_servers:` add `name: {url: https://.../mcp, hint: "how to use its tools"}`. The hint is shown to the focus
+1. Under `mcp_servers:` add `name: {url: https://.../mcp, hint: "how to use its tools", label: ..., description: ...,
+   preset: ...}` (label and description are what the user is asked in the card). The hint is shown to the focus
    engine next to the tools. `enabled: false` keeps it configured but unused.
 2. In presets add `mcp: {name: [tool, ...]}` (allowlist; servers like opencaselaw expose many tools) and, if the server is a
    primary source, `routes: {primary: [mcp:name, web]}`.

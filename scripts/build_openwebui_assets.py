@@ -74,7 +74,6 @@ def build() -> dict[str, str]:
             "created_at": 0,
         },
     ]
-    labels = ", ".join(LABELS.get(name, name) for name in cfg["presets"])
     models = [
         {
             "id": f"{FUNCTION_ID}.auto",
@@ -85,8 +84,9 @@ def build() -> dict[str, str]:
             "is_active": True,
             "meta": {
                 "description": (
-                    "Gründliche Recherche mit Rückfragen und Plan, als Bericht mit Quellen. "
-                    f"Sie wählen, wo recherchiert wird ({labels}); die Recherche läuft über Nacht."
+                    "Gründliche Recherche mit Rückfragen und Plan, als Bericht mit Quellen. Sie wählen die Quellen "
+                    "(Datenquellen, Web, Ihre Dateien und Wissensspeicher), die Art des Berichts und die Tiefe; die "
+                    "Recherche läuft über Nacht."
                 ),
                 # file_upload: the chat offers file upload and knowledge bases (own sources, docs/integration.md);
                 # file_context false: Open WebUI must not run its own retrieval and rewrite the user's message
