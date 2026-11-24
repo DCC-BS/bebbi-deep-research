@@ -76,7 +76,9 @@ class ResearchAgent:
             requirements: Report-format requirements (structure, citation style) only the writer sees.
             own: The user's files and knowledge bases.
         """
-        preset, budget = self.cfg.presets[preset_name], self.cfg.budgets[depth]
+        preset, budget = self.cfg.preset(preset_name), self.cfg.budgets[depth]
+        if preset is None:
+            raise ValueError(f"unknown preset {preset_name!r}")
         self.ctx.own = own_for(own, preset)
         if preset.budget:  # per-preset budget overrides (e.g. more pages for surveys)
             budget = dataclasses.replace(budget, **preset.budget)

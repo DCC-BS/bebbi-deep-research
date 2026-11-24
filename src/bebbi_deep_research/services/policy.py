@@ -13,6 +13,7 @@ import openai
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 
 from bebbi_deep_research.engine.engines import engine_class
+from bebbi_deep_research.engine.tools import NoEvidenceError
 from bebbi_deep_research.utils.app_config import AppConfig
 
 _HOSTS = re.compile(
@@ -35,6 +36,13 @@ def describe_error(e: BaseException) -> str:
         reason = "Das Sprachmodell ist nicht erreichbar."
     elif isinstance(e, UnexpectedModelBehavior):
         reason = "Das Sprachmodell hat keine verwertbare Antwort geliefert."
+    elif isinstance(e, NoEvidenceError):
+        fetch = sum(v for k, v in e.errors.items() if k.startswith("fetch:"))
+        reason = (
+            "Es konnte keine einzige Quelle gelesen werden"
+            + (f" (alle {fetch} Seitenabrufe sind fehlgeschlagen)" if fetch else "")
+            + ". Ohne Belege wird kein Bericht erstellt."
+        )
     elif isinstance(e, TimeoutError):
         reason = "Die Recherche hat das Zeitlimit überschritten."
     elif isinstance(e, httpx2.HTTPError):
@@ -56,7 +64,7 @@ def in_window(settings: AppConfig, now: datetime | None = None) -> bool:
 
 def runs_by_day(cfg, preset: str, depth: str) -> bool:
     """Office hours: only quick runs of an engine that allows it (focus: 20-50k tokens, 2-3 min) start at once."""
-    p = cfg.presets.get(preset)
+    p = cfg.preset(preset)
     return depth == "quick" and p is not None and engine_class(p.engine).runs_by_day
 
 

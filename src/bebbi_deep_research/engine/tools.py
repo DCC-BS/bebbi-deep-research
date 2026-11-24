@@ -84,6 +84,19 @@ def _public_name(host: str) -> bool:
     return labels[-1] in TLDS
 
 
+class NoEvidenceError(RuntimeError):
+    """A research found no readable source (every fetch, data tool and own source failed or gave nothing).
+
+    The engines raise it instead of writing a report from the model's own knowledge without any citation.
+    """
+
+    def __init__(self, errors: dict[str, int] | None = None):
+        """`errors`: failed tool calls by "tool:reason" (e.g. {"fetch:LocalProtocolError": 34})."""
+        self.errors = dict(errors or {})
+        shown = ", ".join(f"{k} {v}x" for k, v in sorted(self.errors.items())) or "keine Fehler gemeldet"
+        super().__init__(f"no evidence found ({shown})")
+
+
 class Tools:
     """Web search (Serper) and page fetching (Firecrawl) for one research.
 
@@ -157,7 +170,8 @@ class Tools:
             r = await self.http.post(
                 f"{self.firecrawl_url}/v2/scrape",
                 json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
-                headers={"Authorization": f"Bearer {self.firecrawl_key}"},
+                # no key (an in-cluster Firecrawl without auth): no header; "Bearer " alone is an illegal header value
+                headers={"Authorization": f"Bearer {self.firecrawl_key}"} if self.firecrawl_key else {},
             )
         except httpx2.HTTPError as e:
             self._failed("fetch", type(e).__name__, url)

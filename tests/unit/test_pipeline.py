@@ -225,3 +225,35 @@ async def test_pipeline_run_end_to_end_with_fakes():
     assert "250 Franken [1]" in res.report and "9999" not in res.report  # the invented number is dropped
     assert "https://example.ch/gebuehren" in res.report.split("## Quellen")[1]
     assert res.stats["cards"] == 1 and [c["id"] for c in res.ledger["cards"]] == ["E1"]
+
+
+async def test_pipeline_without_any_readable_page_writes_no_report():
+    """Search works but every fetch fails (the test-stage case of 2026-11-23): no report from the model's knowledge."""
+    import pytest
+
+    from bebbi_deep_research.engine.tools import NoEvidenceError
+
+    plan = {
+        "title": "Wohnungsmarkt",
+        "task_core": "Leerstand",
+        "language": "de",
+        "parts": [{"id": "P1", "title": "Leerstand", "goal": "g"}],
+        "sub_questions": [{"id": "Q1", "part": "P1", "text": "Wie hoch ist der Leerstand?", "intent": "primary"}],
+        "must_name": [],
+        "constraints": [],
+    }
+    tools = FakeTools()
+    tools.errors = {"fetch:LocalProtocolError": 3}
+
+    async def search(q, lang="de", num=8):
+        return [{"title": "Leerstand", "url": "https://statistik.bs.ch/x", "snippet": "s", "date": ""}]
+
+    async def fetch(url):
+        return "", ""  # a failed scrape
+
+    tools.search, tools.fetch = search, fetch
+    llm = ScriptedLLM(text_out={"queries": "de | leerstand basel", "write": "Erfunden [E1]."})
+    agent = agent_for(llm, tools)
+    with pytest.raises(NoEvidenceError) as e:
+        await agent.run("Leerstand?", "web_survey", "quick", plan=plan)
+    assert e.value.errors == {"fetch:LocalProtocolError": 3} and "write" not in llm.steps

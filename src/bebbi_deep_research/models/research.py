@@ -20,7 +20,7 @@ class ClarifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")  # an unknown field is a contract mismatch, not something to ignore
 
     task: str = Field(max_length=20_000)
-    preset: str = Field("verwaltung_web", max_length=100)
+    preset: str = Field("verwaltung_web", max_length=300)  # a preset of the file or a mixed one (mix:...)
     depth: str = Field("standard", max_length=100)
     user_id: str | None = Field(None, max_length=200)
     own_sources: OwnSourcesRequest | None = None
@@ -52,3 +52,15 @@ class SubmitJobRequest(BaseModel):
     message_id: str | None = Field(None, max_length=200)
     when: RunWhen = RunWhen.NIGHT
     own_sources: OwnSourcesRequest | None = None
+
+
+class SelectionRequest(BaseModel):
+    """What the user picked in the Deep Research card: sources (step 1) and report style (step 2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    web: bool = True
+    mcp: list[str] = Field(default_factory=list, max_length=20)  # MCP servers of `choices.sources`
+    own: str = Field("prefer", pattern="^(prefer|only|off)$")  # the user's files and knowledge bases
+    style: str = Field(max_length=100)
+    own_attached: bool = True  # the chat has files or knowledge bases (else the line does not mention them)

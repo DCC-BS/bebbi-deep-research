@@ -6,7 +6,7 @@ from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends
 
 from bebbi_deep_research.container import Container
-from bebbi_deep_research.models.research import ClarifyRequest, CreatePlanRequest, EditPlanRequest
+from bebbi_deep_research.models.research import ClarifyRequest, CreatePlanRequest, EditPlanRequest, SelectionRequest
 from bebbi_deep_research.routers.auth import require_token
 from bebbi_deep_research.routers.contract import require_api_version
 from bebbi_deep_research.services.research_service import ResearchService
@@ -21,6 +21,24 @@ async def list_presets(
 ) -> list[dict[str, str]]:
     """List the research presets."""
     return service.list_presets()
+
+
+@router.get("/options")
+@inject
+async def options(
+    preset: str | None = None, service: ResearchService = Depends(Provide[Container.research_service])
+) -> dict[str, Any]:
+    """Sources, report styles and depths of the Deep Research card, preselected for `preset`."""
+    return service.options(preset)
+
+
+@router.post("/options/resolve")
+@inject
+async def resolve(
+    request: SelectionRequest, service: ResearchService = Depends(Provide[Container.research_service])
+) -> dict[str, str]:
+    """The preset for a selection of the card (a preset of the file or a mixed one) and its description line."""
+    return service.resolve(request)
 
 
 @router.post("/clarify")

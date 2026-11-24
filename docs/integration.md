@@ -152,10 +152,25 @@ The manifold creates the model "Deep Research" (`bebbi_deep_research.auto`) auto
 ## 5. Chat flow and the fallback
 
 1. First message: with the model "Deep Research", `POST /clarify` with `suggest_preset: true` returns the clarifying
-   questions and the preset that fits the task; the pipe shows an ask-user card "Wo soll recherchiert werden?" with that
-   preset first ("empfohlen") and the others below (descriptions from `GET /presets`). No answer: no research. The
-   chosen preset is kept in the state marker through the questions. Then the pipe asks up to two clarifying questions
-   (answer, or "weiter").
+   questions and the preset that fits the task. The pipe then shows Open WebUI's ask-user card above the input field
+   (`request:user_input`, the same card as the plan decision; one question at a time, "Previous" goes back and keeps the
+   earlier answers, the answer to the last question submits). `GET /options?preset=<suggested>` gives what it asks,
+   recommendation first (the card marks the first option "Recommended"):
+   - one Ja/Nein question per data source: every enabled server of `mcp_servers` (label and description from its
+     entry, so a new server shows up without changing the pipe), then web search;
+   - the chat's uploaded files and its knowledge bases (attached to the question or the model), each Ja/Nein, with the
+     names found. Without attachments "Nein" comes first and "Ja" says how to attach them (files: "+" or drag and drop;
+     knowledge base: "#"); picking "Ja" without attachments ends the turn with that instruction. What is switched off is
+     not sent to the service (also not on submit). Documents on and every other source off: own sources only;
+   - report style (`choices.styles`, with what the plan and the report look like) and depth (rounds, tool calls, length).
+
+   No source at all: the card is shown again with a hint (at most three times). `POST /options/resolve` turns the
+   answers into a preset name: the preset of the file that uses exactly these sources and style, else a mixed preset
+   `mix:<style>:<web>:<own>:<servers>` ([presets.md](presets.md#choices)). The plan names the selection ("Quellen: … ·
+   Bericht: …") and the status trail shows it with the depth. Cancel or no answer: no research. Preset, line, depth and
+   the files/knowledge switches are kept in the state marker through the questions. Then the pipe asks up to two
+   clarifying questions (answer, or "weiter"), then shows the plan. A service without `choices` (404 on `/options`) gets
+   the earlier one-question card "Wo soll recherchiert werden?". A preset model (`PRESET_MODELS`) skips the card.
 2. Plan shown, then Open WebUI's ask-user card above the input field (`__event_call__` with `request:user_input`, the
    dialog Open WebUI v0.11 uses for its `ask_user` tool), in the same turn: **Freigeben** queues the job for the night
    window, **Ändern** opens an input dialog for the change, the plan is edited and the card shown again (max 3 changes,
@@ -517,6 +532,7 @@ test_real_helpers_use_open_webui_functions` fails if our wiring changes, but not
 | Fewer repeated context lists (0.13.4, #34257: the skills list and attached knowledge are added before a reply only when they changed or after compaction; recalled memories already in the chat are not sent again) | a request can hold the hidden tool results before an earlier turn and none after the current user message. `_hidden_results` then says no, `hold` keeps using `replace`, the state marker is read from the answer before the turn (and from the stored chat) | `test_hidden_results_before_the_turn_and_none_after_it_are_no_hidden_results` |
 | Failed context compaction (`middleware.py` `compact_history`: the item `open_webui:context_compaction` with status `failed` stays in the reply's `output`; while it runs the item is removed again on success) | same risk class as hidden tool results: a non-empty `output` is rendered in preference to `content`, so a `replace`-only queued message would show an empty bubble until the delivery arrives (the route's `_output_with_text` adds the report as text item to any non-empty `output`, so the delivered report shows). The pipe's `hold` only returns the text when it sees hidden tool results, not for this item. Not reproduced (needs a failing compaction model: `CONTEXT_COMPACTION_MODEL` is empty, the pipe answers the summary request with an empty text, which is a fallback, not a failure); open | not tested live |
 | Pipe Valves button (`has_user_valves` from `UserValves` in `functions.py`; `MessageInput.svelte` since 0.12.4 also needs the permission `chat.valves`) | the pipe has no `UserValves`: users never edit valves, the valves are admin valves (Admin, Functions) | `functions.py` |
+| Ask-user card `request:user_input` (0.13.4: frontend shows `questions` one at a time with Previous / Next / "Submit answers", the first option labelled "Recommended", an option click on the last question submits; no limit on the number of questions or options for events sent by a function, unlike the `ask_user` tool's 1-3 / 2-3) | the source card of model "Deep Research" and the plan decision | section 5 |
 | `source` events, `metadata.source` / `metadata.name` unique per source | citation badges | section 5a |
 | `open_webui.routers.files.upload_file_handler`, `open_webui.models.users.Users` | Word file as the user's file | section 5a |
 | `__files__` / `__metadata__["files"]` and `["user_message"]` of a pipe; item types `file`, `collection` | which attachments the chat has (own sources) | `functions.py`, `utils/middleware.py` |

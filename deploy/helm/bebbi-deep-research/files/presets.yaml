@@ -14,6 +14,9 @@
 mcp_servers:
   opencaselaw:
     url: https://mcp.opencaselaw.ch/
+    label: Gesetze und Rechtsprechung
+    description: Erlasse von Bund und Kantonen (mit SG- bzw. SR-Nummer) und Gerichtsentscheide. Externer Dienst opencaselaw.ch.
+    preset: rechtsrecherche
     hint: |
       opencaselaw (Swiss law, external): search_legislation finds whole enactments by name or topic
       (canton code, e.g. canton="BS"); get_law returns the text of one article (canton + systematic number
@@ -27,6 +30,9 @@ mcp_servers:
       get_erwaegung: Verbatim text of one numbered consideration (Erwägung) of a decision.
   data-bs:
     url: https://mcp.data.bs.ch/mcp
+    label: Open Data Basel-Stadt
+    description: Datensätze von data.bs.ch. Zahlen und Zeitreihen mit Datensatz, Stichtag und Einheit.
+    preset: statistik
     hint: |
       data_bs (open data portal data.bs.ch): get_datasets finds datasets by topic; call get_dataset before
       get_records to learn the real field names; get_records with group_by/order_by/limit returns figures
@@ -38,6 +44,9 @@ mcp_servers:
       get_records: Rows of a dataset with ODSQL select/where/group_by/order_by/limit. Use field names from get_dataset; text year fields need group_by/order_by, not >=.
   grossrat:
     url: https://mcp-grosserrat.statistik.bs.ch/mcp
+    label: Grosser Rat Basel-Stadt
+    description: Alle Geschäfte, Vorstösse, Antworten des Regierungsrats und Beschlüsse seit 1973, im Volltext.
+    preset: grossrat
     hint: |
       grossrat (all business of the Grosser Rat Basel-Stadt since 1973, full texts): to list the business
       items on a topic use find_geschaefte with 3-6 German phrasings (council wording, whole compounds such as
@@ -52,6 +61,9 @@ mcp_servers:
       list_facets: Allowed values of a filter (partei, geschaeftsart, status, dokumentart) in exact spelling.
   statistik:
     url: https://mcp.statistik.bs.ch/mcp
+    label: Indikatorenportal Statistik
+    description: Indikatoren und Zeitreihen des Statistischen Amts Basel-Stadt.
+    preset: statistik
     enabled: false            # not working yet (2026-10-09): switch on when the server is fixed
     hint: |
       statistik (Indikatorenportal statistik.bs.ch): search_indicators with German terms, get_indicator for
@@ -60,6 +72,31 @@ mcp_servers:
       search_indicators: Find indicators of the Statistisches Amt Basel-Stadt with German terms. Returns ids, titles, portal URLs.
       get_indicator: Definition, sources and notes of one indicator.
       get_indicator_data: Time series of one indicator (headers, rows, unit, source, portal URL).
+
+# What the user picks in the Deep Research card (docs/presets.md#choices): one question per source (web and every
+# enabled server of mcp_servers, with its label, description and preset), then the user's files and knowledge bases. The user's uploaded files and knowledge bases are always
+# used unless the user switches them off. Step 2: report style and depth. The selection becomes the preset of the file
+# that uses exactly these sources and style, else a mixed preset: the style's preset as base (for a focus style with
+# one ticked data source: that source's preset), plus the search and writing rules of every ticked source's preset.
+choices:
+  sources:
+    web:
+      label: Websuche
+      description: Öffentliche Webseiten über die Suchmaschine. Amtliche Seiten (bs.ch, admin.ch, Kantone) haben Vorrang vor Medien.
+  styles:
+    kompakt:
+      label: Kurze Verwaltungsantwort
+      description: >-
+        Plan als kurze Checkliste. Bericht in kurzen Abschnitten, jede Aussage mit Quelle, am Schluss offene Punkte.
+        Für Recht, Grossen Rat, Zahlen und Verwaltung.
+      preset: verwaltung_web
+    analyse:
+      label: Ausführliche Analyse
+      description: >-
+        Plan mit mehreren Teilen. Mehrere Recherche-Runden, jedes Zitat wird geprüft. Ausführlicher Bericht mit
+        Analyseteil. Für breite Themen (international, Technologie, Märkte). Dauert länger.
+      preset: web_survey
+  own_only_preset: dokumente   # base of a short answer when the user's documents are the only source
 
 budgets:
   # rounds: research rounds incl. follow-ups; max_subq: sub-questions in the plan;

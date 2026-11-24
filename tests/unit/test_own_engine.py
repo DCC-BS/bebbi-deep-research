@@ -3,6 +3,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from bebbi_deep_research.engine import ResearchAgent, load_config
 from bebbi_deep_research.engine.ledger import Ledger, SubQ
 from bebbi_deep_research.engine.own import (
@@ -18,6 +20,7 @@ from bebbi_deep_research.engine.own import (
 )
 from bebbi_deep_research.engine.pipeline import PipelineEngine
 from bebbi_deep_research.engine.sources import Registry
+from bebbi_deep_research.engine.tools import NoEvidenceError
 
 from .scripted_llm import ScriptedLLM, say
 
@@ -274,7 +277,8 @@ async def test_focus_prefer_mode_keeps_web_tools_and_adds_the_own_tools():
 async def test_focus_off_mode_ignores_attached_sources():
     llm = focus_llm(say("# B\n\n## Zusammenfassung\n\nText."))
     agent = make_agent(llm, "verwaltung_web", own_sources="off")
-    await agent.run("Frage", "verwaltung_web", "quick", plan=PLAN, own=make_own())
+    with pytest.raises(NoEvidenceError):  # the model called no tool: nothing read, no report
+        await agent.run("Frage", "verwaltung_web", "quick", plan=PLAN, own=make_own())
     assert llm.calls[0]["tools"] == ["web_search", "fetch_page"] and agent.ctx.own is None
     assert "OWN SOURCES" not in llm.calls[0]["instructions"]
 
@@ -282,7 +286,8 @@ async def test_focus_off_mode_ignores_attached_sources():
 async def test_focus_without_own_sources_is_unchanged():
     llm = focus_llm(say("# B\n\n## Zusammenfassung\n\nText."))
     agent = make_agent(llm)
-    await agent.run("Frage", "verwaltung_web", "quick", plan=PLAN)
+    with pytest.raises(NoEvidenceError):  # the model called no tool: nothing read, no report
+        await agent.run("Frage", "verwaltung_web", "quick", plan=PLAN)
     assert llm.calls[0]["tools"] == ["web_search", "fetch_page"] and "OWN SOURCES" not in llm.calls[0]["instructions"]
 
 
