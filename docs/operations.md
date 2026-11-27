@@ -229,9 +229,21 @@ the `request_id` of its submit (`jobs.request_id`), and every line of its run (e
 carries `job_id` and that `request_id`, so `request_id` finds a chat's requests and its night run. Job messages: `job queued`,
 `job started`, `job done` (with `runtime_s`, `calls`, `prompt_tokens`, `completion_tokens`), `job failed`,
 `job re-queued on shutdown`, `job cancelled` / `run stopped: job cancelled`, `delivery ok` / `delivery failed`,
-`re-queued stale jobs`. Usage events (`app_event`)
-`research.plan` and `research.submit` carry a pseudonymised user id (HMAC), never the raw id. Token usage per run is
-also in `GET /jobs/{id}` under `stats.usage`. Use the `/metrics` endpoint and log shipping.
+`re-queued stale jobs`. Usage events (`app_event`, field `action`) carry a pseudonymised user id (`pseudonym_id`,
+HMAC), never the raw id: `research.plan` and `research.submit` (`preset`, `depth`), `research.cancel`, and one event per
+finished run, the source for dashboards on volume, outcome, runtime and cost:
+
+| `action` | Fields |
+|---|---|
+| `research.done` | `job_id`, `preset`, `depth`, `engine`, `style` (mixed presets only), `web`, `own_mode`, `mcp_servers` (`a+b`), `mcp_count`, `own_files`, `own_collections`, `daytime`, `queued_s`, `runtime_s`, `llm_calls`, `prompt_tokens`, `completion_tokens`, `sources`, `delivery` (`ok`, `failed`, `skipped`) |
+| `research.failed` | the same preset fields, `reason` (`error`, `timeout`, `interrupted`), `error_type`; `runtime_s` and `daytime` except for `interrupted` |
+
+A re-delivery logs no second event. Example (OpenSearch): `log_json.app:"bebbi-deep-research" and
+log_json.action:"research.done"`, split by `log_json.preset` or `log_json.depth`. Token usage per run is also in
+`GET /jobs/{id}` under `stats.usage`. `/metrics` holds the current state (jobs per status, engine counters); the chart's
+`serviceMonitor.enabled` lets the Prometheus operator scrape it (needs `extraIngressFrom` for Prometheus, see
+NetworkPolicy). Job counts there cover only jobs still in the database (`RA_JOB_RETENTION_DAYS`); for history use the
+events.
 
 Engine lines (written during a run; they carry the `job_id` the job runner binds to the log context). They name
 hosts, never search queries, page paths or document text:

@@ -13,6 +13,14 @@ imagePullSecrets: []
 service:
   port: 8088
 
+# ServiceMonitor for the Prometheus operator (needs its CRD). /metrics counts the database's jobs per status on every
+# scrape, so keep the interval at a minute or more.
+serviceMonitor:
+  enabled: false
+  interval: 60s
+  scrapeTimeout: 10s
+  labels: {}                 # e.g. the label your Prometheus' serviceMonitorSelector matches
+
 # Plain (non-secret) configuration as environment variables.
 env:
   RA_LLM_BASE_URL: http://vllm.llm.svc:8000/v1
