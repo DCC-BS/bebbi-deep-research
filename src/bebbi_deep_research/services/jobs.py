@@ -14,6 +14,7 @@ from dcc_backend_common.logger import get_logger
 from structlog.contextvars import bind_contextvars, bound_contextvars
 
 from bebbi_deep_research.engine import LLM, ResearchAgent, Tools
+from bebbi_deep_research.engine.config import MIX
 from bebbi_deep_research.engine.llm import LlmSettings, llm_limiter
 from bebbi_deep_research.services.db import DB
 from bebbi_deep_research.services.own_sources import to_engine, without_texts
@@ -93,7 +94,7 @@ async def close_agent(agent) -> None:
         try:
             await llm.aclose()
         except Exception as e:  # closing is best effort; the job result is already stored
-            logger.warning("llm clients not closed", error=repr(e)[:200])
+            logger.warning("llm clients not closed", error=e)
     http = getattr(getattr(agent, "tools", None), "http", None)
     if http is not None:
         try:
@@ -106,7 +107,13 @@ class JobRunner:
     """Worker loop: claims queued jobs (night window, daytime rule), runs them, re-queues stale ones, delivers."""
 
     def __init__(
-        self, settings: AppConfig, db: DB, cfg, agent_factory: Callable[..., ResearchAgent], http_factory=None
+        self,
+        settings: AppConfig,
+        db: DB,
+        cfg,
+        agent_factory: Callable[..., ResearchAgent],
+        http_factory=None,
+        usage=None,
     ):
         """Create the runner (the loop starts with `start`).
 
@@ -116,8 +123,10 @@ class JobRunner:
             cfg: Presets and budgets.
             agent_factory: ``agent_factory(job_id, on_event)`` builds the research agent of a job.
             http_factory: Returns the HTTP client for Open WebUI calls (tests pass a fake).
+            usage: Usage events (`research.done`, `research.failed`); None logs none.
         """
         self.settings, self.db, self.cfg, self.make_agent = settings, db, cfg, agent_factory
+        self.usage = usage
         self.http_factory = http_factory or (lambda: httpx2.AsyncClient(timeout=30))
         self.tasks: dict[str, asyncio.Task] = {}
         # job id -> claim token of this run (only the claiming run may write the final status)
@@ -159,7 +168,7 @@ class JobRunner:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error("worker loop error", error=repr(e))
+                logger.error("worker loop error", error=e)
             await asyncio.sleep(self.settings.poll_seconds)
 
     async def purge(self, now: float) -> None:
@@ -207,7 +216,8 @@ class JobRunner:
                     self._stop_run(jid)
         stale = "status in ('starting','running') and coalesce(heartbeat, created) < :t"
         for r in await self.db.run(
-            f"select id, user_id, chat_id, message_id, own_sources, request_id from jobs where {stale} "
+            "select id, user_id, chat_id, message_id, own_sources, request_id, preset, depth, created, started "
+            f"from jobs where {stale} "
             "and coalesce(attempts,0) >= :m",
             t=now - s.stale_seconds,
             m=MAX_ATTEMPTS,
@@ -227,6 +237,7 @@ class JobRunner:
             ):
                 with log_context(r):
                     logger.error("job given up after repeated interruptions", attempts=MAX_ATTEMPTS)
+                    self._outcome("research.failed", r, reason="interrupted", error_type="Interrupted")
                     await self._safe_deliver(r, f"Die Recherche ist fehlgeschlagen. {msg}")
         n = await self.db.execute(f"update jobs set status='queued', owner=null where {stale}", t=now - s.stale_seconds)
         if n:
@@ -351,9 +362,10 @@ class JobRunner:
                     o=owner,
                 )
             except Exception as e:
-                logger.warning("progress not stored", error=repr(e)[:200])
+                logger.warning("progress not stored", error=e)
 
         started = time.time()
+        daytime = job_id in self.day
         agent = None
         try:
             job = (await self.db.run("select * from jobs where id=:i", i=job_id))[0]
@@ -412,7 +424,16 @@ class JobRunner:
                 logger.warning("job re-queued on shutdown")
             raise
         except Exception as e:
-            logger.error("job failed", error=repr(e)[:500])
+            logger.error("job failed", error=e)
+            if job:
+                self._outcome(
+                    "research.failed",
+                    {**job, "started": started},
+                    reason="timeout" if isinstance(e, TimeoutError) else "error",
+                    error_type=type(e).__name__,
+                    daytime=daytime,
+                    runtime_s=round(time.time() - started, 1),
+                )
             message = describe_error(e)
             try:
                 mine = await self.db.execute(
@@ -424,7 +445,7 @@ class JobRunner:
                     o=owner,
                 )
             except Exception as e2:  # database down as well: the stale-job requeue takes over
-                logger.error("job error not stored", error=repr(e2)[:200])
+                logger.error("job error not stored", error=e2)
                 mine = 0
             if mine and job:
                 await self._safe_deliver(job, f"Die Recherche ist fehlgeschlagen. {message}")
@@ -433,29 +454,82 @@ class JobRunner:
             if agent is not None:
                 await asyncio.shield(close_agent(agent))
         # delivery is separate from the run: a failure or a cancel here never touches the status of a finished job
-        await self._deliver_done(job, res.report, res.ledger)
+        delivery, sources = await self._deliver_done(job, res.report, res.ledger)
+        u = res.usage or {}
+        self._outcome(
+            "research.done",
+            {**job, "started": started},
+            daytime=daytime,
+            runtime_s=round(time.time() - started, 1),
+            llm_calls=u.get("calls"),
+            prompt_tokens=u.get("prompt_tokens"),
+            completion_tokens=u.get("completion_tokens"),
+            sources=sources,
+            delivery=delivery,
+        )
 
-    async def _deliver_done(self, job: dict, report: str, ledger: dict | None) -> None:
+    def _outcome(self, action: str, job: dict, **fields) -> None:
+        """Log the usage event of a finished run: what was researched (preset and its sources) and how it went.
+
+        Flat fields only (logging contract): `preset`, `depth`, `engine`, `style` (mixed presets), `web`, `own_mode`,
+        `mcp_servers` ("a+b"), `mcp_count`, `own_files`, `own_collections`, `queued_s`, plus the caller's fields.
+        Never raises: telemetry must not change the outcome of a job.
+        """
+        if self.usage is None:
+            return
+        try:
+            name = job.get("preset") or ""
+            preset = self.cfg.preset(name) if self.cfg is not None else None
+            parts = name.split(":")
+            own = json.loads(job.get("own_sources") or "null") or {}
+            created, started = job.get("created"), job.get("started")
+            info = {
+                "job_id": job.get("id"),
+                "preset": name,
+                "depth": job.get("depth"),
+                "engine": getattr(preset, "engine", None),
+                "style": parts[1] if name.startswith(MIX + ":") and len(parts) > 1 else None,
+                "web": getattr(preset, "web", None),
+                "own_mode": getattr(preset, "own_sources", None),
+                "mcp_servers": "+".join(sorted(preset.mcp)) if preset else None,
+                "mcp_count": len(preset.mcp) if preset else None,
+                "own_files": len(own.get("files") or []) if isinstance(own, dict) else 0,
+                "own_collections": len(own.get("collections") or []) if isinstance(own, dict) else 0,
+                "queued_s": round(started - created, 1) if created and started else None,
+                **fields,
+            }
+            # log_event binds pseudonym_id into the context; bound_contextvars restores it, so it never leaks
+            # into the worker loop's later lines
+            with bound_contextvars(pseudonym_id=None):
+                self.usage.log_event(action, job.get("user_id"), **{k: v for k, v in info.items() if v is not None})
+        except Exception as e:
+            logger.warning("usage event not logged", action=action, error=e)
+
+    async def _deliver_done(self, job: dict, report: str, ledger: dict | None) -> tuple[str, int]:
+        """Deliver the report; returns the delivery outcome (ok, skipped, failed) and the number of sources."""
+        n = 0
         try:
             sources = build_sources(report, ledger)
             report, sources = limit_sources(report, sources)  # the route takes 200 sources: keep the most cited
-            await self.deliver(job, ui_markdown(report, sources), sources)
+            n = len(sources)
+            return await self.deliver(job, ui_markdown(report, sources), sources), n
         except Exception as e:
-            logger.error("delivery error", error=repr(e)[:300])
+            logger.error("delivery error", error=e)
             try:
                 await self.db.execute(
                     "update jobs set delivery=:d where id=:i", d=f"failed: {type(e).__name__}: {e}"[:300], i=job["id"]
                 )
             except Exception:
                 pass
+            return "failed", n
 
     async def _safe_deliver(self, job: dict, content: str) -> None:
         try:
             await self.deliver(job, content)
         except Exception as e:
-            logger.error("delivery error", error=repr(e)[:300])
+            logger.error("delivery error", error=e)
 
-    async def deliver(self, job: dict, content: str, sources: list[dict] | None = None) -> None:
+    async def deliver(self, job: dict, content: str, sources: list[dict] | None = None) -> str:
         """Write the finished report into the Open WebUI assistant message of the job.
 
         Only if the delivery endpoint is configured and the job came from a chat. One call to the endpoint that the
@@ -476,7 +550,7 @@ class JobRunner:
         ):
             await self.db.execute("update jobs set delivery='skipped' where id=:i", i=job["id"])
             logger.info("delivery skipped", reason="no delivery endpoint/secret or job without chat")
-            return
+            return "skipped"
         envelope = {
             "chat_id": job["chat_id"],
             "message_id": job["message_id"],
@@ -508,3 +582,4 @@ class JobRunner:
         else:
             logger.error("delivery failed", chat=job["chat_id"], outcome=outcome)
         await self.db.execute("update jobs set delivery=:d where id=:i", d=outcome[:300], i=job["id"])
+        return "ok" if outcome == "ok" else "failed"
